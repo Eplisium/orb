@@ -180,7 +180,7 @@ enum SidebarSection: String, CaseIterable, Identifiable {
         case .allModels: return "square.grid.2x2"
         case .favorites: return "star.fill"
         case .newThisWeek: return "sparkles"
-        case .playground: return "bubble.left.and.bubble.right"
+        case .playground: return "wand.and.stars"
         case .account: return "gearshape.fill"
         }
     }
@@ -199,22 +199,25 @@ struct ContentView: View {
     @FocusState private var searchFocused: Bool
 
     var body: some View {
-        NavigationSplitView {
-            sidebar
-        } content: {
+        Group {
             if selectedSection.isBrowser {
-                modelListColumn
+                NavigationSplitView {
+                    sidebar
+                } content: {
+                    modelListColumn
+                } detail: {
+                    detailColumn
+                }
             } else {
-                // Empty spacer for non-browser sections
-                Color.clear
-            }
-        } detail: {
-            if selectedSection.isBrowser {
-                detailColumn
-            } else if selectedSection == .playground {
-                ChatView(viewModel: vm)
-            } else if selectedSection == .account {
-                SettingsView()
+                NavigationSplitView {
+                    sidebar
+                } detail: {
+                    if selectedSection == .playground {
+                        ChatView(viewModel: vm)
+                    } else if selectedSection == .account {
+                        SettingsView()
+                    }
+                }
             }
         }
         .navigationSplitViewStyle(.balanced)

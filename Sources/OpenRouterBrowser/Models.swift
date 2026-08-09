@@ -506,7 +506,13 @@ struct ChatConversation: Identifiable, Equatable {
     var totalCost: Double
     var totalTokens: Int
 
-    init(id: UUID = UUID(), title: String = "New Chat", modelId: String, messages: [ChatMessage] = [], createdAt: Date = Date()) {
+    init(
+        id: UUID = UUID(),
+        title: String = "New Agent Session",
+        modelId: String,
+        messages: [ChatMessage] = [],
+        createdAt: Date = Date()
+    ) {
         self.id = id
         self.title = title
         self.modelId = modelId

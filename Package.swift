@@ -8,6 +8,11 @@ let package = Package(
         .executableTarget(
             name: "OpenRouterBrowser",
             path: "Sources/OpenRouterBrowser"
+        ),
+        .testTarget(
+            name: "OpenRouterBrowserTests",
+            dependencies: ["OpenRouterBrowser"],
+            path: "Tests/OpenRouterBrowserTests"
         )
     ]
 )
