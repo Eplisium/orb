@@ -157,7 +157,7 @@ let icnsPath = URL(fileURLWithPath: "\(projectDir)/\(appName).app/Contents/Resou
 let proc = Process()
 proc.launchPath = "/usr/bin/iconutil"
 proc.arguments = ["-c", "icns", iconsetPath.path, "-o", icnsPath.path]
-proc.launch()
+try? proc.run()
 proc.waitUntilExit()
 
 try? FileManager.default.removeItem(at: iconsetPath)

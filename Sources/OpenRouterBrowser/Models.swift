@@ -48,6 +48,11 @@ struct ModelInfo: Codable, Identifiable, Hashable {
         id.split(separator: "/").dropFirst().joined(separator: "/")
     }
 
+    /// Providers with `~` prefix are unofficial mirrors on OpenRouter.
+    var isUnofficial: Bool {
+        provider.hasPrefix("~")
+    }
+
     var promptCostPer1M: Double? {
         guard let s = pricing?.prompt, let d = Double(s), d > 0 else { return nil }
         return d * 1_000_000
@@ -85,6 +90,10 @@ struct ModelInfo: Codable, Identifiable, Hashable {
         inputModalities.contains("image")
     }
 
+    var supportsAudioInput: Bool {
+        inputModalities.contains("audio")
+    }
+
     var supportsImageOutput: Bool {
         outputModalities.contains("image")
     }
@@ -110,9 +119,21 @@ struct ModelInfo: Codable, Identifiable, Hashable {
     }
 
     var hasExpired: Bool {
-        guard let d = expirationDate, let dt = ISO8601DateFormatter().date(from: d) else { return false }
-        return dt < Date()
+        guard let d = expirationDate else { return false }
+        return ModelInfo.isoFormatter.date(from: d).map { $0 < Date() } ?? false
     }
+
+    private static let isoFormatter: ISO8601DateFormatter = {
+        let f = ISO8601DateFormatter()
+        f.formatOptions = [.withInternetDateTime]
+        return f
+    }()
+
+    private static let dateFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.dateStyle = .medium
+        return f
+    }()
 
     var contextLengthFormatted: String {
         guard let ctx = contextLength else { return "N/A" }
@@ -128,9 +149,7 @@ struct ModelInfo: Codable, Identifiable, Hashable {
 
     var createdFormatted: String {
         guard let d = createdDate else { return "N/A" }
-        let f = DateFormatter()
-        f.dateStyle = .medium
-        return f.string(from: d)
+        return ModelInfo.dateFormatter.string(from: d)
     }
 
     var knowledgeCutoffFormatted: String {
@@ -321,7 +340,183 @@ enum ModalityFilter: String, CaseIterable, Identifiable {
     case textOnly = "Text Only"
     case multimodal = "Multimodal"
     case imageOut = "Image Out"
+    case tools = "Tools"
+    case reasoning = "Reasoning"
     case freeOnly = "Free Only"
 
     var id: String { rawValue }
+}
+
+// MARK: - Credits
+
+struct CreditsResponse: Codable {
+    let data: CreditsData
+}
+
+struct CreditsData: Codable {
+    let totalCredits: Double
+    let totalUsage: Double
+
+    var remaining: Double { totalCredits - totalUsage }
+
+    enum CodingKeys: String, CodingKey {
+        case totalCredits = "total_credits"
+        case totalUsage = "total_usage"
+    }
+}
+
+// MARK: - Activity
+
+struct ActivityResponse: Codable {
+    let data: [ActivityItem]
+}
+
+struct ActivityItem: Codable, Identifiable {
+    let date: String
+    let model: String
+    let modelPermaslug: String?
+    let endpointId: String?
+    let providerName: String?
+    let usage: Double
+    let byokUsageInference: Double?
+    let requests: Int
+    let promptTokens: Int
+    let completionTokens: Int
+    let reasoningTokens: Int
+
+    var id: String { "\(date)-\(model)-\(endpointId ?? "")" }
+
+    enum CodingKeys: String, CodingKey {
+        case date, model, usage, requests
+        case modelPermaslug = "model_permaslug"
+        case endpointId = "endpoint_id"
+        case providerName = "provider_name"
+        case byokUsageInference = "byok_usage_inference"
+        case promptTokens = "prompt_tokens"
+        case completionTokens = "completion_tokens"
+        case reasoningTokens = "reasoning_tokens"
+    }
+}
+
+// MARK: - Chat Completions
+
+struct ChatCompletionRequest: Codable {
+    let model: String
+    let messages: [ChatMessage]
+    let stream: Bool?
+    let maxTokens: Int?
+    let temperature: Double?
+    let topP: Double?
+    let frequencyPenalty: Double?
+    let presencePenalty: Double?
+    let seed: Int?
+    let responseFormat: ResponseFormat?
+
+    enum CodingKeys: String, CodingKey {
+        case model, messages, stream, seed, temperature
+        case maxTokens = "max_tokens"
+        case topP = "top_p"
+        case frequencyPenalty = "frequency_penalty"
+        case presencePenalty = "presence_penalty"
+        case responseFormat = "response_format"
+    }
+}
+
+struct ResponseFormat: Codable {
+    let type: String
+}
+
+struct ChatMessage: Codable, Identifiable, Equatable {
+    var id: UUID = UUID()
+    let role: String
+    var content: String
+
+    enum CodingKeys: String, CodingKey {
+        case role, content
+    }
+
+    static func == (lhs: ChatMessage, rhs: ChatMessage) -> Bool {
+        lhs.id == rhs.id && lhs.role == rhs.role && lhs.content == rhs.content
+    }
+}
+
+struct ChatCompletionResponse: Codable {
+    let id: String?
+    let choices: [ChatChoice]?
+    let usage: ChatUsage?
+    let model: String?
+    let error: ChatAPIError?
+}
+
+struct ChatChoice: Codable {
+    let index: Int?
+    let message: ChatMessage?
+    let delta: ChatDelta?
+    let finishReason: String?
+
+    enum CodingKeys: String, CodingKey {
+        case index, message, delta
+        case finishReason = "finish_reason"
+    }
+}
+
+struct ChatDelta: Codable {
+    let role: String?
+    let content: String?
+}
+
+struct ChatUsage: Codable {
+    let promptTokens: Int?
+    let completionTokens: Int?
+    let totalTokens: Int?
+    let cost: Double?
+
+    enum CodingKeys: String, CodingKey {
+        case cost
+        case promptTokens = "prompt_tokens"
+        case completionTokens = "completion_tokens"
+        case totalTokens = "total_tokens"
+    }
+}
+
+struct ChatAPIError: Codable {
+    let code: Int?
+    let message: String?
+    let metadata: ChatErrorMetadata?
+}
+
+struct ChatErrorMetadata: Codable {
+    let providerName: String?
+    let raw: String?
+
+    enum CodingKeys: String, CodingKey {
+        case raw
+        case providerName = "provider_name"
+    }
+}
+
+// MARK: - Chat Conversation (in-memory)
+
+struct ChatConversation: Identifiable, Equatable {
+    let id: UUID
+    var title: String
+    var modelId: String
+    var messages: [ChatMessage]
+    var createdAt: Date
+    var totalCost: Double
+    var totalTokens: Int
+
+    init(id: UUID = UUID(), title: String = "New Chat", modelId: String, messages: [ChatMessage] = [], createdAt: Date = Date()) {
+        self.id = id
+        self.title = title
+        self.modelId = modelId
+        self.messages = messages
+        self.createdAt = createdAt
+        self.totalCost = 0
+        self.totalTokens = 0
+    }
+
+    static func == (lhs: ChatConversation, rhs: ChatConversation) -> Bool {
+        lhs.id == rhs.id
+    }
 }

@@ -14,6 +14,7 @@ final class BrowserViewModel: ObservableObject {
     @Published var providerFilter: String = "All Providers"
     @Published var selectedModel: ModelInfo?
     @Published var showFavoritesOnly = false
+    @Published var showNewThisWeek = false
     @Published var copiedModelId: String?
 
     @Published var favoriteIds: Set<String> = []
@@ -38,6 +39,10 @@ final class BrowserViewModel: ObservableObject {
             result = result.filter { favoriteIds.contains($0.id) }
         }
 
+        if showNewThisWeek {
+            result = result.filter { isNewThisWeek($0) }
+        }
+
         if providerFilter != "All Providers" {
             result = result.filter { $0.provider == providerFilter }
         }
@@ -47,6 +52,8 @@ final class BrowserViewModel: ObservableObject {
         case .textOnly: result = result.filter { !$0.supportsImages }
         case .multimodal: result = result.filter { $0.supportsImages }
         case .imageOut: result = result.filter { $0.supportsImageOutput }
+        case .tools: result = result.filter { $0.supportsTools }
+        case .reasoning: result = result.filter { $0.supportsReasoning }
         case .freeOnly: result = result.filter { $0.isFree }
         }
 
@@ -116,11 +123,25 @@ final class BrowserViewModel: ObservableObject {
     }
 
     func selectModel(_ model: ModelInfo?) {
-        selectedModel = model
         guard let model else {
+            selectedModel = nil
             endpoints = []
             return
         }
+        // Avoid double-fetch if already selected
+        guard selectedModel?.id != model.id else { return }
+        selectedModel = model
+        fetchEndpointsForSelected()
+    }
+
+    /// Force-refresh endpoints for the currently selected model (e.g. retry after error).
+    func refetchEndpoints() {
+        guard selectedModel != nil else { return }
+        fetchEndpointsForSelected()
+    }
+
+    private func fetchEndpointsForSelected() {
+        guard let model = selectedModel else { return }
         Task {
             isLoadingEndpoints = true
             let eps = await api.fetchEndpoints(for: model.id)
@@ -138,7 +159,7 @@ final class BrowserViewModel: ObservableObject {
         }
     }
 
-    private func isNewThisWeek(_ model: ModelInfo) -> Bool {
+    func isNewThisWeek(_ model: ModelInfo) -> Bool {
         guard let d = model.createdDate else { return false }
         return d > Date().addingTimeInterval(-7 * 86400)
     }
@@ -150,6 +171,8 @@ enum SidebarSection: String, CaseIterable, Identifiable {
     case allModels = "All Models"
     case favorites = "Favorites"
     case newThisWeek = "New This Week"
+    case playground = "Playground"
+    case account = "Account"
 
     var id: String { rawValue }
     var icon: String {
@@ -157,7 +180,13 @@ enum SidebarSection: String, CaseIterable, Identifiable {
         case .allModels: return "square.grid.2x2"
         case .favorites: return "star.fill"
         case .newThisWeek: return "sparkles"
+        case .playground: return "bubble.left.and.bubble.right"
+        case .account: return "gearshape.fill"
         }
+    }
+
+    var isBrowser: Bool {
+        self == .allModels || self == .favorites || self == .newThisWeek
     }
 }
 
@@ -166,18 +195,37 @@ enum SidebarSection: String, CaseIterable, Identifiable {
 struct ContentView: View {
     @StateObject private var vm = BrowserViewModel()
     @State private var selectedSection: SidebarSection = .allModels
+    @EnvironmentObject private var focusManager: FocusManager
+    @FocusState private var searchFocused: Bool
 
     var body: some View {
         NavigationSplitView {
             sidebar
         } content: {
-            modelListColumn
+            if selectedSection.isBrowser {
+                modelListColumn
+            } else {
+                // Empty spacer for non-browser sections
+                Color.clear
+            }
         } detail: {
-            detailColumn
+            if selectedSection.isBrowser {
+                detailColumn
+            } else if selectedSection == .playground {
+                ChatView(viewModel: vm)
+            } else if selectedSection == .account {
+                SettingsView()
+            }
         }
         .navigationSplitViewStyle(.balanced)
         .task {
             await vm.refresh()
+        }
+        .onChange(of: focusManager.searchFocused) { _, newValue in
+            if newValue {
+                searchFocused = true
+                focusManager.searchFocused = false
+            }
         }
     }
 
@@ -185,14 +233,23 @@ struct ContentView: View {
 
     private var sidebar: some View {
         List(selection: $selectedSection) {
-            sidebarRow(.allModels)
-            sidebarRow(.favorites)
-            sidebarRow(.newThisWeek)
+            // Browser sections
+            Section("Browse") {
+                sidebarRow(.allModels)
+                sidebarRow(.favorites)
+                sidebarRow(.newThisWeek)
+            }
+            // Tools
+            Section("Tools") {
+                sidebarRow(.playground)
+                sidebarRow(.account)
+            }
         }
         .listStyle(.sidebar)
         .navigationSplitViewColumnWidth(min: 160, ideal: 180, max: 220)
         .onChange(of: selectedSection) { _, newValue in
             vm.showFavoritesOnly = (newValue == .favorites)
+            vm.showNewThisWeek = (newValue == .newThisWeek)
         }
     }
 
@@ -203,6 +260,7 @@ struct ContentView: View {
         Button {
             selectedSection = section
             vm.showFavoritesOnly = (section == .favorites)
+            vm.showNewThisWeek = (section == .newThisWeek)
         } label: {
             HStack(spacing: 6) {
                 Image(systemName: section.icon)
@@ -230,12 +288,8 @@ struct ContentView: View {
         case .allModels: return vm.api.models.count
         case .favorites: return vm.favoriteIds.count
         case .newThisWeek: return vm.newThisWeekCount
+        case .playground, .account: return 0
         }
-    }
-
-    private func isNewThisWeek(_ model: ModelInfo) -> Bool {
-        guard let d = model.createdDate else { return false }
-        return d > Date().addingTimeInterval(-7 * 86400)
     }
 
     // MARK: Model List Column
@@ -257,6 +311,7 @@ struct ContentView: View {
                 .foregroundStyle(.secondary)
             TextField("Search models...", text: $vm.searchText)
                 .textFieldStyle(.plain)
+                .focused($searchFocused)
             if !vm.searchText.isEmpty {
                 Button { vm.searchText = "" } label: {
                     Image(systemName: "xmark.circle.fill")
@@ -392,6 +447,33 @@ struct ContentView: View {
                 Text(error)
                     .foregroundStyle(.secondary)
                 Button("Retry") { Task { await vm.refresh() } }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        } else if vm.filteredModels.isEmpty {
+            VStack(spacing: 12) {
+                Image(systemName: "magnifyingglass")
+                    .font(.system(size: 36))
+                    .foregroundStyle(.tertiary)
+                Text("No models found")
+                    .font(.headline)
+                    .foregroundStyle(.secondary)
+                if !vm.searchText.isEmpty {
+                    Text("Try a different search term or clear filters")
+                        .font(.caption)
+                        .foregroundStyle(.tertiary)
+                } else if vm.showFavoritesOnly {
+                    Text("Star models with the star icon to add them here")
+                        .font(.caption)
+                        .foregroundStyle(.tertiary)
+                } else if vm.showNewThisWeek {
+                    Text("No models were added in the last 7 days")
+                        .font(.caption)
+                        .foregroundStyle(.tertiary)
+                } else {
+                    Text("Try changing your filters")
+                        .font(.caption)
+                        .foregroundStyle(.tertiary)
+                }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else {

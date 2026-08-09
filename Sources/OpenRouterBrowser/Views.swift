@@ -83,6 +83,25 @@ struct ModelRowView: View {
             .buttonStyle(.plain)
         }
         .padding(.vertical, 3)
+        .contextMenu {
+            Button {
+                viewModel.copyModelId(model)
+            } label: {
+                Label("Copy Model ID", systemImage: "doc.on.doc")
+            }
+            Button {
+                viewModel.toggleFavorite(model)
+            } label: {
+                Label(viewModel.favoriteIds.contains(model.id) ? "Remove Favorite" : "Add Favorite",
+                      systemImage: viewModel.favoriteIds.contains(model.id) ? "star.slash" : "star")
+            }
+            Divider()
+            Button {
+                NSWorkspace.shared.open(URL(string: "https://openrouter.ai/\(model.id)")!)
+            } label: {
+                Label("Open on OpenRouter", systemImage: "safari")
+            }
+        }
     }
 
     var providerColor: Color {
@@ -90,10 +109,21 @@ struct ModelRowView: View {
         if p.contains("openai") { return .green }
         if p.contains("anthropic") { return .orange }
         if p.contains("google") { return .blue }
-        if p.contains("meta") { return .indigo }
+        if p.contains("meta") || p.contains("llama") { return .indigo }
         if p.contains("mistral") { return .teal }
         if p.contains("cohere") { return .purple }
         if p.contains("deepseek") { return .cyan }
+        if p.contains("nvidia") { return .green }
+        if p.contains("qwen") || p.contains("alibaba") { return .red }
+        if p.contains("microsoft") { return .blue }
+        if p.contains("amazon") { return .orange }
+        if p.contains("x-ai") || p.contains("xai") || p.contains("grok") { return .gray }
+        if p.contains("perplexity") { return .teal }
+        if p.contains("nous") { return .brown }
+        if p.contains("01-ai") || p.contains("yi") { return .pink }
+        if p.contains("phind") { return .indigo }
+        if p.contains("sao10k") { return .purple }
+        if p.contains("liquid") { return .cyan }
         return .gray
     }
 }
@@ -104,6 +134,7 @@ struct ModelDetailView: View {
     let model: ModelInfo
     @ObservedObject var viewModel: BrowserViewModel
     @State private var notes: String = ""
+    @State private var notesDebounceTask: Task<Void, Never>?
 
     var body: some View {
         ScrollView {
@@ -123,11 +154,9 @@ struct ModelDetailView: View {
         }
         .onAppear {
             notes = viewModel.db.getNotes(model.id)
-            viewModel.selectModel(model)
         }
         .onChange(of: model.id) { _, _ in
             notes = viewModel.db.getNotes(model.id)
-            viewModel.selectModel(model)
         }
     }
 
@@ -140,6 +169,16 @@ struct ModelDetailView: View {
                     Text(model.provider)
                         .font(.system(size: 12, weight: .bold, design: .monospaced))
                         .foregroundStyle(.secondary)
+                    if model.isUnofficial {
+                        Text("UNOFFICIAL")
+                            .font(.system(size: 9, weight: .bold))
+                            .foregroundStyle(.orange)
+                            .padding(.horizontal, 5)
+                            .padding(.vertical, 2)
+                            .background(.orange.opacity(0.15))
+                            .clipShape(RoundedRectangle(cornerRadius: 4))
+                            .help("This is an unofficial provider mirror on OpenRouter")
+                    }
                     if model.hasExpired {
                         Text("EXPIRED")
                             .font(.system(size: 9, weight: .bold))
@@ -271,6 +310,7 @@ struct ModelDetailView: View {
                 .font(.headline)
             FlowLayout(spacing: 6) {
                 CapabilityTag(label: "Image In", active: model.supportsImages, color: .blue)
+                CapabilityTag(label: "Audio In", active: model.supportsAudioInput, color: .mint)
                 CapabilityTag(label: "Image Out", active: model.supportsImageOutput, color: .pink)
                 CapabilityTag(label: "Audio Out", active: model.supportsAudioOutput, color: .mint)
                 CapabilityTag(label: "Tools", active: model.supportsTools, color: .orange)
@@ -342,9 +382,23 @@ struct ModelDetailView: View {
                 }
             }
             if viewModel.endpoints.isEmpty && !viewModel.isLoadingEndpoints {
-                Text("No per-provider data available")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                if let error = viewModel.api.endpointsError {
+                    HStack(spacing: 6) {
+                        Image(systemName: "wifi.exclamationmark")
+                            .foregroundStyle(.orange)
+                        Text(error)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        Button("Retry") {
+                            viewModel.refetchEndpoints()
+                        }
+                        .font(.caption)
+                    }
+                } else {
+                    Text("No per-provider data available")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
             } else {
                 VStack(spacing: 6) {
                     ForEach(viewModel.endpoints) { ep in
@@ -392,7 +446,12 @@ struct ModelDetailView: View {
                     .background(.quaternary.opacity(0.3))
                     .clipShape(RoundedRectangle(cornerRadius: 8))
                     .onChange(of: notes) { _, newValue in
-                        viewModel.db.setNotes(model.id, notes: newValue)
+                        notesDebounceTask?.cancel()
+                        notesDebounceTask = Task {
+                            try? await Task.sleep(nanoseconds: 800_000_000)
+                            guard !Task.isCancelled else { return }
+                            viewModel.db.setNotes(model.id, notes: newValue)
+                        }
                     }
             }
         }
