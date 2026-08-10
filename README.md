@@ -95,8 +95,8 @@
 
 ```bash
 # Clone
-git clone https://github.com/Eplisium/openrouter-browser.git
-cd openrouter-browser
+git clone https://github.com/Eplisium/orb.git
+cd orb
 
 # Build
 swift build
