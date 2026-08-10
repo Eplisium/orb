@@ -391,7 +391,13 @@ struct AgentView: View {
                                     .id(message.id)
                                 }
 
-                                if conversationIsRunning { activityRow }
+                                // Always in the tree to prevent LazyVStack
+                                // layout thrashing when streaming starts/stops.
+                                activityRow
+                                    .opacity(conversationIsRunning ? 1 : 0)
+                                    .frame(maxHeight: conversationIsRunning ? .infinity : 0)
+                                    .clipped()
+                                    .allowsHitTesting(conversationIsRunning)
 
                                 Color.clear
                                     .frame(height: 1)
@@ -882,13 +888,15 @@ struct AgentView: View {
 
 
     /// Composite key covering every source of content growth during a run:
-    /// message count, the streaming text, tool-call count on the last message,
-    /// and the activity label. Any change means the view got taller.
+    /// message count, the streaming text, reasoning length, tool-call count
+    /// on the last message, and the activity label. Any change means the view
+    /// got taller.
     private func scrollFollowKey(_ conversation: ChatConversation) -> String {
         let last = conversation.messages.last
         return [
             String(conversation.messages.count),
             String(last?.content.count ?? 0),
+            String(last?.reasoning?.count ?? 0),
             String(last?.toolCalls?.count ?? 0),
             String(last?.toolCalls?.reduce(0) { $0 + ($1.result?.count ?? 0) } ?? 0),
             chatService.activityLabel

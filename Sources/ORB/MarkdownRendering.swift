@@ -17,12 +17,13 @@ enum MarkdownBlock: Identifiable, Equatable {
 
     var id: String {
         switch self {
-        case .paragraph(let text): return "p:\(text.hashValue)"
-        case .heading(let level, let text): return "h\(level):\(text.hashValue)"
-        case .bullet(let items): return "ul:\(items.joined().hashValue)"
-        case .numbered(let items): return "ol:\(items.joined().hashValue)"
-        case .code(let language, let source, _): return "code:\(language ?? "")\(source.hashValue)"
-        case .quote(let text): return "q:\(text.hashValue)"
+        case .paragraph(let text): return "p:\(text)"
+        case .heading(let level, let text): return "h\(level):\(text)"
+        case .bullet(let items): return "ul:\(items.count):\(items.first ?? "")"
+        case .numbered(let items): return "ol:\(items.count):\(items.first ?? "")"
+        case .code(let language, let source, let closed):
+            return "code:\(language ?? ""):\(source.count):\(closed)"
+        case .quote(let text): return "q:\(text)"
         case .rule: return "hr"
         }
     }

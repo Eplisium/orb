@@ -692,5 +692,11 @@ struct ChatConversation: Identifiable, Equatable {
 
     static func == (lhs: ChatConversation, rhs: ChatConversation) -> Bool {
         lhs.id == rhs.id
+            && lhs.title == rhs.title
+            && lhs.modelId == rhs.modelId
+            && lhs.messages == rhs.messages
+            && lhs.systemPrompt == rhs.systemPrompt
+            && lhs.totalCost == rhs.totalCost
+            && lhs.totalTokens == rhs.totalTokens
     }
 }
