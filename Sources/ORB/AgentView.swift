@@ -1,22 +1,31 @@
 import AppKit
 import SwiftUI
+import UniformTypeIdentifiers
 
 /// A polished native agent playground — ORB's own function-calling
 /// agent that can browse the web, work with files, run commands, automate Mac
 /// apps, and control the computer. Completely separate from Chat.
 struct AgentView: View {
     @ObservedObject var viewModel: BrowserViewModel
-    @StateObject private var chatService = ChatService()
+    @ObservedObject var chatService: ChatService
 
     @State private var messageText = ""
     @State private var selectedModelId = ""
-    @State private var fullComputerAccess = true
-    @State private var workspace = FileManager.default.homeDirectoryForCurrentUser.path
+    @AppStorage(PlaygroundModelDefaults.agentKey) private var defaultModelId = ""
+    @AppStorage("playground.agentFullComputerAccess") private var fullComputerAccess = false
+    @AppStorage("playground.agentWorkspace") private var workspace = FileManager.default.homeDirectoryForCurrentUser.path
     @State private var attachments: [URL] = []
+    @State private var attachmentWarnings: [String] = []
+    @State private var attachmentContextSummary: String?
     @State private var showSettings = false
+    @State private var showMCPSettings = false
     @State private var showModelPicker = false
     @State private var modelSearchText = ""
     @State private var toolCapableOnly = true
+    @State private var followsLatest = true
+    /// Drives the live elapsed-time readout in the activity row.
+    @State private var activityTick = Date()
+    private let activityTimer = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
     @FocusState private var inputFocused: Bool
 
     private let accent = PlaygroundTheme.agentAccent
@@ -31,9 +40,16 @@ struct AgentView: View {
         }
         .background(playgroundBackground)
         .task {
-            if selectedModelId.isEmpty { selectedModelId = preferredModelId }
+            chatService.activateConversation(for: .agent)
+            selectedModelId = PlaygroundModelDefaults.initialSelection(
+                activeModelId: chatService.activeConversation?.modelId,
+                preferredModelId: preferredModelId
+            )
             viewModel.loadFavorites()
             inputFocused = true
+        }
+        .onChange(of: selectedModelId) { _, _ in
+            if !attachments.isEmpty { refreshAttachmentDiagnostics() }
         }
     }
 
@@ -46,7 +62,7 @@ struct AgentView: View {
                 .fill(Color.primary.opacity(0.07))
                 .frame(height: 1)
             if let error = chatService.lastError {
-                errorBanner(error)
+                PlaygroundErrorBanner(message: error) { chatService.lastError = nil }
             }
             messageArea
             composer
@@ -93,13 +109,15 @@ struct AgentView: View {
                                 ConversationRow(
                                     conversation: conversation,
                                     isSelected: chatService.activeConversation?.id == conversation.id,
+                                    isRunning: chatService.isRunning(conversationID: conversation.id),
                                     accent: accent,
                                     icon: "cpu",
                                     onSelect: {
                                         chatService.selectConversation(conversation)
                                         selectedModelId = conversation.modelId
                                     },
-                                    onDelete: { chatService.deleteConversation(conversation) }
+                                    onDelete: { chatService.deleteConversation(conversation) },
+                                    onExport: { exportConversation(conversation) }
                                 )
                             }
                         } header: {
@@ -116,7 +134,8 @@ struct AgentView: View {
                 statusColor: agentStatusColor,
                 statusText: agentStatusText,
                 conversation: chatService.activeConversation,
-                formattedCost: chatService.formattedCost
+                formattedCost: chatService.formattedCost,
+                tokensPerSecond: chatService.tokensPerSecond
             )
         }
         .frame(width: 224)
@@ -183,6 +202,21 @@ struct AgentView: View {
 
             modelPickerButton
 
+            // Export button
+            if let conversation = chatService.activeConversation {
+                Button {
+                    exportConversation(conversation)
+                } label: {
+                    Image(systemName: "square.and.arrow.up")
+                        .font(.system(size: 12, weight: .semibold))
+                        .frame(width: 28, height: 28)
+                        .background(Color.primary.opacity(0.05))
+                        .clipShape(RoundedRectangle(cornerRadius: 7))
+                }
+                .buttonStyle(.plain)
+                .help("Export conversation as Markdown")
+            }
+
             Button {
                 showSettings.toggle()
             } label: {
@@ -194,6 +228,7 @@ struct AgentView: View {
             }
             .buttonStyle(.plain)
             .popover(isPresented: $showSettings) { settingsPopover }
+            .sheet(isPresented: $showMCPSettings) { MCPSettingsView(accent: accent, isEmbedded: false) }
         }
         .padding(.horizontal, 18)
         .padding(.vertical, 11)
@@ -230,6 +265,8 @@ struct AgentView: View {
                 selectedModelId: $selectedModelId,
                 searchText: $modelSearchText,
                 toolCapableOnly: $toolCapableOnly,
+                defaultModelId: $defaultModelId,
+                defaultLabel: "Agent",
                 accent: accent,
                 toggleFavorite: viewModel.toggleFavorite,
                 dismiss: { showModelPicker = false }
@@ -269,6 +306,60 @@ struct AgentView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
+
+            Divider()
+
+            VStack(alignment: .leading, spacing: 7) {
+                Text("SYSTEM PROMPT (OPTIONAL)")
+                    .font(.system(size: 9, weight: .bold))
+                    .foregroundStyle(.secondary)
+                TextEditor(text: Binding(
+                    get: { chatService.activeConversation?.systemPrompt ?? "" },
+                    set: { value in
+                        if let conversation = chatService.activeConversation {
+                            chatService.updateSystemPrompt(value, for: conversation)
+                        }
+                    }
+                ))
+                .font(.system(size: 11))
+                .frame(height: 80)
+                .disabled(chatService.activeConversation == nil)
+                .overlay {
+                    RoundedRectangle(cornerRadius: 6)
+                        .stroke(Color.primary.opacity(0.10), lineWidth: 1)
+                }
+                Text("Supplements the built-in agent system prompt.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            Divider()
+
+            VStack(alignment: .leading, spacing: 7) {
+                Text("EXTENSIONS")
+                    .font(.system(size: 9, weight: .bold))
+                    .foregroundStyle(.secondary)
+                Button {
+                    showSettings = false
+                    showMCPSettings = true
+                } label: {
+                    HStack {
+                        Image(systemName: "puzzlepiece.extension.fill")
+                            .foregroundStyle(accent)
+                        Text("MCP Servers")
+                        Spacer()
+                        Image(systemName: "chevron.right")
+                            .font(.caption2)
+                    }
+                    .padding(8)
+                    .background(Color.primary.opacity(0.05))
+                    .clipShape(RoundedRectangle(cornerRadius: 7))
+                }
+                .buttonStyle(.plain)
+                Text("Connect Model Context Protocol servers to add tools.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
         }
         .padding(18)
         .frame(width: 300)
@@ -280,34 +371,71 @@ struct AgentView: View {
     private var messageArea: some View {
         if let conversation = chatService.activeConversation,
            !conversation.messages.isEmpty {
-            ScrollViewReader { proxy in
-                ScrollView {
-                    LazyVStack(spacing: 20) {
-                        ForEach(conversation.messages) { message in
-                            PlaygroundMessageView(
-                                message: message,
-                                isStreaming: chatService.isStreaming && message.id == conversation.messages.last?.id,
-                                assistantName: "OpenRouter Agent",
-                                accent: accent
-                            )
-                            .id(message.id)
+            let conversationIsRunning = chatService.isRunning(conversationID: conversation.id)
+            GeometryReader { viewport in
+                ScrollViewReader { proxy in
+                    ZStack(alignment: .bottomTrailing) {
+                        ScrollView {
+                            LazyVStack(spacing: 16) {
+                                ForEach(conversation.messages) { message in
+                                    PlaygroundMessageView(
+                                        message: message,
+                                        isStreaming: chatService.isStreamingMessage(message.id, conversationID: conversation.id),
+                                        assistantName: "OpenRouter Agent",
+                                        accent: accent,
+                                        onDelete: conversationIsRunning
+                                            ? nil
+                                            : { chatService.deleteMessage(message.id, from: conversation) },
+                                        showToolCalls: true
+                                    )
+                                    .id(message.id)
+                                }
+
+                                if conversationIsRunning { activityRow }
+
+                                Color.clear
+                                    .frame(height: 1)
+                                    .id("agent-message-bottom")
+                                    .background {
+                                        GeometryReader { bottom in
+                                            Color.clear.preference(
+                                                key: MessageBottomOffsetKey.self,
+                                                value: bottom.frame(in: .named("agent-message-scroll")).maxY
+                                            )
+                                        }
+                                    }
+                            }
+                            .frame(maxWidth: 820)
+                            .padding(.horizontal, 28)
+                            .padding(.vertical, 28)
+                            .frame(maxWidth: .infinity)
+                        }
+                        .coordinateSpace(name: "agent-message-scroll")
+                        .onPreferenceChange(MessageBottomOffsetKey.self) { bottomY in
+                            followsLatest = bottomY <= viewport.size.height + 80
                         }
 
-                        if chatService.isStreaming {
-                            activityRow
-                                .id("activity")
+                        if conversationIsRunning && !followsLatest {
+                            Button {
+                                followsLatest = true
+                                proxy.scrollTo("agent-message-bottom", anchor: .bottom)
+                            } label: {
+                                Label("Jump to latest", systemImage: "arrow.down")
+                            }
+                            .buttonStyle(.borderedProminent)
+                            .controlSize(.small)
+                            .padding(14)
                         }
                     }
-                    .frame(maxWidth: 820)
-                    .padding(.horizontal, 28)
-                    .padding(.vertical, 28)
-                    .frame(maxWidth: .infinity)
-                }
-                .onChange(of: conversation.messages.last?.content) { _, _ in
-                    scrollToBottom(proxy, conversation: conversation)
-                }
-                .onChange(of: chatService.isStreaming) { _, _ in
-                    scrollToBottom(proxy, conversation: conversation)
+                    // Watching only the last message's text missed growth from
+                    // new messages, streaming tool cards, and activity-row
+                    // changes — so long tool-heavy runs stopped following.
+                    .onChange(of: scrollFollowKey(conversation)) { _, _ in
+                        guard followsLatest else { return }
+                        withAnimation(.easeOut(duration: 0.18)) {
+                            proxy.scrollTo("agent-message-bottom", anchor: .bottom)
+                        }
+                    }
                 }
             }
         } else {
@@ -352,7 +480,6 @@ struct AgentView: View {
                     CapabilityPill(title: "Terminal", icon: "terminal")
                     CapabilityPill(title: "Web", icon: "globe")
                     CapabilityPill(title: "Computer", icon: "desktopcomputer")
-                    CapabilityPill(title: "Memory", icon: "brain.head.profile")
                 }
 
                 LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 10) {
@@ -375,28 +502,72 @@ struct AgentView: View {
     private var activityRow: some View {
         HStack(spacing: 12) {
             ZStack {
-                Circle()
-                    .fill(accent.opacity(0.12))
+                Circle().fill(accent.opacity(0.12))
                 ProgressView()
                     .controlSize(.small)
                     .tint(accent)
             }
             .frame(width: 32, height: 32)
-            VStack(alignment: .leading, spacing: 2) {
+
+            VStack(alignment: .leading, spacing: 3) {
                 Text(chatService.activityLabel)
                     .font(.system(size: 11, weight: .semibold))
-                Text("This may take a moment while tools finish.")
-                    .font(.system(size: 9))
-                    .foregroundStyle(.secondary)
+                    .contentTransition(.opacity)
+                // Real progress signal instead of a static reassurance string.
+                HStack(spacing: 6) {
+                    Text(elapsedText)
+                    if let toolCount = activeToolCount, toolCount > 0 {
+                        Text("·")
+                        Text("^[\(toolCount) tool call](inflect: true)")
+                    }
+                }
+                .font(.system(size: 9, design: .monospaced))
+                .foregroundStyle(.secondary)
+
+                UsageStatsBar(
+                    usage: chatService.lastUsage,
+                    tokensPerSecond: chatService.tokensPerSecond,
+                    accent: accent
+                )
             }
+
             Spacer()
+
+            if chatService.tokensPerSecond > 0 {
+                Text("\(String(format: "%.1f", chatService.tokensPerSecond)) tok/s")
+                    .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                    .foregroundStyle(.orange)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 3)
+                    .background(Color.orange.opacity(0.10))
+                    .clipShape(Capsule())
+            }
             Button("Stop") { chatService.stopStreaming() }
                 .buttonStyle(.bordered)
                 .controlSize(.small)
         }
         .padding(12)
         .background(Color.primary.opacity(0.035))
+        .overlay {
+            RoundedRectangle(cornerRadius: 12)
+                .stroke(accent.opacity(0.18), lineWidth: 0.5)
+        }
         .clipShape(RoundedRectangle(cornerRadius: 12))
+        .animation(.easeInOut(duration: 0.2), value: chatService.activityLabel)
+        .onReceive(activityTimer) { activityTick = $0 }
+    }
+
+    private var elapsedText: String {
+        guard let started = chatService.runState.context?.startedAt else { return "0s" }
+        let seconds = max(0, Int(activityTick.timeIntervalSince(started)))
+        return seconds < 60 ? "\(seconds)s" : "\(seconds / 60)m \(seconds % 60)s"
+    }
+
+    private var activeToolCount: Int? {
+        guard let conversation = chatService.activeConversation,
+              let messageID = chatService.runState.context?.assistantMessageID,
+              let message = conversation.messages.first(where: { $0.id == messageID }) else { return nil }
+        return message.toolCalls?.count
     }
 
     // MARK: - Composer
@@ -412,6 +583,23 @@ struct AgentView: View {
                     }
                     .padding(.horizontal, 2)
                 }
+                if let attachmentContextSummary {
+                    Text(attachmentContextSummary)
+                        .font(.system(size: 9, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+            }
+
+            if !attachmentWarnings.isEmpty {
+                VStack(alignment: .leading, spacing: 3) {
+                    ForEach(attachmentWarnings, id: \.self) { warning in
+                        Label(warning, systemImage: "exclamationmark.triangle")
+                    }
+                }
+                .font(.system(size: 9))
+                .foregroundStyle(.orange)
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
 
             VStack(spacing: 0) {
@@ -497,6 +685,7 @@ struct AgentView: View {
             Text(file.lastPathComponent).lineLimit(1)
             Button {
                 attachments.removeAll { $0 == file }
+                refreshAttachmentDiagnostics()
             } label: {
                 Image(systemName: "xmark")
                     .font(.system(size: 8, weight: .bold))
@@ -513,12 +702,21 @@ struct AgentView: View {
     // MARK: - Actions and derived values
 
     private var preferredModelId: String {
+        let fallback: String
         if let favorite = viewModel.api.models.first(where: { viewModel.favoriteIds.contains($0.id) && $0.supportsTools })?.id {
-            return favorite
+            fallback = favorite
+        } else if let selected = viewModel.selectedModel, selected.supportsTools {
+            fallback = selected.id
+        } else if let toolModel = viewModel.api.models.first(where: \.supportsTools)?.id {
+            fallback = toolModel
+        } else {
+            fallback = "openai/gpt-4o"
         }
-        if let selected = viewModel.selectedModel, selected.supportsTools { return selected.id }
-        if let toolModel = viewModel.api.models.first(where: \.supportsTools)?.id { return toolModel }
-        return "openai/gpt-4o"
+        return PlaygroundModelDefaults.resolve(
+            storedModelId: defaultModelId,
+            availableModelIds: viewModel.api.models.filter(\.supportsTools).map(\.id),
+            fallbackModelId: fallback
+        )
     }
 
     private var currentModelId: String {
@@ -550,7 +748,13 @@ struct AgentView: View {
     }
 
     private var agentStatusText: String {
-        if chatService.isStreaming { return "Agent working" }
+        if chatService.isStreaming {
+            guard let id = chatService.activeConversation?.id,
+                  chatService.isRunning(conversationID: id) else {
+                return "Agent working in another session"
+            }
+            return "Agent working"
+        }
         return KeychainManager.hasAPIKey ? "Native agent ready" : "API key needed"
     }
 
@@ -564,9 +768,12 @@ struct AgentView: View {
     }
 
     private func newConversation() {
-        _ = chatService.newConversation(modelId: currentModelId, mode: .agent)
+        selectedModelId = preferredModelId
+        _ = chatService.newConversation(modelId: selectedModelId, mode: .agent)
         messageText = ""
         attachments = []
+        attachmentWarnings = []
+        attachmentContextSummary = nil
         inputFocused = true
     }
 
@@ -583,12 +790,21 @@ struct AgentView: View {
         }
 
         var prompt = messageText.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        // Build a byte-bounded, explicitly untrusted attachment envelope.
         if !attachments.isEmpty {
-            let paths = attachments.map(\.path).joined(separator: "\n")
-            prompt += "\n\nAttached files:\n\(paths)"
+            let result = attachmentBuildResult()
+            attachmentWarnings = result.warnings
+            guard !result.includedFiles.isEmpty else {
+                chatService.lastError = result.warnings.first ?? "None of the selected attachments could be read."
+                return
+            }
+            prompt += result.promptSuffix
         }
+
         messageText = ""
         attachments = []
+        attachmentContextSummary = nil
 
         Task {
             await chatService.sendAgentMessage(
@@ -618,7 +834,65 @@ struct AgentView: View {
         panel.canChooseFiles = true
         panel.canChooseDirectories = false
         panel.allowsMultipleSelection = true
-        if panel.runModal() == .OK { attachments.append(contentsOf: panel.urls) }
+        if panel.runModal() == .OK {
+            attachments.append(contentsOf: panel.urls)
+            refreshAttachmentDiagnostics()
+        }
+    }
+
+    private func attachmentBuildResult() -> AgentAttachmentBuildResult {
+        let contextLength = viewModel.api.models.first(where: { $0.id == currentModelId })?.contextLength ?? 32_000
+        return AgentAttachmentBuilder.build(
+            urls: attachments,
+            perFileByteLimit: 16_000,
+            totalByteLimit: min(80_000, max(12_000, contextLength))
+        )
+    }
+
+    private func refreshAttachmentDiagnostics() {
+        guard !attachments.isEmpty else {
+            attachmentWarnings = []
+            attachmentContextSummary = nil
+            return
+        }
+        let contextLength = viewModel.api.models.first(where: { $0.id == currentModelId })?.contextLength ?? 32_000
+        let result = attachmentBuildResult()
+        let estimatedTokens = max(1, (result.includedBytes + 3) / 4)
+        attachmentWarnings = result.warnings
+        if estimatedTokens >= (contextLength * 3) / 4 {
+            attachmentWarnings.append("Attachments may consume most of this model's context window.")
+        }
+        attachmentContextSummary = "\(result.includedFiles.count) readable file\(result.includedFiles.count == 1 ? "" : "s") · ~\(estimatedTokens.formatted()) tokens of \(contextLength.formatted())"
+    }
+
+    private func exportConversation(_ conv: ChatConversation) {
+        let markdown = DatabaseManager.shared.exportConversationMarkdown(conv)
+        let panel = NSSavePanel()
+        panel.title = "Export Conversation"
+        panel.nameFieldStringValue = "\(conv.title).md"
+        panel.allowedContentTypes = [UTType(filenameExtension: "md") ?? .plainText]
+        if panel.runModal() == .OK, let url = panel.url {
+            do {
+                try markdown.write(to: url, atomically: true, encoding: .utf8)
+            } catch {
+                chatService.lastError = "Could not export conversation: \(error.localizedDescription)"
+            }
+        }
+    }
+
+
+    /// Composite key covering every source of content growth during a run:
+    /// message count, the streaming text, tool-call count on the last message,
+    /// and the activity label. Any change means the view got taller.
+    private func scrollFollowKey(_ conversation: ChatConversation) -> String {
+        let last = conversation.messages.last
+        return [
+            String(conversation.messages.count),
+            String(last?.content.count ?? 0),
+            String(last?.toolCalls?.count ?? 0),
+            String(last?.toolCalls?.reduce(0) { $0 + ($1.result?.count ?? 0) } ?? 0),
+            chatService.activityLabel
+        ].joined(separator: "|")
     }
 
     private func scrollToBottom(_ proxy: ScrollViewProxy, conversation: ChatConversation) {
@@ -630,22 +904,4 @@ struct AgentView: View {
             }
         }
     }
-}
-
-// MARK: - Error Banner
-
-private func errorBanner(_ error: String) -> some View {
-    HStack(spacing: 9) {
-        Image(systemName: "exclamationmark.triangle.fill")
-            .foregroundStyle(.orange)
-        Text(error)
-            .font(.system(size: 10, weight: .medium))
-            .lineLimit(2)
-        Spacer()
-        Image(systemName: "xmark")
-            .font(.caption)
-    }
-    .padding(.horizontal, 16)
-    .padding(.vertical, 8)
-    .background(Color.orange.opacity(0.09))
 }

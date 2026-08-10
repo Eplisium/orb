@@ -139,7 +139,32 @@ struct AgentToolDefinition: Codable, Sendable {
 struct AgentToolFunctionDefinition: Codable, Sendable {
     let name: String
     let description: String
-    let parameters: AgentToolParameters
+    let parameters: AgentToolSchema
+}
+
+/// A tool's parameter schema. Native ORB tools use the flat `.native` form;
+/// MCP-provided tools carry arbitrary JSON Schema through `.raw` so nested
+/// objects, arrays, and enums survive the trip to OpenRouter intact.
+enum AgentToolSchema: Codable, Sendable {
+    case native(AgentToolParameters)
+    case raw(JSONValue)
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.singleValueContainer()
+        if let native = try? container.decode(AgentToolParameters.self) {
+            self = .native(native)
+        } else {
+            self = .raw(try container.decode(JSONValue.self))
+        }
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
+        switch self {
+        case .native(let value): try container.encode(value)
+        case .raw(let value): try container.encode(value)
+        }
+    }
 }
 
 struct AgentToolParameters: Codable, Sendable {
@@ -159,9 +184,31 @@ struct AgentToolProperty: Codable, Sendable {
     let description: String
 }
 
-struct NativeAgentToolResult: Sendable {
+struct NativeAgentToolResult: Sendable, Equatable {
     let content: String
     let isError: Bool
+}
+
+struct AssembledAgentToolCall: Sendable, Equatable {
+    let index: Int
+    let id: String
+    let type: String
+    let name: String
+    let arguments: String
+}
+
+enum NativeAgentEvent: Sendable, Equatable {
+    case modelTurnStarted(Int)
+    case textDelta(String)
+    case reasoningDelta(String)
+    case toolCallUpdated(AssembledAgentToolCall)
+    case toolExecutionStarted(AssembledAgentToolCall)
+    case toolResult(AssembledAgentToolCall, NativeAgentToolResult)
+    case usage(turn: Int, cumulative: ChatUsage)
+    case turnFinished(reason: String?)
+    /// The turn budget is spent; the agent is composing a final tool-free answer.
+    case finalizing
+    case runCompleted
 }
 
 struct NativeAgentRunResult: Sendable {
@@ -169,12 +216,40 @@ struct NativeAgentRunResult: Sendable {
     let history: [AgentAPIMessage]
     let usage: ChatUsage?
     let toolNames: [String]
+    /// Tool call display summaries for UI rendering.
+    let toolCallDisplays: [ToolCallDisplay]
+    /// Tool result messages for insertion into the conversation.
+    let toolMessages: [ChatMessage]
+    /// True when the run exhausted its turn budget and was force-summarized,
+    /// so the UI can say the answer may be incomplete.
+    let hitToolBudget: Bool
+
+    init(
+        response: String,
+        history: [AgentAPIMessage],
+        usage: ChatUsage?,
+        toolNames: [String],
+        toolCallDisplays: [ToolCallDisplay],
+        toolMessages: [ChatMessage],
+        hitToolBudget: Bool = false
+    ) {
+        self.response = response
+        self.history = history
+        self.usage = usage
+        self.toolNames = toolNames
+        self.toolCallDisplays = toolCallDisplays
+        self.toolMessages = toolMessages
+        self.hitToolBudget = hitToolBudget
+    }
 }
 
 enum NativeAgentError: LocalizedError {
     case invalidResponse
     case api(String)
     case exhausted
+    case invalidToolCall(String)
+    case truncatedToolCall
+    case duplicateToolCallID(String)
 
     var errorDescription: String? {
         switch self {
@@ -184,6 +259,12 @@ enum NativeAgentError: LocalizedError {
             return message
         case .exhausted:
             return "The agent reached its tool-call limit before completing the task."
+        case .invalidToolCall(let message):
+            return "Invalid streamed tool call: \(message)"
+        case .truncatedToolCall:
+            return "The model's tool call was truncated before completion and was not executed."
+        case .duplicateToolCallID(let id):
+            return "OpenRouter returned duplicate tool-call ID \(id)."
         }
     }
 }

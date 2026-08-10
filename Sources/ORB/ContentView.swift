@@ -198,6 +198,10 @@ enum SidebarSection: String, CaseIterable, Identifiable {
 
 struct ContentView: View {
     @StateObject private var vm = BrowserViewModel()
+    // Keep independent, root-owned coordinators so an Agent run survives its
+    // view disappearing and does not prevent a simultaneous direct Chat run.
+    @StateObject private var agentService = ChatService()
+    @StateObject private var chatService = ChatService()
     @State private var selectedSection: SidebarSection = .allModels
     @EnvironmentObject private var focusManager: FocusManager
     @FocusState private var searchFocused: Bool
@@ -217,9 +221,9 @@ struct ContentView: View {
                     sidebar
                 } detail: {
                     if selectedSection == .agent {
-                        AgentView(viewModel: vm)
+                        AgentView(viewModel: vm, chatService: agentService)
                     } else if selectedSection == .chat {
-                        ChatView(viewModel: vm)
+                        ChatView(viewModel: vm, chatService: chatService)
                     } else if selectedSection == .testSuite {
                         TestSuiteView(viewModel: vm)
                     } else if selectedSection == .account {
@@ -234,6 +238,7 @@ struct ContentView: View {
         }
         .onChange(of: focusManager.searchFocused) { _, newValue in
             if newValue {
+                selectedSection = .allModels
                 searchFocused = true
                 focusManager.searchFocused = false
             }

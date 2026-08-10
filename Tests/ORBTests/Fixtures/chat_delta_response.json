@@ -1,0 +1,15 @@
+{
+  "id": "chatcmpl-abc123",
+  "choices": [
+    {
+      "index": 0,
+      "delta": {
+        "role": "assistant",
+        "content": "Hello! How can I help you today?"
+      },
+      "finish_reason": null
+    }
+  ],
+  "model": "openai/gpt-4o",
+  "usage": null
+}

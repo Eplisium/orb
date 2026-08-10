@@ -12,7 +12,10 @@ let package = Package(
         .testTarget(
             name: "ORBTests",
             dependencies: ["ORB"],
-            path: "Tests/ORBTests"
+            path: "Tests/ORBTests",
+            resources: [
+                .copy("Fixtures")
+            ]
         )
     ]
 )

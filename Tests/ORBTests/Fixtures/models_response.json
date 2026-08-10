@@ -1,0 +1,68 @@
+{
+  "data": [
+    {
+      "id": "openai/gpt-4o",
+      "canonical_slug": "openai-gpt-4o",
+      "name": "GPT-4o",
+      "created": 1715367000,
+      "description": "OpenAI's flagship model",
+      "context_length": 128000,
+      "architecture": {
+        "modality": "text+image->text",
+        "input_modalities": ["text", "image"],
+        "output_modalities": ["text"],
+        "tokenizer": "cl100k_base"
+      },
+      "pricing": {
+        "prompt": "0.000005",
+        "completion": "0.000015",
+        "input_cache_read": "0.0000025"
+      },
+      "top_provider": {
+        "context_length": 128000,
+        "max_completion_tokens": 16384,
+        "is_moderated": true
+      },
+      "supported_parameters": ["tools", "temperature", "max_tokens"],
+      "reasoning": null
+    },
+    {
+      "id": "anthropic/claude-3.5-sonnet",
+      "canonical_slug": "anthropic-claude-35-sonnet",
+      "name": "Claude 3.5 Sonnet",
+      "created": 1718000000,
+      "description": "Anthropic's balanced model",
+      "context_length": 200000,
+      "architecture": {
+        "modality": "text+image->text",
+        "input_modalities": ["text", "image"],
+        "output_modalities": ["text"]
+      },
+      "pricing": {
+        "prompt": "0.000003",
+        "completion": "0.000015"
+      },
+      "top_provider": {
+        "context_length": 200000,
+        "max_completion_tokens": 8192,
+        "is_moderated": false
+      },
+      "supported_parameters": ["tools", "temperature"]
+    },
+    {
+      "id": "meta-llama/llama-3.1-8b-instruct:free",
+      "name": "Llama 3.1 8B (Free)",
+      "created": 1720000000,
+      "context_length": 131072,
+      "architecture": {
+        "modality": "text->text",
+        "input_modalities": ["text"],
+        "output_modalities": ["text"]
+      },
+      "pricing": {
+        "prompt": "0",
+        "completion": "0"
+      }
+    }
+  ]
+}

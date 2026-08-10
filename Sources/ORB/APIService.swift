@@ -8,22 +8,37 @@ final class APIService: ObservableObject {
     @Published var lastRefresh: Date?
     @Published var endpointsError: String?
 
+    typealias DataLoader = (URL) async throws -> (Data, URLResponse)
+
     private let modelsURL = URL(string: "https://openrouter.ai/api/v1/models")!
+    private let dataLoader: DataLoader
 
     /// Local cache path for the models list — enables instant startup on subsequent launches.
-    private let cacheURL: URL = {
+    private static let defaultCacheURL: URL = {
         let appSupport = FileManager.default
-            .urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+            .urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+            ?? FileManager.default.temporaryDirectory
         let appDir = appSupport.appendingPathComponent("ORB", isDirectory: true)
         try? FileManager.default.createDirectory(at: appDir, withIntermediateDirectories: true)
         return appDir.appendingPathComponent("models_cache.json")
     }()
+    private let cacheURL: URL
 
     /// Cache the models response for 5 minutes. If the network fails, fall back to cache regardless of age.
     private let cacheMaxAge: TimeInterval = 300
 
+    init(
+        cacheURL: URL? = nil,
+        dataLoader: @escaping DataLoader = { try await URLSession.shared.data(from: $0) }
+    ) {
+        self.cacheURL = cacheURL ?? APIService.defaultCacheURL
+        self.dataLoader = dataLoader
+    }
+
     func fetchModels() async {
+        guard !isLoading else { return }
         isLoading = true
+        defer { isLoading = false }
         errorMessage = nil
 
         // Try to load from cache first for instant display
@@ -33,12 +48,9 @@ final class APIService: ObservableObject {
         }
 
         do {
-            let (data, response) = try await URLSession.shared.data(from: modelsURL)
+            let (data, response) = try await dataLoader(modelsURL)
             guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
-                if models.isEmpty {
-                    errorMessage = "HTTP error fetching models"
-                }
-                isLoading = false
+                loadCacheFallback(errorDescription: "HTTP error fetching models")
                 return
             }
 
@@ -47,13 +59,8 @@ final class APIService: ObservableObject {
             lastRefresh = Date()
             saveToCache(data: data)
         } catch {
-            if models.isEmpty {
-                errorMessage = "Failed to load: \(error.localizedDescription)"
-            }
-            // If we have cached data, silently keep it — no error shown
+            loadCacheFallback(errorDescription: "Failed to load: \(error.localizedDescription)")
         }
-
-        isLoading = false
     }
 
     // MARK: - Cache
@@ -84,6 +91,15 @@ final class APIService: ObservableObject {
         models = decoded.data.sorted { $0.name < $1.name }
     }
 
+    private func loadCacheFallback(errorDescription: String) {
+        if models.isEmpty { loadFromCache() }
+        if models.isEmpty {
+            errorMessage = errorDescription
+        } else if lastRefresh == nil {
+            lastRefresh = cacheDate
+        }
+    }
+
     private func saveToCache(data: Data) {
         try? data.write(to: cacheURL)
     }
@@ -96,7 +112,7 @@ final class APIService: ObservableObject {
             return []
         }
         do {
-            let (data, response) = try await URLSession.shared.data(from: url)
+            let (data, response) = try await dataLoader(url)
             guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
                 endpointsError = "HTTP \((response as? HTTPURLResponse)?.statusCode ?? 0) loading providers"
                 return []

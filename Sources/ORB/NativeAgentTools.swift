@@ -1,8 +1,11 @@
+import Darwin
 import Foundation
 
 /// Native functions owned and executed by ORB.
 /// Full-access tools intentionally run with the current user's permissions.
 enum NativeAgentTools {
+    typealias ProcessSignalSender = @Sendable (pid_t, Int32) -> Int32
+
     static func definitions(fullComputerAccess: Bool) -> [AgentToolDefinition] {
         var tools = [definition(
             name: "fetch_url",
@@ -111,7 +114,7 @@ enum NativeAgentTools {
         argumentsJSON: String,
         workspace: String,
         fullComputerAccess: Bool
-    ) async -> NativeAgentToolResult {
+    ) async throws -> NativeAgentToolResult {
         if name != "fetch_url", !fullComputerAccess {
             return .init(content: "Computer Access is off. Enable it before using \(name).", isError: true)
         }
@@ -148,6 +151,8 @@ enum NativeAgentTools {
             default:
                 return .init(content: "Unknown native function: \(name)", isError: true)
             }
+        } catch is CancellationError {
+            throw CancellationError()
         } catch {
             return .init(content: "\(name) failed: \(error.localizedDescription)", isError: true)
         }
@@ -162,7 +167,7 @@ enum NativeAgentTools {
         AgentToolDefinition(function: .init(
             name: name,
             description: description,
-            parameters: .init(properties: properties, required: required)
+            parameters: .native(AgentToolParameters(properties: properties, required: required))
         ))
     }
 
@@ -402,66 +407,273 @@ enum NativeAgentTools {
 
     private final class ProcessBox: @unchecked Sendable {
         private let lock = NSLock()
-        private var process: Process?
+        private let sendSignal: ProcessSignalSender
+        private var pid: pid_t?
+        private var cancelled = false
+        private var forceKillDeadline: ContinuousClock.Instant?
 
-        func store(_ process: Process) {
+        init(sendSignal: @escaping ProcessSignalSender = { Darwin.kill($0, $1) }) {
+            self.sendSignal = sendSignal
+        }
+
+        func store(_ pid: pid_t) {
             lock.lock()
-            self.process = process
+            self.pid = pid
+            if cancelled {
+                signalProcessGroup(pid, signal: SIGTERM)
+                forceKillDeadline = ContinuousClock.now.advanced(by: .milliseconds(500))
+            }
             lock.unlock()
         }
 
         func terminate() {
             lock.lock()
-            let current = process
+            cancelled = true
+            if let pid {
+                signalProcessGroup(pid, signal: SIGTERM)
+                if forceKillDeadline == nil {
+                    forceKillDeadline = ContinuousClock.now.advanced(by: .milliseconds(500))
+                }
+            }
             lock.unlock()
-            if current?.isRunning == true { current?.terminate() }
         }
+
+        private func signalProcessGroup(_ pid: pid_t, signal: Int32) {
+            guard pid > 0 else { return }
+            _ = sendSignal(-pid, signal)
+        }
+
+        func waitForExit(
+            _ expectedPID: pid_t,
+            pipesClosed: @Sendable () -> Bool
+        ) throws -> Int32 {
+            while true {
+                lock.lock()
+                guard pid == expectedPID else {
+                    lock.unlock()
+                    throw POSIXError(.ECHILD)
+                }
+
+                if let deadline = forceKillDeadline {
+                    let remaining = ContinuousClock.now.duration(to: deadline)
+                    if remaining > .zero {
+                        lock.unlock()
+                        let parts = remaining.components
+                        let seconds = Double(parts.seconds) + Double(parts.attoseconds) / 1e18
+                        Thread.sleep(forTimeInterval: min(0.005, seconds))
+                        continue
+                    }
+                    signalProcessGroup(expectedPID, signal: SIGKILL)
+                    forceKillDeadline = nil
+                }
+
+                if cancelled {
+                    var status: Int32 = 0
+                    let result = Darwin.waitpid(expectedPID, &status, 0)
+                    if result == expectedPID {
+                        pid = nil
+                        lock.unlock()
+                        let signal = status & 0x7f
+                        return signal == 0 ? (status >> 8) & 0xff : 128 + signal
+                    }
+                    let code = errno
+                    pid = nil
+                    lock.unlock()
+                    throw POSIXError(POSIXErrorCode(rawValue: code) ?? .EIO)
+                }
+
+                var info = siginfo_t()
+                let observed = Darwin.waitid(
+                    P_PID,
+                    id_t(expectedPID),
+                    &info,
+                    WEXITED | WNOHANG | WNOWAIT
+                )
+                if observed == -1, errno != EINTR {
+                    let code = errno
+                    pid = nil
+                    lock.unlock()
+                    throw POSIXError(POSIXErrorCode(rawValue: code) ?? .EIO)
+                }
+                guard info.si_pid == expectedPID, pipesClosed() else {
+                    lock.unlock()
+                    Thread.sleep(forTimeInterval: 0.005)
+                    continue
+                }
+
+                var status: Int32 = 0
+                let result = Darwin.waitpid(expectedPID, &status, 0)
+                if result == expectedPID {
+                    pid = nil
+                    lock.unlock()
+                    let signal = status & 0x7f
+                    return signal == 0 ? (status >> 8) & 0xff : 128 + signal
+                }
+                let code = errno
+                pid = nil
+                lock.unlock()
+                throw POSIXError(POSIXErrorCode(rawValue: code) ?? .EIO)
+            }
+        }
+
+        var isCancelled: Bool {
+            lock.lock()
+            defer { lock.unlock() }
+            return cancelled
+        }
+    }
+
+    private final class BoundedPipeCollector: @unchecked Sendable {
+        private let lock = NSLock()
+        private let limit: Int
+        private var data = Data()
+        private var omitted = 0
+        private var eof = false
+
+        init(limit: Int = 60_000) { self.limit = limit }
+
+        func append(_ chunk: Data) {
+            lock.lock()
+            guard !chunk.isEmpty else {
+                eof = true
+                lock.unlock()
+                return
+            }
+            let remaining = max(0, limit - data.count)
+            data.append(chunk.prefix(remaining))
+            omitted += max(0, chunk.count - remaining)
+            lock.unlock()
+        }
+
+        var reachedEOF: Bool {
+            lock.lock()
+            defer { lock.unlock() }
+            return eof
+        }
+
+        var output: String {
+            lock.lock()
+            defer { lock.unlock() }
+            let value = String(decoding: data, as: UTF8.self)
+            return omitted == 0 ? value : value + "\n… output truncated (at least \(omitted) bytes omitted) …"
+        }
+    }
+
+    private static func spawn(
+        executable: String,
+        arguments: [String],
+        workingDirectory: String?,
+        outputPipe: Pipe,
+        errorPipe: Pipe
+    ) throws -> pid_t {
+        var fileActions: posix_spawn_file_actions_t?
+        var attributes: posix_spawnattr_t?
+        guard posix_spawn_file_actions_init(&fileActions) == 0,
+              posix_spawnattr_init(&attributes) == 0 else {
+            throw POSIXError(.ENOMEM)
+        }
+        defer {
+            posix_spawn_file_actions_destroy(&fileActions)
+            posix_spawnattr_destroy(&attributes)
+        }
+
+        let outputRead = outputPipe.fileHandleForReading.fileDescriptor
+        let outputWrite = outputPipe.fileHandleForWriting.fileDescriptor
+        let errorRead = errorPipe.fileHandleForReading.fileDescriptor
+        let errorWrite = errorPipe.fileHandleForWriting.fileDescriptor
+        posix_spawn_file_actions_addclose(&fileActions, outputRead)
+        posix_spawn_file_actions_addclose(&fileActions, errorRead)
+        posix_spawn_file_actions_adddup2(&fileActions, outputWrite, STDOUT_FILENO)
+        posix_spawn_file_actions_adddup2(&fileActions, errorWrite, STDERR_FILENO)
+        posix_spawn_file_actions_addclose(&fileActions, outputWrite)
+        posix_spawn_file_actions_addclose(&fileActions, errorWrite)
+        if let workingDirectory {
+            posix_spawn_file_actions_addchdir_np(&fileActions, workingDirectory)
+        }
+
+        let flags = Int16(POSIX_SPAWN_SETPGROUP)
+        guard posix_spawnattr_setflags(&attributes, flags) == 0,
+              posix_spawnattr_setpgroup(&attributes, 0) == 0 else {
+            throw POSIXError(.EINVAL)
+        }
+
+        let argumentStrings = [executable] + arguments
+        var argv = argumentStrings.map { strdup($0) } + [nil]
+        let environmentStrings = ProcessInfo.processInfo.environment.map { "\($0.key)=\($0.value)" }
+        var envp = environmentStrings.map { strdup($0) } + [nil]
+        defer {
+            argv.compactMap { $0 }.forEach { free($0) }
+            envp.compactMap { $0 }.forEach { free($0) }
+        }
+
+        var pid: pid_t = 0
+        let status = argv.withUnsafeMutableBufferPointer { argvBuffer in
+            envp.withUnsafeMutableBufferPointer { envBuffer in
+                posix_spawn(
+                    &pid,
+                    executable,
+                    &fileActions,
+                    &attributes,
+                    argvBuffer.baseAddress!,
+                    envBuffer.baseAddress!
+                )
+            }
+        }
+        guard status == 0 else { throw POSIXError(POSIXErrorCode(rawValue: status) ?? .EIO) }
+        return pid
     }
 
     private static func runProcess(
         executable: String,
         arguments: [String],
-        workingDirectory: String? = nil
+        workingDirectory: String? = nil,
+        launchDelay: Duration = .zero,
+        sendSignal: @escaping ProcessSignalSender = { Darwin.kill($0, $1) }
     ) async throws -> ProcessResult {
-        let box = ProcessBox()
+        let box = ProcessBox(sendSignal: sendSignal)
         return try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { continuation in
                 DispatchQueue.global(qos: .userInitiated).async {
-                    let temporary = FileManager.default.temporaryDirectory
-                    let outputURL = temporary.appendingPathComponent(UUID().uuidString)
-                    let errorURL = temporary.appendingPathComponent(UUID().uuidString)
-                    FileManager.default.createFile(atPath: outputURL.path, contents: nil)
-                    FileManager.default.createFile(atPath: errorURL.path, contents: nil)
-                    defer {
-                        try? FileManager.default.removeItem(at: outputURL)
-                        try? FileManager.default.removeItem(at: errorURL)
-                    }
-
                     do {
-                        let process = Process()
-                        let outputHandle = try FileHandle(forWritingTo: outputURL)
-                        let errorHandle = try FileHandle(forWritingTo: errorURL)
+                        if launchDelay != .zero {
+                            Thread.sleep(forTimeInterval: Double(launchDelay.components.seconds) + Double(launchDelay.components.attoseconds) / 1e18)
+                        }
+                        if box.isCancelled { throw CancellationError() }
+                        let outputPipe = Pipe()
+                        let errorPipe = Pipe()
+                        let output = BoundedPipeCollector()
+                        let errors = BoundedPipeCollector()
+                        outputPipe.fileHandleForReading.readabilityHandler = { output.append($0.availableData) }
+                        errorPipe.fileHandleForReading.readabilityHandler = { errors.append($0.availableData) }
                         defer {
-                            try? outputHandle.close()
-                            try? errorHandle.close()
+                            outputPipe.fileHandleForReading.readabilityHandler = nil
+                            errorPipe.fileHandleForReading.readabilityHandler = nil
+                            try? outputPipe.fileHandleForReading.close()
+                            try? errorPipe.fileHandleForReading.close()
                         }
-                        process.executableURL = URL(fileURLWithPath: executable)
-                        process.arguments = arguments
-                        if let workingDirectory {
-                            process.currentDirectoryURL = URL(fileURLWithPath: workingDirectory, isDirectory: true)
+                        let pid = try spawn(
+                            executable: executable,
+                            arguments: arguments,
+                            workingDirectory: workingDirectory,
+                            outputPipe: outputPipe,
+                            errorPipe: errorPipe
+                        )
+                        try? outputPipe.fileHandleForWriting.close()
+                        try? errorPipe.fileHandleForWriting.close()
+                        box.store(pid)
+                        if box.isCancelled { box.terminate() }
+                        let exitCode = try box.waitForExit(pid) {
+                            output.reachedEOF && errors.reachedEOF
                         }
-                        process.standardOutput = outputHandle
-                        process.standardError = errorHandle
-                        box.store(process)
-                        try process.run()
-                        process.waitUntilExit()
-                        if Task.isCancelled { throw CancellationError() }
-                        let output = try Data(contentsOf: outputURL)
-                        let errors = try Data(contentsOf: errorURL)
+                        if box.isCancelled { throw CancellationError() }
+                        outputPipe.fileHandleForReading.readabilityHandler = nil
+                        errorPipe.fileHandleForReading.readabilityHandler = nil
+                        output.append((try? outputPipe.fileHandleForReading.readToEnd()) ?? Data())
+                        errors.append((try? errorPipe.fileHandleForReading.readToEnd()) ?? Data())
                         continuation.resume(returning: ProcessResult(
-                            stdout: String(data: output, encoding: .utf8) ?? "",
-                            stderr: String(data: errors, encoding: .utf8) ?? "",
-                            exitCode: process.terminationStatus
+                            stdout: output.output,
+                            stderr: errors.output,
+                            exitCode: exitCode
                         ))
                     } catch {
                         continuation.resume(throwing: error)
@@ -471,6 +683,19 @@ enum NativeAgentTools {
         } onCancel: {
             box.terminate()
         }
+    }
+
+    static func runProcessForTesting(
+        command: String,
+        launchDelay: Duration = .zero,
+        sendSignal: @escaping ProcessSignalSender = { Darwin.kill($0, $1) }
+    ) async throws -> Int32 {
+        try await runProcess(
+            executable: "/bin/zsh",
+            arguments: ["-lc", command],
+            launchDelay: launchDelay,
+            sendSignal: sendSignal
+        ).exitCode
     }
 
     private enum ToolError: LocalizedError {

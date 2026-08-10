@@ -1,0 +1,43 @@
+{
+  "data": {
+    "id": "openai/gpt-4o",
+    "name": "GPT-4o",
+    "endpoints": [
+      {
+        "name": "openai",
+        "model_id": "openai/gpt-4o",
+        "provider_name": "OpenAI",
+        "context_length": 128000,
+        "max_completion_tokens": 16384,
+        "pricing": {
+          "prompt": "0.000005",
+          "completion": "0.000015",
+          "input_cache_read": "0.0000025"
+        },
+        "quantization": null,
+        "latency_last_30m": 1200,
+        "throughput_last_30m": 85,
+        "uptime_last_5m": 0.999,
+        "uptime_last_30m": 0.998,
+        "uptime_last_1d": 0.997,
+        "supports_implicit_caching": true,
+        "status": 0
+      },
+      {
+        "name": "azure",
+        "model_id": "openai/gpt-4o",
+        "provider_name": "Azure",
+        "context_length": 128000,
+        "max_completion_tokens": 16384,
+        "pricing": {
+          "prompt": "0.000006",
+          "completion": "0.000018"
+        },
+        "latency_last_30m": 1500,
+        "throughput_last_30m": 70,
+        "uptime_last_5m": 0.995,
+        "status": 0
+      }
+    ]
+  }
+}

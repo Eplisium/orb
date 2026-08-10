@@ -426,17 +426,133 @@ struct ResponseFormat: Codable {
     let type: String
 }
 
-struct ChatMessage: Codable, Identifiable, Equatable {
+enum ChatMessageStatus: String, Codable, Sendable {
+    case complete, streaming, failed, interrupted, truncated
+}
+
+struct ChatMessage: Codable, Identifiable, Equatable, Sendable {
     var id: UUID = UUID()
     let role: String
     var content: String
+    /// Tool calls requested by the assistant (agent mode).
+    var toolCalls: [ToolCallDisplay]?
+    /// For tool result messages: the tool_call_id this answers.
+    var toolCallId: String?
+    /// For tool result messages: the tool name.
+    var toolName: String?
+    var status: ChatMessageStatus
+    var finishReason: String?
+    var errorMessage: String?
+    /// Chain-of-thought emitted by reasoning models, shown in a collapsible
+    /// section so it never crowds out the answer.
+    var reasoning: String?
 
-    enum CodingKeys: String, CodingKey {
-        case role, content
+    init(
+        id: UUID = UUID(),
+        role: String,
+        content: String,
+        toolCalls: [ToolCallDisplay]? = nil,
+        toolCallId: String? = nil,
+        toolName: String? = nil,
+        status: ChatMessageStatus = .complete,
+        finishReason: String? = nil,
+        errorMessage: String? = nil,
+        reasoning: String? = nil
+    ) {
+        self.id = id
+        self.role = role
+        self.content = content
+        self.toolCalls = toolCalls
+        self.toolCallId = toolCallId
+        self.toolName = toolName
+        self.status = status
+        self.finishReason = finishReason
+        self.errorMessage = errorMessage
+        self.reasoning = reasoning
     }
 
+    enum CodingKeys: String, CodingKey {
+        case role, content, reasoning
+        case toolCalls = "tool_calls_display"
+        case toolCallId = "tool_call_id"
+        case toolName = "tool_name"
+        case id, status
+        case finishReason = "finish_reason"
+        case errorMessage = "error_message"
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decodeIfPresent(UUID.self, forKey: .id) ?? UUID()
+        role = try c.decode(String.self, forKey: .role)
+        content = try c.decode(String.self, forKey: .content)
+        toolCalls = try c.decodeIfPresent([ToolCallDisplay].self, forKey: .toolCalls)
+        toolCallId = try c.decodeIfPresent(String.self, forKey: .toolCallId)
+        toolName = try c.decodeIfPresent(String.self, forKey: .toolName)
+        status = try c.decodeIfPresent(ChatMessageStatus.self, forKey: .status) ?? .complete
+        finishReason = try c.decodeIfPresent(String.self, forKey: .finishReason)
+        errorMessage = try c.decodeIfPresent(String.self, forKey: .errorMessage)
+        reasoning = try c.decodeIfPresent(String.self, forKey: .reasoning)
+    }
+
+    /// Compares the fields that actually drive rendering. The previous version
+    /// only checked `id`/`role`/`content`, so streamed tool calls, status
+    /// changes, and reasoning updates could be swallowed by SwiftUI's
+    /// equality-based diffing and never redraw.
     static func == (lhs: ChatMessage, rhs: ChatMessage) -> Bool {
-        lhs.id == rhs.id && lhs.role == rhs.role && lhs.content == rhs.content
+        lhs.id == rhs.id
+            && lhs.role == rhs.role
+            && lhs.content == rhs.content
+            && lhs.status == rhs.status
+            && lhs.reasoning == rhs.reasoning
+            && lhs.finishReason == rhs.finishReason
+            && lhs.errorMessage == rhs.errorMessage
+            && lhs.toolCalls == rhs.toolCalls
+    }
+}
+
+/// Lightweight tool-call summary stored alongside ChatMessage for display.
+struct ToolCallDisplay: Codable, Identifiable, Equatable, Hashable, Sendable {
+    let id: String
+    var name: String
+    var argumentsSummary: String
+    var arguments: String?
+    var result: String?
+    var isError: Bool
+    var isExecuting: Bool
+
+    init(
+        id: String,
+        name: String,
+        argumentsSummary: String,
+        arguments: String? = nil,
+        result: String? = nil,
+        isError: Bool = false,
+        isExecuting: Bool = false
+    ) {
+        self.id = id
+        self.name = name
+        self.argumentsSummary = argumentsSummary
+        self.arguments = arguments
+        self.result = result
+        self.isError = isError
+        self.isExecuting = isExecuting
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case id, name, arguments, result, isError, isExecuting
+        case argumentsSummary = "arguments_summary"
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(String.self, forKey: .id)
+        name = try container.decode(String.self, forKey: .name)
+        argumentsSummary = try container.decode(String.self, forKey: .argumentsSummary)
+        arguments = try container.decodeIfPresent(String.self, forKey: .arguments)
+        result = try container.decodeIfPresent(String.self, forKey: .result)
+        isError = try container.decodeIfPresent(Bool.self, forKey: .isError) ?? false
+        isExecuting = try container.decodeIfPresent(Bool.self, forKey: .isExecuting) ?? false
     }
 }
 
@@ -465,17 +581,63 @@ struct ChatDelta: Codable {
     let content: String?
 }
 
-struct ChatUsage: Codable {
+struct ChatUsage: Codable, Equatable, Sendable {
     let promptTokens: Int?
     let completionTokens: Int?
     let totalTokens: Int?
     let cost: Double?
+    /// Prompt tokens served from the provider's cache. These bill at a reduced
+    /// rate, so showing them explains cost gaps on long conversations.
+    var cachedTokens: Int?
+    /// Completion tokens spent on reasoning rather than visible output.
+    var reasoningTokens: Int?
 
     enum CodingKeys: String, CodingKey {
         case cost
         case promptTokens = "prompt_tokens"
         case completionTokens = "completion_tokens"
         case totalTokens = "total_tokens"
+        case promptTokensDetails = "prompt_tokens_details"
+        case completionTokensDetails = "completion_tokens_details"
+    }
+
+    private struct PromptDetails: Codable {
+        let cachedTokens: Int?
+        enum CodingKeys: String, CodingKey { case cachedTokens = "cached_tokens" }
+    }
+
+    private struct CompletionDetails: Codable {
+        let reasoningTokens: Int?
+        enum CodingKeys: String, CodingKey { case reasoningTokens = "reasoning_tokens" }
+    }
+
+    init(promptTokens: Int?, completionTokens: Int?, totalTokens: Int?, cost: Double?,
+         cachedTokens: Int? = nil, reasoningTokens: Int? = nil) {
+        self.promptTokens = promptTokens
+        self.completionTokens = completionTokens
+        self.totalTokens = totalTokens
+        self.cost = cost
+        self.cachedTokens = cachedTokens
+        self.reasoningTokens = reasoningTokens
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        promptTokens = try c.decodeIfPresent(Int.self, forKey: .promptTokens)
+        completionTokens = try c.decodeIfPresent(Int.self, forKey: .completionTokens)
+        totalTokens = try c.decodeIfPresent(Int.self, forKey: .totalTokens)
+        cost = try c.decodeIfPresent(Double.self, forKey: .cost)
+        // Nested detail objects are optional and provider-specific.
+        cachedTokens = try c.decodeIfPresent(PromptDetails.self, forKey: .promptTokensDetails)?.cachedTokens
+        reasoningTokens = try c.decodeIfPresent(CompletionDetails.self, forKey: .completionTokensDetails)?.reasoningTokens
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encodeIfPresent(promptTokens, forKey: .promptTokens)
+        try c.encodeIfPresent(completionTokens, forKey: .completionTokens)
+        try c.encodeIfPresent(totalTokens, forKey: .totalTokens)
+        try c.encodeIfPresent(cost, forKey: .cost)
     }
 }
 
@@ -495,7 +657,7 @@ struct ChatErrorMetadata: Codable {
     }
 }
 
-// MARK: - Chat Conversation (in-memory)
+// MARK: - Chat Conversation
 
 struct ChatConversation: Identifiable, Equatable {
     let id: UUID
@@ -503,6 +665,7 @@ struct ChatConversation: Identifiable, Equatable {
     var modelId: String
     var mode: PlaygroundMode
     var messages: [ChatMessage]
+    var systemPrompt: String
     var createdAt: Date
     var totalCost: Double
     var totalTokens: Int
@@ -513,6 +676,7 @@ struct ChatConversation: Identifiable, Equatable {
         modelId: String,
         mode: PlaygroundMode = .agent,
         messages: [ChatMessage] = [],
+        systemPrompt: String = "",
         createdAt: Date = Date()
     ) {
         self.id = id
@@ -520,6 +684,7 @@ struct ChatConversation: Identifiable, Equatable {
         self.modelId = modelId
         self.mode = mode
         self.messages = messages
+        self.systemPrompt = systemPrompt
         self.createdAt = createdAt
         self.totalCost = 0
         self.totalTokens = 0

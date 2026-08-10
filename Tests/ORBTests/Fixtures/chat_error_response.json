@@ -1,0 +1,11 @@
+{
+  "error": {
+    "code": 402,
+    "message": "Insufficient credits. Please add more credits to your account.",
+    "metadata": {
+      "provider_name": "OpenAI",
+      "raw": "{\"error\":{\"message\":\"You do not have enough credits.\"}}"
+    }
+  },
+  "choices": []
+}

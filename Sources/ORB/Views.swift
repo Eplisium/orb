@@ -155,8 +155,14 @@ struct ModelDetailView: View {
         .onAppear {
             notes = viewModel.db.getNotes(model.id)
         }
-        .onChange(of: model.id) { _, _ in
+        .onChange(of: model.id) { oldID, _ in
+            notesDebounceTask?.cancel()
+            viewModel.db.setNotes(oldID, notes: notes)
             notes = viewModel.db.getNotes(model.id)
+        }
+        .onDisappear {
+            notesDebounceTask?.cancel()
+            viewModel.db.setNotes(model.id, notes: notes)
         }
     }
 
@@ -447,10 +453,11 @@ struct ModelDetailView: View {
                     .clipShape(RoundedRectangle(cornerRadius: 8))
                     .onChange(of: notes) { _, newValue in
                         notesDebounceTask?.cancel()
+                        let modelID = model.id
                         notesDebounceTask = Task {
                             try? await Task.sleep(nanoseconds: 800_000_000)
                             guard !Task.isCancelled else { return }
-                            viewModel.db.setNotes(model.id, notes: newValue)
+                            viewModel.db.setNotes(modelID, notes: newValue)
                         }
                     }
             }

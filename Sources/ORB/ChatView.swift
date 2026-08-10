@@ -1,22 +1,36 @@
 import AppKit
 import SwiftUI
+import UniformTypeIdentifiers
 
 /// A polished OpenRouter chat playground — direct model conversations with
 /// streaming, temperature/max-token controls, and live cost tracking.
 struct ChatView: View {
     @ObservedObject var viewModel: BrowserViewModel
-    @StateObject private var chatService = ChatService()
+    @ObservedObject var chatService: ChatService
 
     @State private var messageText = ""
     @State private var selectedModelId = ""
+    @AppStorage(PlaygroundModelDefaults.chatKey) private var defaultModelId = ""
     @State private var temperature = 0.7
     @State private var maxTokens: Double = 0
+    @State private var settings = GenerationSettings.default
     @State private var showSettings = false
+    @State private var showAdvancedSettings = false
     @State private var showModelPicker = false
     @State private var modelSearchText = ""
+    @State private var followsLatest = true
     @FocusState private var inputFocused: Bool
 
     private let accent = PlaygroundTheme.chatAccent
+
+    /// Folds the two quick-access sliders into the full settings object so the
+    /// simple controls and the advanced panel stay in sync.
+    private var requestSettings: GenerationSettings {
+        var resolved = settings
+        resolved.temperature = temperature
+        resolved.maxTokens = maxTokens > 0 ? Int(maxTokens) : nil
+        return resolved
+    }
 
     var body: some View {
         HStack(spacing: 0) {
@@ -28,7 +42,11 @@ struct ChatView: View {
         }
         .background(playgroundBackground)
         .task {
-            if selectedModelId.isEmpty { selectedModelId = preferredModelId }
+            chatService.activateConversation(for: .chat)
+            selectedModelId = PlaygroundModelDefaults.initialSelection(
+                activeModelId: chatService.activeConversation?.modelId,
+                preferredModelId: preferredModelId
+            )
             viewModel.loadFavorites()
             inputFocused = true
         }
@@ -43,7 +61,7 @@ struct ChatView: View {
                 .fill(Color.primary.opacity(0.07))
                 .frame(height: 1)
             if let error = chatService.lastError {
-                errorBanner(error)
+                PlaygroundErrorBanner(message: error) { chatService.lastError = nil }
             }
             messageArea
             composer
@@ -90,13 +108,15 @@ struct ChatView: View {
                                 ConversationRow(
                                     conversation: conversation,
                                     isSelected: chatService.activeConversation?.id == conversation.id,
+                                    isRunning: chatService.isRunning(conversationID: conversation.id),
                                     accent: accent,
                                     icon: "bubble.left",
                                     onSelect: {
                                         chatService.selectConversation(conversation)
                                         selectedModelId = conversation.modelId
                                     },
-                                    onDelete: { chatService.deleteConversation(conversation) }
+                                    onDelete: { chatService.deleteConversation(conversation) },
+                                    onExport: { exportConversation(conversation) }
                                 )
                             }
                         } header: {
@@ -113,7 +133,8 @@ struct ChatView: View {
                 statusColor: agentStatusColor,
                 statusText: agentStatusText,
                 conversation: chatService.activeConversation,
-                formattedCost: chatService.formattedCost
+                formattedCost: chatService.formattedCost,
+                tokensPerSecond: chatService.tokensPerSecond
             )
         }
         .frame(width: 224)
@@ -160,7 +181,49 @@ struct ChatView: View {
 
             Spacer(minLength: 16)
 
+            // Regenerate button
+            if let conv = chatService.activeConversation,
+               !chatService.isStreaming,
+               conv.messages.last?.role == "assistant" {
+                Button {
+                    Task {
+                        await chatService.regenerateLastResponse(
+                            modelId: currentModelId,
+                            settings: requestSettings
+                        )
+                    }
+                } label: {
+                    HStack(spacing: 4) {
+                        Image(systemName: "arrow.clockwise")
+                        Text("Regenerate")
+                    }
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(accent)
+                    .padding(.horizontal, 9)
+                    .padding(.vertical, 6)
+                    .background(accent.opacity(0.10))
+                    .clipShape(Capsule())
+                }
+                .buttonStyle(.plain)
+                .disabled(chatService.isStreaming)
+            }
+
             modelPickerButton
+
+            // Export button
+            if let conversation = chatService.activeConversation {
+                Button {
+                    exportConversation(conversation)
+                } label: {
+                    Image(systemName: "square.and.arrow.up")
+                        .font(.system(size: 12, weight: .semibold))
+                        .frame(width: 28, height: 28)
+                        .background(Color.primary.opacity(0.05))
+                        .clipShape(RoundedRectangle(cornerRadius: 7))
+                }
+                .buttonStyle(.plain)
+                .help("Export conversation as Markdown")
+            }
 
             Button {
                 showSettings.toggle()
@@ -173,6 +236,9 @@ struct ChatView: View {
             }
             .buttonStyle(.plain)
             .popover(isPresented: $showSettings) { settingsPopover }
+            .sheet(isPresented: $showAdvancedSettings) {
+                AdvancedSettingsView(accent: accent, settings: $settings)
+            }
         }
         .padding(.horizontal, 18)
         .padding(.vertical, 11)
@@ -209,6 +275,8 @@ struct ChatView: View {
                 selectedModelId: $selectedModelId,
                 searchText: $modelSearchText,
                 toolCapableOnly: nil,
+                defaultModelId: $defaultModelId,
+                defaultLabel: "Chat",
                 accent: accent,
                 toggleFavorite: viewModel.toggleFavorite,
                 dismiss: { showModelPicker = false }
@@ -242,8 +310,67 @@ struct ChatView: View {
                         .foregroundStyle(.secondary)
                 }
                 Slider(value: $maxTokens, in: 0...16384, step: 256)
+                }
+                .font(.subheadline)
+
+                Divider()
+
+                VStack(alignment: .leading, spacing: 7) {
+                Button {
+                    showSettings = false
+                    showAdvancedSettings = true
+                } label: {
+                    HStack {
+                        Label("All Parameters", systemImage: "slider.horizontal.below.rectangle")
+                        Spacer()
+                        if !settings.activeSummary.isEmpty {
+                            Text("\(settings.activeSummary.count)")
+                                .font(.caption2.monospacedDigit())
+                                .padding(.horizontal, 6)
+                                .padding(.vertical, 2)
+                                .background(accent.opacity(0.2), in: Capsule())
+                        }
+                        Image(systemName: "chevron.right").font(.caption2)
+                    }
+                }
+                .buttonStyle(.plain)
+                if !settings.activeSummary.isEmpty {
+                    Text(settings.activeSummary.joined(separator: " · "))
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                } else {
+                    Text("Sampling, reasoning, routing, fallbacks, and web search.")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+                }
+                .font(.subheadline)
+
+            Divider()
+
+            VStack(alignment: .leading, spacing: 7) {
+                Text("SYSTEM PROMPT (OPTIONAL)")
+                    .font(.system(size: 9, weight: .bold))
+                    .foregroundStyle(.secondary)
+                TextEditor(text: Binding(
+                    get: { chatService.activeConversation?.systemPrompt ?? "" },
+                    set: {
+                        if let conv = chatService.activeConversation {
+                            chatService.updateSystemPrompt($0, for: conv)
+                        }
+                    }
+                ))
+                .font(.system(size: 11))
+                .frame(height: 80)
+                .overlay {
+                    RoundedRectangle(cornerRadius: 6)
+                        .stroke(Color.primary.opacity(0.10), lineWidth: 1)
+                }
+                Text("Prepended as a system message to every request.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
-            .font(.subheadline)
         }
         .padding(18)
         .frame(width: 300)
@@ -255,34 +382,70 @@ struct ChatView: View {
     private var messageArea: some View {
         if let conversation = chatService.activeConversation,
            !conversation.messages.isEmpty {
-            ScrollViewReader { proxy in
-                ScrollView {
-                    LazyVStack(spacing: 20) {
-                        ForEach(conversation.messages) { message in
-                            PlaygroundMessageView(
-                                message: message,
-                                isStreaming: chatService.isStreaming && message.id == conversation.messages.last?.id,
-                                assistantName: "Assistant",
-                                accent: accent
-                            )
-                            .id(message.id)
+            let conversationIsRunning = chatService.isRunning(conversationID: conversation.id)
+            GeometryReader { viewport in
+                ScrollViewReader { proxy in
+                    ZStack(alignment: .bottomTrailing) {
+                        ScrollView {
+                            LazyVStack(spacing: 16) {
+                                ForEach(conversation.messages) { message in
+                                    PlaygroundMessageView(
+                                        message: message,
+                                        isStreaming: chatService.isStreamingMessage(message.id, conversationID: conversation.id),
+                                        assistantName: "Assistant",
+                                        accent: accent,
+                                        onDelete: conversationIsRunning
+                                            ? nil
+                                            : { chatService.deleteMessage(message.id, from: conversation) }
+                                    )
+                                    .id(message.id)
+                                }
+
+                                if conversationIsRunning { activityRow }
+
+                                Color.clear
+                                    .frame(height: 1)
+                                    .id("chat-message-bottom")
+                                    .background {
+                                        GeometryReader { bottom in
+                                            Color.clear.preference(
+                                                key: MessageBottomOffsetKey.self,
+                                                value: bottom.frame(in: .named("chat-message-scroll")).maxY
+                                            )
+                                        }
+                                    }
+                            }
+                            .frame(maxWidth: 820)
+                            .padding(.horizontal, 28)
+                            .padding(.vertical, 28)
+                            .frame(maxWidth: .infinity)
+                        }
+                        .coordinateSpace(name: "chat-message-scroll")
+                        .onPreferenceChange(MessageBottomOffsetKey.self) { bottomY in
+                            followsLatest = bottomY <= viewport.size.height + 80
                         }
 
-                        if chatService.isStreaming {
-                            activityRow
-                                .id("activity")
+                        if conversationIsRunning && !followsLatest {
+                            Button {
+                                followsLatest = true
+                                proxy.scrollTo("chat-message-bottom", anchor: .bottom)
+                            } label: {
+                                Label("Jump to latest", systemImage: "arrow.down")
+                            }
+                            .buttonStyle(.borderedProminent)
+                            .controlSize(.small)
+                            .padding(14)
                         }
                     }
-                    .frame(maxWidth: 820)
-                    .padding(.horizontal, 28)
-                    .padding(.vertical, 28)
-                    .frame(maxWidth: .infinity)
-                }
-                .onChange(of: conversation.messages.last?.content) { _, _ in
-                    scrollToBottom(proxy, conversation: conversation)
-                }
-                .onChange(of: chatService.isStreaming) { _, _ in
-                    scrollToBottom(proxy, conversation: conversation)
+                    // Watching only the last message's text missed growth from
+                    // new messages, streaming tool cards, and activity-row
+                    // changes — so long tool-heavy runs stopped following.
+                    .onChange(of: scrollFollowKey(conversation)) { _, _ in
+                        guard followsLatest else { return }
+                        withAnimation(.easeOut(duration: 0.18)) {
+                            proxy.scrollTo("chat-message-bottom", anchor: .bottom)
+                        }
+                    }
                 }
             }
         } else {
@@ -362,8 +525,22 @@ struct ChatView: View {
                 Text("Streaming from OpenRouter")
                     .font(.system(size: 9))
                     .foregroundStyle(.secondary)
+                UsageStatsBar(
+                    usage: chatService.lastUsage,
+                    tokensPerSecond: chatService.tokensPerSecond,
+                    accent: accent
+                )
             }
             Spacer()
+            if chatService.tokensPerSecond > 0 {
+                Text("\(String(format: "%.1f", chatService.tokensPerSecond)) tok/s")
+                    .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                    .foregroundStyle(.orange)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 3)
+                    .background(Color.orange.opacity(0.10))
+                    .clipShape(Capsule())
+            }
             Button("Stop") { chatService.stopStreaming() }
                 .buttonStyle(.bordered)
                 .controlSize(.small)
@@ -431,8 +608,12 @@ struct ChatView: View {
     // MARK: - Actions and derived values
 
     private var preferredModelId: String {
-        if let selected = viewModel.selectedModel?.id { return selected }
-        return viewModel.api.models.first?.id ?? "openai/gpt-4o"
+        let fallback = viewModel.selectedModel?.id ?? viewModel.api.models.first?.id ?? "openai/gpt-4o"
+        return PlaygroundModelDefaults.resolve(
+            storedModelId: defaultModelId,
+            availableModelIds: viewModel.api.models.map(\.id),
+            fallbackModelId: fallback
+        )
     }
 
     private var currentModelId: String {
@@ -457,7 +638,13 @@ struct ChatView: View {
     }
 
     private var agentStatusText: String {
-        if chatService.isStreaming { return "Generating…" }
+        if chatService.isStreaming {
+            guard let id = chatService.activeConversation?.id,
+                  chatService.isRunning(conversationID: id) else {
+                return "Generating in another session…"
+            }
+            return "Generating…"
+        }
         return KeychainManager.hasAPIKey ? "OpenRouter ready" : "API key needed"
     }
 
@@ -471,7 +658,8 @@ struct ChatView: View {
     }
 
     private func newConversation() {
-        _ = chatService.newConversation(modelId: currentModelId, mode: .chat)
+        selectedModelId = preferredModelId
+        _ = chatService.newConversation(modelId: selectedModelId, mode: .chat)
         messageText = ""
         inputFocused = true
     }
@@ -491,14 +679,41 @@ struct ChatView: View {
         let prompt = messageText.trimmingCharacters(in: .whitespacesAndNewlines)
         messageText = ""
 
-        Task {
-            await chatService.sendMessage(
-                prompt,
-                modelId: currentModelId,
-                temperature: temperature,
-                maxTokens: maxTokens > 0 ? Int(maxTokens) : nil
-            )
+        chatService.sendMessage(
+            prompt,
+            modelId: currentModelId,
+            settings: requestSettings
+        )
+    }
+
+    private func exportConversation(_ conv: ChatConversation) {
+        let markdown = DatabaseManager.shared.exportConversationMarkdown(conv)
+        let panel = NSSavePanel()
+        panel.title = "Export Conversation"
+        panel.nameFieldStringValue = "\(conv.title).md"
+        panel.allowedContentTypes = [UTType(filenameExtension: "md") ?? .plainText]
+        if panel.runModal() == .OK, let url = panel.url {
+            do {
+                try markdown.write(to: url, atomically: true, encoding: .utf8)
+            } catch {
+                chatService.lastError = "Could not export conversation: \(error.localizedDescription)"
+            }
         }
+    }
+
+
+    /// Composite key covering every source of content growth during a run:
+    /// message count, the streaming text, tool-call count on the last message,
+    /// and the activity label. Any change means the view got taller.
+    private func scrollFollowKey(_ conversation: ChatConversation) -> String {
+        let last = conversation.messages.last
+        return [
+            String(conversation.messages.count),
+            String(last?.content.count ?? 0),
+            String(last?.toolCalls?.count ?? 0),
+            String(last?.toolCalls?.reduce(0) { $0 + ($1.result?.count ?? 0) } ?? 0),
+            chatService.activityLabel
+        ].joined(separator: "|")
     }
 
     private func scrollToBottom(_ proxy: ScrollViewProxy, conversation: ChatConversation) {
@@ -510,22 +725,4 @@ struct ChatView: View {
             }
         }
     }
-}
-
-// MARK: - Error Banner
-
-private func errorBanner(_ error: String) -> some View {
-    HStack(spacing: 9) {
-        Image(systemName: "exclamationmark.triangle.fill")
-            .foregroundStyle(.orange)
-        Text(error)
-            .font(.system(size: 10, weight: .medium))
-            .lineLimit(2)
-        Spacer()
-        Image(systemName: "xmark")
-            .font(.caption)
-    }
-    .padding(.horizontal, 16)
-    .padding(.vertical, 8)
-    .background(Color.orange.opacity(0.09))
 }

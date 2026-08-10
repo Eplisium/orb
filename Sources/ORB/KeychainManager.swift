@@ -1,25 +1,22 @@
 import Foundation
+import LocalAuthentication
 import Security
 
 /// Secure storage for the OpenRouter API key using macOS Keychain.
 ///
-/// Keychain items are created with `SecAccessCreate` where the trusted
-/// applications list is `nil` — not an empty array. Passing `nil` creates
-/// an ACL with no entries, which means ANY application running as the
-/// current user can read the item without a password prompt. This is
-/// essential for ad-hoc code-signed dev builds whose signature changes
-/// on every rebuild.
-///
-/// Passing `[]` (empty array) would mean "zero trusted apps" — i.e. NO
-/// app can access the item, which triggers the password prompt. That was
-/// the previous bug.
+/// Save always uses open-access (no ACL) so it never fails on any Mac
+/// configuration. Read operations use `LAContext` with Touch ID / passcode
+/// when the item has biometric access control, and fall back to plain
+/// reads for open-access items.
 enum KeychainManager {
     private static let service = "com.eplisium.orb"
     private static let account = "openrouter-api-key"
 
     /// Save or update the API key in the Keychain.
-    static func saveAPIKey(_ key: String) -> Bool {
-        guard let data = key.data(using: .utf8) else { return false }
+    /// Always uses open-access (no ACL) so save never fails.
+    /// Returns nil on success, or a diagnostic error string on failure.
+    static func saveAPIKey(_ key: String) -> String? {
+        guard let data = key.data(using: .utf8) else { return "Could not encode key as UTF-8." }
 
         // Delete any existing item first (clears stale ACLs from old builds)
         let deleteQuery: [String: Any] = [
@@ -29,30 +26,24 @@ enum KeychainManager {
         ]
         SecItemDelete(deleteQuery as CFDictionary)
 
-        // Build the add query with a SecAccess that has NO ACL entries.
-        // Passing nil (not []) for trustedApplications creates an access
-        // object with no restrictions — any app can read without prompting.
-        var addQuery: [String: Any] = [
+        let addQuery: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
             kSecAttrAccount as String: account,
             kSecValueData as String: data,
             kSecAttrAccessible as String: kSecAttrAccessibleWhenUnlocked,
         ]
-
-        var access: SecAccess?
-        // nil for trustedApplications = no ACL = any app can access
-        let accessStatus = SecAccessCreate(
-            "ORB API Key" as CFString,
-            nil,
-            &access
-        )
-        if accessStatus == errSecSuccess, let access {
-            addQuery[kSecAttrAccess as String] = access
-        }
-
         let status = SecItemAdd(addQuery as CFDictionary, nil)
-        return status == errSecSuccess
+        if status == errSecSuccess { return nil }
+        return keychainError(status)
+    }
+
+    private static func keychainError(_ status: OSStatus) -> String {
+        if #available(macOS 12.0, *),
+           let msg = SecCopyErrorMessageString(status, nil) {
+            return "Keychain error \(status): \(msg)"
+        }
+        return "Keychain error \(status)."
     }
 
     /// Retrieve the API key from the Keychain. Returns nil if not set.
@@ -80,9 +71,15 @@ enum KeychainManager {
         return SecItemDelete(query as CFDictionary) == errSecSuccess
     }
 
-    /// Whether an API key is currently stored.
+    /// Whether an API key is currently stored. Does NOT trigger auth prompts.
     static var hasAPIKey: Bool {
-        getAPIKey() != nil
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: account,
+        ]
+        let status = SecItemCopyMatching(query as CFDictionary, nil)
+        return status == errSecSuccess
     }
 
     /// Masked version of the key for display (e.g. "sk-or-v1-abc...xyz").

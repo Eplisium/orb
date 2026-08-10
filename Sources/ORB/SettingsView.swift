@@ -7,12 +7,15 @@ struct SettingsView: View {
     @State private var showKeySaved = false
     @State private var showKeyDeleted = false
     @State private var showKey = false
+    @State private var showRemoveKeyConfirmation = false
+    @State private var keyActionError: String?
     @State private var selectedTab: SettingsTab = .apiKey
 
     enum SettingsTab: String, CaseIterable {
         case apiKey = "API Key"
         case credits = "Credits"
         case activity = "Activity"
+        case mcp = "MCP Servers"
     }
 
     var body: some View {
@@ -35,6 +38,7 @@ struct SettingsView: View {
                     case .apiKey: apiKeySection
                     case .credits: creditsSection
                     case .activity: activitySection
+                    case .mcp: MCPSettingsView(accent: .accentColor)
                     }
                 }
                 .padding(20)
@@ -45,6 +49,28 @@ struct SettingsView: View {
             if KeychainManager.hasAPIKey {
                 await refreshAccount()
             }
+        }
+        .confirmationDialog(
+            "Remove the OpenRouter API key?",
+            isPresented: $showRemoveKeyConfirmation,
+            titleVisibility: .visible
+        ) {
+            Button("Remove Key", role: .destructive) {
+                if KeychainManager.deleteAPIKey() {
+                    keyActionError = nil
+                    showKeyDeleted = true
+                    account.credits = nil
+                    account.activity = []
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
+                        showKeyDeleted = false
+                    }
+                } else {
+                    keyActionError = "The API key could not be removed from Keychain."
+                }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Chat, Agent, credits, and activity will be unavailable until another key is saved.")
         }
     }
 
@@ -110,7 +136,10 @@ struct SettingsView: View {
                     Button("Save Key") {
                         let trimmed = apiKeyInput.trimmingCharacters(in: .whitespacesAndNewlines)
                         guard !trimmed.isEmpty else { return }
-                        if KeychainManager.saveAPIKey(trimmed) {
+                        if let error = KeychainManager.saveAPIKey(trimmed) {
+                            keyActionError = error
+                        } else {
+                            keyActionError = nil
                             showKeySaved = true
                             apiKeyInput = ""
                             Task { await refreshAccount() }
@@ -133,13 +162,7 @@ struct SettingsView: View {
 
                     if KeychainManager.hasAPIKey {
                         Button("Remove Key") {
-                            _ = KeychainManager.deleteAPIKey()
-                            showKeyDeleted = true
-                            account.credits = nil
-                            account.activity = []
-                            DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
-                                showKeyDeleted = false
-                            }
+                            showRemoveKeyConfirmation = true
                         }
                         .foregroundStyle(.red)
 
@@ -149,6 +172,12 @@ struct SettingsView: View {
                                 .font(.subheadline)
                         }
                     }
+                }
+
+                if let keyActionError {
+                    Label(keyActionError, systemImage: "exclamationmark.triangle.fill")
+                        .font(.caption)
+                        .foregroundStyle(.red)
                 }
             }
 
