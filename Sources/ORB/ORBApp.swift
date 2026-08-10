@@ -1,7 +1,7 @@
 import SwiftUI
 
 @main
-struct OpenRouterBrowserApp: App {
+struct ORBApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
     @StateObject private var focusManager = FocusManager()
 

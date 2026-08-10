@@ -1,6 +1,6 @@
 import Foundation
 import Testing
-@testable import OpenRouterBrowser
+@testable import ORB
 
 @Suite("Native OpenRouter agent")
 struct NativeAgentTests {
@@ -144,7 +144,7 @@ struct NativeAgentTests {
         )
 
         #expect(result.toolNames.contains("read_file"))
-        #expect(result.response.localizedCaseInsensitiveContains("OpenRouterBrowser"))
+        #expect(result.response.localizedCaseInsensitiveContains("ORB"))
     }
 
     private func model(id: String, name: String, supportsTools: Bool) -> ModelInfo {

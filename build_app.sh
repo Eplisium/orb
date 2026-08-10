@@ -7,9 +7,9 @@ set -e
 # --- Configuration ---
 PROJECT_DIR="$(cd "$(dirname "$0")" && pwd)"
 BUILD_DIR="$PROJECT_DIR/.build"
-APP_NAME="${1:-$(basename "$PROJECT_DIR")}"  # Default to dir name, or pass as arg
+APP_NAME="${1:-ORB}"  # Default to ORB, or pass as arg
 APP_BUNDLE="$PROJECT_DIR/$APP_NAME.app"
-BUNDLE_ID="com.eplisium.openrouter-browser"
+BUNDLE_ID="com.eplisium.orb"
 
 # --- Find the built binary ---
 # Exclude dSYM/DWARF paths — SPM creates .build/.../debug/MyApp.dSYM/Contents/Resources/DWARF/MyApp
@@ -90,14 +90,14 @@ let circlePath = NSBezierPath(ovalIn: circleRect)
 NSColor(srgbRed: 1.0, green: 1.0, blue: 1.0, alpha: 0.95).setFill()
 circlePath.fill()
 
-// Inner "OR" text
-let orText = "OR" as NSString
+// Inner "ORB" text
+let orbText = "ORB" as NSString
 let attrs: [NSAttributedString.Key: Any] = [
-    .font: NSFont.systemFont(ofSize: 140, weight: .heavy),
+    .font: NSFont.systemFont(ofSize: 120, weight: .heavy),
     .foregroundColor: NSColor(srgbRed: 0.30, green: 0.15, blue: 0.60, alpha: 1.0)
 ]
-let textSize = orText.size(withAttributes: attrs)
-orText.draw(at: CGPoint(x: center.x - textSize.width / 2, y: center.y - textSize.height / 2 - 10), withAttributes: attrs)
+let textSize = orbText.size(withAttributes: attrs)
+orbText.draw(at: CGPoint(x: center.x - textSize.width / 2, y: center.y - textSize.height / 2 - 10), withAttributes: attrs)
 
 // Satellite nodes around the center
 let nodePositions: [(CGFloat, CGFloat)] = [

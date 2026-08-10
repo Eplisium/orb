@@ -501,6 +501,7 @@ struct ChatConversation: Identifiable, Equatable {
     let id: UUID
     var title: String
     var modelId: String
+    var mode: PlaygroundMode
     var messages: [ChatMessage]
     var createdAt: Date
     var totalCost: Double
@@ -508,14 +509,16 @@ struct ChatConversation: Identifiable, Equatable {
 
     init(
         id: UUID = UUID(),
-        title: String = "New Agent Session",
+        title: String? = nil,
         modelId: String,
+        mode: PlaygroundMode = .agent,
         messages: [ChatMessage] = [],
         createdAt: Date = Date()
     ) {
         self.id = id
-        self.title = title
+        self.title = title ?? (mode == .agent ? "New Agent Session" : "New Chat")
         self.modelId = modelId
+        self.mode = mode
         self.messages = messages
         self.createdAt = createdAt
         self.totalCost = 0

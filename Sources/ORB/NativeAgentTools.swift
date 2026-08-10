@@ -1,6 +1,6 @@
 import Foundation
 
-/// Native functions owned and executed by OpenRouterBrowser.
+/// Native functions owned and executed by ORB.
 /// Full-access tools intentionally run with the current user's permissions.
 enum NativeAgentTools {
     static func definitions(fullComputerAccess: Bool) -> [AgentToolDefinition] {
@@ -325,7 +325,7 @@ enum NativeAgentTools {
         workspace: String
     ) async throws -> NativeAgentToolResult {
         let defaultPath = FileManager.default.temporaryDirectory
-            .appendingPathComponent("OpenRouterBrowser-\(UUID().uuidString).png").path
+            .appendingPathComponent("ORB-\(UUID().uuidString).png").path
         let rawPath = arguments["path"] as? String ?? defaultPath
         let path = resolvedPath(rawPath, workspace: workspace).path
         let result = try await runProcess(executable: "/usr/sbin/screencapture", arguments: ["-x", path])
@@ -386,7 +386,7 @@ enum NativeAgentTools {
         }
         var request = URLRequest(url: url)
         request.timeoutInterval = 30
-        request.setValue("OpenRouterBrowser/1.0", forHTTPHeaderField: "User-Agent")
+        request.setValue("ORB/1.0", forHTTPHeaderField: "User-Agent")
         let (data, response) = try await URLSession.shared.data(for: request)
         let status = (response as? HTTPURLResponse)?.statusCode ?? 0
         let capped = data.prefix(120_000)

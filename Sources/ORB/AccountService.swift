@@ -19,8 +19,8 @@ final class AccountService: ObservableObject {
         request.httpMethod = method
         request.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.setValue("OpenRouterBrowser", forHTTPHeaderField: "HTTP-Referer")
-        request.setValue("OpenRouterBrowser", forHTTPHeaderField: "X-OpenRouter-Title")
+        request.setValue("ORB", forHTTPHeaderField: "HTTP-Referer")
+        request.setValue("ORB", forHTTPHeaderField: "X-OpenRouter-Title")
         return request
     }
 

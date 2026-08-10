@@ -171,7 +171,9 @@ enum SidebarSection: String, CaseIterable, Identifiable {
     case allModels = "All Models"
     case favorites = "Favorites"
     case newThisWeek = "New This Week"
-    case playground = "Playground"
+    case agent = "Agent"
+    case chat = "Chat"
+    case testSuite = "Test Suite"
     case account = "Account"
 
     var id: String { rawValue }
@@ -180,7 +182,9 @@ enum SidebarSection: String, CaseIterable, Identifiable {
         case .allModels: return "square.grid.2x2"
         case .favorites: return "star.fill"
         case .newThisWeek: return "sparkles"
-        case .playground: return "wand.and.stars"
+        case .agent: return "wand.and.stars"
+        case .chat: return "bubble.left.fill"
+        case .testSuite: return "checkmark.seal.fill"
         case .account: return "gearshape.fill"
         }
     }
@@ -212,8 +216,12 @@ struct ContentView: View {
                 NavigationSplitView {
                     sidebar
                 } detail: {
-                    if selectedSection == .playground {
+                    if selectedSection == .agent {
+                        AgentView(viewModel: vm)
+                    } else if selectedSection == .chat {
                         ChatView(viewModel: vm)
+                    } else if selectedSection == .testSuite {
+                        TestSuiteView(viewModel: vm)
                     } else if selectedSection == .account {
                         SettingsView()
                     }
@@ -244,7 +252,9 @@ struct ContentView: View {
             }
             // Tools
             Section("Tools") {
-                sidebarRow(.playground)
+                sidebarRow(.agent)
+                sidebarRow(.chat)
+                sidebarRow(.testSuite)
                 sidebarRow(.account)
             }
         }
@@ -291,7 +301,7 @@ struct ContentView: View {
         case .allModels: return vm.api.models.count
         case .favorites: return vm.favoriteIds.count
         case .newThisWeek: return vm.newThisWeekCount
-        case .playground, .account: return 0
+        case .agent, .chat, .testSuite, .account: return 0
         }
     }
 

@@ -14,7 +14,7 @@ final class APIService: ObservableObject {
     private let cacheURL: URL = {
         let appSupport = FileManager.default
             .urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-        let appDir = appSupport.appendingPathComponent("OpenRouterBrowser", isDirectory: true)
+        let appDir = appSupport.appendingPathComponent("ORB", isDirectory: true)
         try? FileManager.default.createDirectory(at: appDir, withIntermediateDirectories: true)
         return appDir.appendingPathComponent("models_cache.json")
     }()

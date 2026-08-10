@@ -2,17 +2,17 @@
 import PackageDescription
 
 let package = Package(
-    name: "OpenRouterBrowser",
+    name: "ORB",
     platforms: [.macOS(.v14)],
     targets: [
         .executableTarget(
-            name: "OpenRouterBrowser",
-            path: "Sources/OpenRouterBrowser"
+            name: "ORB",
+            path: "Sources/ORB"
         ),
         .testTarget(
-            name: "OpenRouterBrowserTests",
-            dependencies: ["OpenRouterBrowser"],
-            path: "Tests/OpenRouterBrowserTests"
+            name: "ORBTests",
+            dependencies: ["ORB"],
+            path: "Tests/ORBTests"
         )
     ]
 )

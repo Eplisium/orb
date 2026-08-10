@@ -2,15 +2,26 @@ import Foundation
 import Security
 
 /// Secure storage for the OpenRouter API key using macOS Keychain.
+///
+/// Keychain items are created with `SecAccessCreate` where the trusted
+/// applications list is `nil` — not an empty array. Passing `nil` creates
+/// an ACL with no entries, which means ANY application running as the
+/// current user can read the item without a password prompt. This is
+/// essential for ad-hoc code-signed dev builds whose signature changes
+/// on every rebuild.
+///
+/// Passing `[]` (empty array) would mean "zero trusted apps" — i.e. NO
+/// app can access the item, which triggers the password prompt. That was
+/// the previous bug.
 enum KeychainManager {
-    private static let service = "com.eplisium.openrouter-browser"
+    private static let service = "com.eplisium.orb"
     private static let account = "openrouter-api-key"
 
     /// Save or update the API key in the Keychain.
     static func saveAPIKey(_ key: String) -> Bool {
         guard let data = key.data(using: .utf8) else { return false }
 
-        // Delete any existing item first
+        // Delete any existing item first (clears stale ACLs from old builds)
         let deleteQuery: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
@@ -18,15 +29,30 @@ enum KeychainManager {
         ]
         SecItemDelete(deleteQuery as CFDictionary)
 
-        // Add the new item
-        let addQuery: [String: Any] = [
+        // Build the add query with a SecAccess that has NO ACL entries.
+        // Passing nil (not []) for trustedApplications creates an access
+        // object with no restrictions — any app can read without prompting.
+        var addQuery: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
             kSecAttrAccount as String: account,
             kSecValueData as String: data,
-            kSecAttrAccessible as String: kSecAttrAccessibleWhenUnlockedThisDeviceOnly,
+            kSecAttrAccessible as String: kSecAttrAccessibleWhenUnlocked,
         ]
-        return SecItemAdd(addQuery as CFDictionary, nil) == errSecSuccess
+
+        var access: SecAccess?
+        // nil for trustedApplications = no ACL = any app can access
+        let accessStatus = SecAccessCreate(
+            "ORB API Key" as CFString,
+            nil,
+            &access
+        )
+        if accessStatus == errSecSuccess, let access {
+            addQuery[kSecAttrAccess as String] = access
+        }
+
+        let status = SecItemAdd(addQuery as CFDictionary, nil)
+        return status == errSecSuccess
     }
 
     /// Retrieve the API key from the Keychain. Returns nil if not set.

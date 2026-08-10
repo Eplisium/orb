@@ -1,6 +1,6 @@
 import Foundation
 
-/// OpenRouterBrowser's own function-calling agent loop.
+/// ORB's own function-calling agent loop.
 /// It talks directly to OpenRouter and executes only functions defined by this app.
 enum NativeAgentRunner {
     private static let completionURL = URL(string: "https://openrouter.ai/api/v1/chat/completions")!
@@ -13,13 +13,14 @@ enum NativeAgentRunner {
         workspace: String,
         fullComputerAccess: Bool,
         history: [AgentAPIMessage],
+        systemPromptOverride: String? = nil,
         onActivity: @escaping @MainActor (String) -> Void
     ) async throws -> NativeAgentRunResult {
         var messages = history
         if messages.isEmpty {
             messages.append(.init(
                 role: "system",
-                content: systemPrompt(workspace: workspace, fullComputerAccess: fullComputerAccess)
+                content: systemPromptOverride ?? systemPrompt(workspace: workspace, fullComputerAccess: fullComputerAccess)
             ))
         }
         messages.append(.init(role: "user", content: prompt))
@@ -93,8 +94,8 @@ enum NativeAgentRunner {
         request.timeoutInterval = 180
         request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.setValue("OpenRouterBrowser", forHTTPHeaderField: "HTTP-Referer")
-        request.setValue("OpenRouterBrowser Native Agent", forHTTPHeaderField: "X-OpenRouter-Title")
+        request.setValue("ORB", forHTTPHeaderField: "HTTP-Referer")
+        request.setValue("ORB Native Agent", forHTTPHeaderField: "X-OpenRouter-Title")
         request.httpBody = try JSONEncoder().encode(body)
 
         let (data, response) = try await URLSession.shared.data(for: request)
@@ -114,7 +115,7 @@ enum NativeAgentRunner {
 
     private static func systemPrompt(workspace: String, fullComputerAccess: Bool) -> String {
         """
-        You are the native OpenRouterBrowser Agent running inside a macOS application. You are not Hermes and must never claim to be Hermes. You can call functions implemented by this application.
+        You are the native ORB Agent running inside a macOS application. You are not Hermes and must never claim to be Hermes. You can call functions implemented by this application.
 
         Workspace: \(workspace)
         Computer Access: \(fullComputerAccess ? "enabled" : "disabled")
