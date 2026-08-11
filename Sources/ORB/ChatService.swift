@@ -55,12 +55,11 @@ final class ChatService: ObservableObject {
     private var streamTask: Task<Void, Never>?
     private var agentHistories: [UUID: [AgentAPIMessage]] = [:]
     private var agentPendingContent = ""
-    private var agentLastPublish: ContinuousClock.Instant?
     private var agentReasoningContent = ""
-    private var agentLastReasoningPublish: ContinuousClock.Instant?
+    private var agentContentCoalescer: StreamPublishCoalescer<String>?
+    private var agentReasoningCoalescer: StreamPublishCoalescer<String>?
     private var regenerationBackups: [UUID: ChatMessage] = [:]
     private var lastCheckpoint: ContinuousClock.Instant?
-    private var lastReasoningPublish: ContinuousClock.Instant = .now
 
     convenience init() {
         self.init(client: OpenRouterClient(), store: DatabaseConversationStore(), apiKeyProvider: { KeychainManager.getAPIKey() })
@@ -244,12 +243,21 @@ final class ChatService: ObservableObject {
 
     private func consumeDirect(request: OpenRouterRequest, context: PlaygroundRunContext) async {
         var fullContent = ""
-        var unpublished = ""
         var reasoningContent = ""
         var latestUsage: ChatUsage?
         var finishReason: String?
-        var firstDelta = true
-        var lastPublish = ContinuousClock.now
+        let contentCoalescer = StreamPublishCoalescer<String>(
+            interval: Self.streamFrameInterval,
+            characterBackstop: Self.streamFlushCharacters
+        ) { [weak self] content in
+            self?.publish(content: content, context: context)
+        }
+        let reasoningCoalescer = StreamPublishCoalescer<String>(
+            interval: Self.streamFrameInterval,
+            characterBackstop: Self.streamFlushCharacters
+        ) { [weak self] reasoning in
+            self?.publishReasoning(reasoning, context: context)
+        }
         do {
             let stream = try await client.stream(request)
             guard owns(context.runID) else { return }
@@ -261,42 +269,23 @@ final class ChatService: ObservableObject {
                 switch event {
                 case .contentDelta(let choice, let text) where choice == 0:
                     fullContent += text
-                    unpublished += text
-                    let now = ContinuousClock.now
-                    // Adaptive coalescing. The first delta always renders
-                    // immediately so time-to-first-token feels instant. After
-                    // that, publish when either enough time has passed for a
-                    // smooth frame or enough text has queued that waiting would
-                    // read as lag — whichever comes first.
-                    let elapsed = lastPublish.duration(to: now)
-                    let shouldPublish = firstDelta
-                        || elapsed >= Self.streamFrameInterval
-                        || unpublished.count >= Self.streamFlushCharacters
-                    if shouldPublish {
-                        publish(content: fullContent, context: context)
-                        unpublished.removeAll(keepingCapacity: true)
-                        lastPublish = now
-                        firstDelta = false
-                    }
+                    contentCoalescer.submit(fullContent, addedCharacters: text.count)
                 case .reasoningDelta(let choice, let text) where choice == 0:
                     reasoningContent += text
-                    let now = ContinuousClock.now
-                    if lastReasoningPublish.duration(to: now) >= Self.streamFrameInterval {
-                        publishReasoning(reasoningContent, context: context)
-                        lastReasoningPublish = now
-                    }
+                    reasoningCoalescer.submit(reasoningContent, addedCharacters: text.count)
                 case .usage(let usage): latestUsage = usage
                 case .finishReason(let choice, let reason) where choice == 0: finishReason = reason
                 case .apiError(let error):
-                    if !unpublished.isEmpty { publish(content: fullContent, context: context) }
+                    contentCoalescer.flush()
+                    reasoningCoalescer.flush()
                     if fullContent.isEmpty, restoreRegeneration(context, message: error.message) { return }
                     fail(context: context, message: error.message, status: .failed, finishReason: finishReason, usage: latestUsage)
                     return
                 default: break
                 }
             }
-            if !unpublished.isEmpty { publish(content: fullContent, context: context) }
-            if !reasoningContent.isEmpty { publishReasoning(reasoningContent, context: context) }
+            contentCoalescer.flush()
+            reasoningCoalescer.flush()
             guard owns(context.runID) else { return }
             if fullContent.isEmpty {
                 if restoreRegeneration(context, message: "The model returned no supported output.") { return }
@@ -307,12 +296,14 @@ final class ChatService: ObservableObject {
             }
         } catch is CancellationError {
             guard owns(context.runID) else { return }
-            if !unpublished.isEmpty { publish(content: fullContent, context: context) }
+            contentCoalescer.flush()
+            reasoningCoalescer.flush()
             if fullContent.isEmpty, restoreRegeneration(context, message: "Regeneration was cancelled.") { return }
             finish(context: context, status: .interrupted, finishReason: "cancelled", usage: latestUsage)
         } catch {
             guard owns(context.runID) else { return }
-            if !unpublished.isEmpty { publish(content: fullContent, context: context) }
+            contentCoalescer.flush()
+            reasoningCoalescer.flush()
             if fullContent.isEmpty, restoreRegeneration(context, message: error.localizedDescription) { return }
             fail(context: context, message: error.localizedDescription, status: .interrupted, finishReason: finishReason, usage: latestUsage)
         }
@@ -474,9 +465,19 @@ final class ChatService: ObservableObject {
         contentPublishCount = 0
         agentPendingContent = ""
         agentReasoningContent = ""
-        agentLastReasoningPublish = nil
-        agentLastPublish = nil
         lastCheckpoint = nil
+        agentContentCoalescer = StreamPublishCoalescer<String>(
+            interval: Self.streamFrameInterval,
+            characterBackstop: Self.streamFlushCharacters
+        ) { [weak self] content in
+            self?.publishAgentContent(content, context: context)
+        }
+        agentReasoningCoalescer = StreamPublishCoalescer<String>(
+            interval: Self.streamFrameInterval,
+            characterBackstop: Self.streamFlushCharacters
+        ) { [weak self] reasoning in
+            self?.publishReasoning(reasoning, context: context)
+        }
         let history = agentHistories[conversationID] ?? []
         let customPrompt = conversations[index].systemPrompt
         streamTask = Task { [weak self] in
@@ -490,6 +491,7 @@ final class ChatService: ObservableObject {
                     onEvent: { event in await self.receiveAgent(event, context: context) }
                 )
                 guard self.owns(context.runID) else { return }
+                self.flushAgentStreams()
                 // Note a force-summarized run so the user knows the answer was
                 // capped rather than naturally concluded.
                 let body = result.hitToolBudget
@@ -501,12 +503,12 @@ final class ChatService: ObservableObject {
                 self.finish(context: context, status: .complete, finishReason: "stop", usage: result.usage)
             } catch is CancellationError {
                 guard self.owns(context.runID) else { return }
-                self.flushAgentContent(context)
+                self.flushAgentStreams()
                 self.rebuildAgentHistory(for: context.conversationID)
                 self.finish(context: context, status: .interrupted, finishReason: "cancelled", usage: nil)
             } catch {
                 guard self.owns(context.runID) else { return }
-                self.flushAgentContent(context)
+                self.flushAgentStreams()
                 self.rebuildAgentHistory(for: context.conversationID)
                 self.fail(context: context, message: error.localizedDescription, status: .failed, finishReason: nil, usage: nil)
             }
@@ -518,24 +520,11 @@ final class ChatService: ObservableObject {
         switch event {
         case .textDelta(let text):
             agentPendingContent += text
-            let now = ContinuousClock.now
-            // Same adaptive cadence as chat: publish the first token instantly,
-            // then coalesce to a frame budget.
-            let due = agentLastPublish == nil
-                || agentLastPublish!.duration(to: now) >= Self.streamFrameInterval
-            if due {
-                flushAgentContent(context)
-                agentLastPublish = now
-            }
+            agentContentCoalescer?.submit(agentPendingContent, addedCharacters: text.count)
             runState.phase = .streaming
         case .reasoningDelta(let text):
             agentReasoningContent += text
-            let now = ContinuousClock.now
-            if agentLastReasoningPublish == nil
-                || agentLastReasoningPublish!.duration(to: now) >= Self.streamFrameInterval {
-                publishReasoning(agentReasoningContent, context: context)
-                agentLastReasoningPublish = now
-            }
+            agentReasoningCoalescer?.submit(agentReasoningContent, addedCharacters: text.count)
         case .toolCallUpdated(let call):
             _ = mutateMessage(context, mutation: { message in
                 var calls = message.toolCalls ?? []
@@ -578,13 +567,18 @@ final class ChatService: ObservableObject {
         }
     }
 
-    private func flushAgentContent(_ context: PlaygroundRunContext) {
+    private func publishAgentContent(_ content: String, context: PlaygroundRunContext) {
         guard owns(context.runID) else { return }
-        _ = mutateMessage(context, mutation: { $0.content = agentPendingContent })
-        streamingContent = agentPendingContent
+        _ = mutateMessage(context, mutation: { $0.content = content })
+        streamingContent = content
         contentPublishCount += 1
         synchronizeActive(context.conversationID)
         checkpoint(context)
+    }
+
+    private func flushAgentStreams() {
+        agentContentCoalescer?.flush()
+        agentReasoningCoalescer?.flush()
     }
 
     func exportActiveConversation() -> String? {

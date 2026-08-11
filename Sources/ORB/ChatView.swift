@@ -19,6 +19,12 @@ struct ChatView: View {
     @State private var showModelPicker = false
     @State private var modelSearchText = ""
     @State private var followsLatest = true
+    /// Latest sentinel maxY in the scroll coordinate space. Updated by
+    /// onPreferenceChange; read by the scroll decision in onChange.
+    @State private var bottomOffset: CGFloat = .infinity
+    /// Throttle gate: last time we issued a programmatic scroll. Prevents
+    /// stacking scroll requests faster than ~30fps.
+    @State private var lastScrollRequest: ContinuousClock.Instant?
     @FocusState private var inputFocused: Bool
 
     private let accent = PlaygroundTheme.chatAccent
@@ -403,9 +409,12 @@ struct ChatView: View {
 
                                 // Always in the tree to prevent LazyVStack
                                 // layout thrashing when streaming starts/stops.
+                                // maxHeight: nil when running (natural height),
+                                // 0 when idle (collapsed) — avoids unbounded
+                                // growth that destabilizes scroll calculations.
                                 activityRow
                                     .opacity(conversationIsRunning ? 1 : 0)
-                                    .frame(maxHeight: conversationIsRunning ? .infinity : 0)
+                                    .frame(maxHeight: conversationIsRunning ? nil : 0)
                                     .clipped()
                                     .allowsHitTesting(conversationIsRunning)
 
@@ -428,13 +437,16 @@ struct ChatView: View {
                         }
                         .coordinateSpace(name: "chat-message-scroll")
                         .onPreferenceChange(MessageBottomOffsetKey.self) { bottomY in
-                            followsLatest = bottomY <= viewport.size.height + 80
+                            bottomOffset = bottomY
+                            updateFollowsLatest(viewportHeight: viewport.size.height)
                         }
 
                         if conversationIsRunning && !followsLatest {
                             Button {
                                 followsLatest = true
-                                proxy.scrollTo("chat-message-bottom", anchor: .bottom)
+                                withAnimation(.easeOut(duration: 0.2)) {
+                                    proxy.scrollTo("chat-message-bottom", anchor: .bottom)
+                                }
                             } label: {
                                 Label("Jump to latest", systemImage: "arrow.down")
                             }
@@ -448,9 +460,14 @@ struct ChatView: View {
                     // changes — so long tool-heavy runs stopped following.
                     .onChange(of: scrollFollowKey(conversation)) { _, _ in
                         guard followsLatest else { return }
-                        withAnimation(.easeOut(duration: 0.18)) {
-                            proxy.scrollTo("chat-message-bottom", anchor: .bottom)
-                        }
+                        requestFollowScroll(proxy)
+                    }
+                    // Reset follow state when switching conversations so a new
+                    // session always starts pinned to the bottom.
+                    .onChange(of: conversation.id) { _, _ in
+                        followsLatest = true
+                        bottomOffset = .infinity
+                        lastScrollRequest = nil
                     }
                 }
             }
@@ -724,13 +741,45 @@ struct ChatView: View {
         ].joined(separator: "|")
     }
 
-    private func scrollToBottom(_ proxy: ScrollViewProxy, conversation: ChatConversation) {
-        withAnimation(.easeOut(duration: 0.18)) {
-            if chatService.isStreaming {
-                proxy.scrollTo("activity", anchor: .bottom)
-            } else if let last = conversation.messages.last {
-                proxy.scrollTo(last.id, anchor: .bottom)
+    /// Hysteresis thresholds for follow behavior. We follow when within
+    /// `followThreshold` of the bottom, but require the user to scroll up
+    /// past `unfollowThreshold` before we stop following — this prevents
+    /// oscillation at the boundary when a large block renders and shifts
+    /// the layout by a few points.
+    private static let followThreshold: CGFloat = 80
+    private static let unfollowThreshold: CGFloat = 200
+    /// Minimum gap between programmatic scroll requests. The eye can't tell
+    /// the difference for bottom-anchored scroll at 30fps, and halving the
+    /// layout pressure prevents frame drops on longer responses.
+    private static let scrollThrottle: Duration = .milliseconds(33)
+
+    /// Updates `followsLatest` using hysteresis: once following, stay
+    /// following until the user scrolls well past the follow threshold.
+    private func updateFollowsLatest(viewportHeight: CGFloat) {
+        let distance = bottomOffset - viewportHeight
+        if followsLatest {
+            // Already following — only unfollow if user scrolled well past.
+            if distance > Self.unfollowThreshold {
+                followsLatest = false
+            }
+        } else {
+            // Not following — refollow if we're near the bottom.
+            if distance <= Self.followThreshold {
+                followsLatest = true
             }
         }
+    }
+
+    /// Issues a throttled, animation-free scroll-to-bottom. Animation is
+    /// intentionally omitted during streaming: content is already growing
+    /// at frame rate, so animating each scroll request stacks overlapping
+    /// animations and can crash NSScrollView under load.
+    private func requestFollowScroll(_ proxy: ScrollViewProxy) {
+        let now = ContinuousClock.now
+        if let last = lastScrollRequest, now - last < Self.scrollThrottle {
+            return
+        }
+        lastScrollRequest = now
+        proxy.scrollTo("chat-message-bottom", anchor: .bottom)
     }
 }

@@ -191,7 +191,19 @@ struct MarkdownText: View {
     /// Streaming messages get a caret on the trailing block.
     var showsCursor: Bool = false
 
-    private var blocks: [MarkdownBlock] { MarkdownParser.parse(content) }
+    /// Cached parse result, invalidated when `content` changes. Without this
+    /// the entire document is re-parsed from scratch on every 16ms streaming
+    /// frame — O(n) per publish, which causes frame drops on longer responses.
+    @State private var cachedBlocks: [MarkdownBlock] = []
+    @State private var cachedContent: String = ""
+
+    private var blocks: [MarkdownBlock] {
+        if cachedContent != content {
+            cachedContent = content
+            cachedBlocks = MarkdownParser.parse(content)
+        }
+        return cachedBlocks
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 9) {

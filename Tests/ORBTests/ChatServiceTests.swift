@@ -335,6 +335,26 @@ struct ChatServiceTests {
         #expect(service.contentPublishCount < 20)
     }
 
+    @Test("Agent flushes the trailing reasoning delta before completion")
+    func agentReasoningIsLossless() async throws {
+        let (service, _, _) = service(scripts: [.init(events: [
+            .reasoningDelta(choiceIndex: 0, text: "first "),
+            .reasoningDelta(choiceIndex: 0, text: "second"),
+            .contentDelta(choiceIndex: 0, text: "answer"),
+            .done
+        ])])
+
+        await service.sendAgentMessage(
+            "hello",
+            modelId: "test/model",
+            workspace: FileManager.default.temporaryDirectory.path,
+            fullComputerAccess: false
+        )
+        try await waitUntilIdle(service)
+
+        #expect(service.activeConversation?.messages.last?.reasoning == "first second")
+    }
+
     @Test("agent tool cards retain execution result state")
     func agentToolCardLifecycle() async throws {
         let file = FileManager.default.temporaryDirectory.appendingPathComponent("ORB-tool-card-\(UUID().uuidString).txt")
