@@ -228,7 +228,10 @@ final class OpenRouterClient: OpenRouterClientProtocol, @unchecked Sendable {
     }
 
     func stream(_ request: OpenRouterRequest) async throws -> AsyncThrowingStream<OpenRouterStreamEvent, Error> {
-        var urlRequest = URLRequest(url: endpoint, timeoutInterval: min(60, NetworkTimeouts.request))
+        // The user-configured request timeout governs the full setup window
+        // (connect + headers + first byte); capping it below the configured
+        // value would silently defeat the setting for slow upstream models.
+        var urlRequest = URLRequest(url: endpoint, timeoutInterval: NetworkTimeouts.request)
         urlRequest.httpMethod = "POST"
         urlRequest.setValue("Bearer \(request.apiKey)", forHTTPHeaderField: "Authorization")
         urlRequest.setValue("application/json", forHTTPHeaderField: "Content-Type")

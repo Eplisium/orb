@@ -2,15 +2,19 @@ import SwiftUI
 
 /// Settings section for network timeouts (Settings → Advanced).
 ///
-/// Edits write through to `NetworkTimeouts` immediately; clamping happens in
-/// the store, and the text fields re-clamp on focus loss so pasted values
-/// outside the supported range visibly snap to the nearest legal value.
+/// Edits write through to `NetworkTimeouts` on every keystroke so the store is
+/// always live, but the visible text is only re-clamped on focus loss — this
+/// avoids snapping "3" to the 5-second minimum mid-edit and the cursor jumps
+/// that rewriting the field while typing would cause.
 struct NetworkTimeoutsView: View {
     let accent: Color
+
+    private enum Field { case fetch, request }
 
     @State private var fetchText: String = formatSeconds(NetworkTimeouts.fetch)
     @State private var requestText: String = formatSeconds(NetworkTimeouts.request)
     @State private var validationMessage: String?
+    @FocusState private var focusedField: Field?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -31,6 +35,7 @@ struct NetworkTimeoutsView: View {
                 TextField("Seconds", text: $fetchText)
                     .textFieldStyle(.roundedBorder)
                     .frame(width: 90)
+                    .focused($focusedField, equals: .fetch)
                 Text("seconds (5–300)")
                     .font(.caption)
                     .foregroundStyle(.secondary)
@@ -43,6 +48,7 @@ struct NetworkTimeoutsView: View {
                 TextField("Seconds", text: $requestText)
                     .textFieldStyle(.roundedBorder)
                     .frame(width: 90)
+                    .focused($focusedField, equals: .request)
                 Text("seconds (30–900)")
                     .font(.caption)
                     .foregroundStyle(.secondary)
@@ -80,6 +86,14 @@ struct NetworkTimeoutsView: View {
         .onChange(of: requestText) { _, newValue in
             commit(newValue, kind: .request)
         }
+        .onChange(of: focusedField) { _, field in
+            // Focus lost (or moved between fields): snap the edited text back
+            // to the store's canonical clamped value.
+            guard field == nil else { return }
+            fetchText = formatSeconds(NetworkTimeouts.fetch)
+            requestText = formatSeconds(NetworkTimeouts.request)
+            validationMessage = nil
+        }
     }
 
     private enum TimeoutKind {
@@ -96,10 +110,8 @@ struct NetworkTimeoutsView: View {
         switch kind {
         case .fetch:
             NetworkTimeouts.fetch = value
-            fetchText = formatSeconds(NetworkTimeouts.fetch)
         case .request:
             NetworkTimeouts.request = value
-            requestText = formatSeconds(NetworkTimeouts.request)
         }
         validationMessage = nil
     }
