@@ -203,6 +203,7 @@ struct ContentView: View {
     @StateObject private var agentService = ChatService()
     @StateObject private var chatService = ChatService()
     @State private var selectedSection: SidebarSection = .allModels
+    @State private var databaseFailure: DatabaseLaunchFailure?
     @EnvironmentObject private var focusManager: FocusManager
     @FocusState private var searchFocused: Bool
 
@@ -234,7 +235,22 @@ struct ContentView: View {
         }
         .navigationSplitViewStyle(.balanced)
         .task {
+            if let failure = DatabaseManager.lastLaunchFailure {
+                databaseFailure = failure
+                DatabaseManager.lastLaunchFailure = nil
+            }
             await vm.refresh()
+        }
+        .alert(
+            Text(databaseFailure?.title ?? "Database Problem"),
+            isPresented: .init(
+                get: { databaseFailure != nil },
+                set: { if !$0 { databaseFailure = nil } }
+            )
+        ) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(databaseFailure?.detail ?? "")
         }
         .onChange(of: focusManager.searchFocused) { _, newValue in
             if newValue {

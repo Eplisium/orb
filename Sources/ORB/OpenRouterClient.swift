@@ -116,7 +116,7 @@ final class URLSessionStreamingTransport: NSObject, HTTPStreamingTransport, URLS
     private lazy var session: URLSession = {
         let configuration = URLSessionConfiguration.ephemeral
         // Long-lived SSE connections must not be killed by the resource timeout.
-        configuration.timeoutIntervalForRequest = 120
+        configuration.timeoutIntervalForRequest = NetworkTimeouts.request
         configuration.timeoutIntervalForResource = 3_600
         configuration.waitsForConnectivity = true
         // Streaming is latency-critical, so bypass any URL cache entirely.
@@ -228,7 +228,7 @@ final class OpenRouterClient: OpenRouterClientProtocol, @unchecked Sendable {
     }
 
     func stream(_ request: OpenRouterRequest) async throws -> AsyncThrowingStream<OpenRouterStreamEvent, Error> {
-        var urlRequest = URLRequest(url: endpoint, timeoutInterval: 60)
+        var urlRequest = URLRequest(url: endpoint, timeoutInterval: min(60, NetworkTimeouts.request))
         urlRequest.httpMethod = "POST"
         urlRequest.setValue("Bearer \(request.apiKey)", forHTTPHeaderField: "Authorization")
         urlRequest.setValue("application/json", forHTTPHeaderField: "Content-Type")

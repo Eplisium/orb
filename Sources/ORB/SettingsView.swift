@@ -16,6 +16,7 @@ struct SettingsView: View {
         case credits = "Credits"
         case activity = "Activity"
         case mcp = "MCP Servers"
+        case advanced = "Advanced"
     }
 
     var body: some View {
@@ -39,6 +40,7 @@ struct SettingsView: View {
                     case .credits: creditsSection
                     case .activity: activitySection
                     case .mcp: MCPSettingsView(accent: .accentColor)
+                    case .advanced: NetworkTimeoutsView(accent: .accentColor)
                     }
                 }
                 .padding(20)

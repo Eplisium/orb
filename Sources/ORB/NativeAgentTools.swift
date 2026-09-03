@@ -243,21 +243,36 @@ enum NativeAgentTools {
         }
         var matches: [String] = []
         var visited = 0
+        var unreadable = 0
+        var skippedTooLarge = 0
+        var hitVisitLimit = false
+        var hitMatchLimit = false
         for case let file as URL in enumerator {
             visited += 1
-            if visited > 5_000 || matches.count >= 100 { break }
+            if visited > 5_000 { hitVisitLimit = true; break }
+            if matches.count >= 100 { hitMatchLimit = true; break }
             let values = try? file.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey])
-            guard values?.isRegularFile == true, (values?.fileSize ?? 0) <= 2_000_000,
-                  let text = try? String(contentsOf: file, encoding: .utf8) else { continue }
+            guard values?.isRegularFile == true else { continue }
+            if (values?.fileSize ?? 0) > 2_000_000 { skippedTooLarge += 1; continue }
+            guard let text = try? String(contentsOf: file, encoding: .utf8) else {
+                unreadable += 1
+                continue
+            }
             for (index, line) in text.components(separatedBy: .newlines).enumerated() where line.localizedCaseInsensitiveContains(query) {
                 matches.append("\(file.path):\(index + 1): \(line.prefix(300))")
-                if matches.count >= 100 { break }
+                if matches.count >= 100 { hitMatchLimit = true; break }
             }
         }
-        return .init(
-            content: matches.isEmpty ? "No matches found." : matches.joined(separator: "\n"),
-            isError: false
-        )
+        var notes: [String] = []
+        if unreadable > 0 { notes.append("\(unreadable) file(s) could not be read as UTF-8 text") }
+        if skippedTooLarge > 0 { notes.append("\(skippedTooLarge) file(s) skipped for exceeding the 2 MB size limit") }
+        if hitVisitLimit { notes.append("stopped after scanning 5,000 files") }
+        if hitMatchLimit { notes.append("stopped at 100 matches — refine the query or path to see more") }
+        var content = matches.isEmpty ? "No matches found." : matches.joined(separator: "\n")
+        if !notes.isEmpty {
+            content += "\n\n[Search notes] " + notes.joined(separator: "; ") + "."
+        }
+        return .init(content: content, isError: false)
     }
 
     private static func writeFile(
@@ -390,7 +405,7 @@ enum NativeAgentTools {
             throw ToolError.message("A valid HTTP or HTTPS url is required.")
         }
         var request = URLRequest(url: url)
-        request.timeoutInterval = 30
+        request.timeoutInterval = NetworkTimeouts.fetch
         request.setValue("ORB/1.0", forHTTPHeaderField: "User-Agent")
         let (data, response) = try await URLSession.shared.data(for: request)
         let status = (response as? HTTPURLResponse)?.statusCode ?? 0

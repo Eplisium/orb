@@ -50,12 +50,22 @@ private func cleanupORBTestDatabasesAtExit() {
 
 enum DatabaseManagerError: Error, LocalizedError {
     case operationFailed(String)
+    case notAvailable
 
     var errorDescription: String? {
         switch self {
         case .operationFailed(let message): return "Database operation failed: \(message)"
+        case .notAvailable: return "The local database is unavailable for this session."
         }
     }
+}
+
+/// Describes why ORB fell back to a non-persistent database at launch.
+struct DatabaseLaunchFailure: Equatable {
+    let title: String
+    let detail: String
+    /// Set when the previously-failing database file was moved aside to a backup.
+    let backupPath: String?
 }
 
 final class DatabaseManager {
@@ -63,6 +73,12 @@ final class DatabaseManager {
     private var db: OpaquePointer?
     private let dbPath: String
     private let deletesDatabaseOnDeinit: Bool
+    /// Set when the on-disk database could not be opened or migrated; ORB then
+    /// degrades to a non-persistent in-memory database instead of crashing.
+    private(set) var launchFailure: DatabaseLaunchFailure?
+    /// The launch failure from the most recently constructed manager, for UI
+    /// presentation. (The shared manager is constructed before SwiftUI exists.)
+    static var lastLaunchFailure: DatabaseLaunchFailure?
 
     init(path: String? = nil) {
         if let path {
@@ -86,6 +102,9 @@ final class DatabaseManager {
         }
         openDatabase()
         createTables()
+        if let launchFailure {
+            Self.lastLaunchFailure = launchFailure
+        }
     }
 
     var testDatabasePath: String? {
@@ -107,14 +126,53 @@ final class DatabaseManager {
 
     private func openDatabase() {
         if sqlite3_open(dbPath, &db) != SQLITE_OK {
-            let msg = String(cString: sqlite3_errmsg(db))
-            fatalError("Failed to open database: \(msg)")
+            let failed = db
+            let msg = failed.map { String(cString: sqlite3_errmsg($0)) } ?? "unknown error"
+            sqlite3_close(failed)
+            db = nil
+            // A failed open must never take the app down. Degrade to an
+            // in-memory database so ORB still works (without persistence).
+            if sqlite3_open(":memory:", &db) == SQLITE_OK {
+                launchFailure = DatabaseLaunchFailure(
+                    title: "Database Unavailable",
+                    detail: "ORB could not open its local database at \(dbPath) (\(msg)). ORB is running with a temporary in-memory database, so data will not persist for this session.",
+                    backupPath: nil
+                )
+            } else {
+                db = nil
+                launchFailure = DatabaseLaunchFailure(
+                    title: "Database Unavailable",
+                    detail: "ORB could not open its local database at \(dbPath) (\(msg)). Data features are disabled for this session.",
+                    backupPath: nil
+                )
+            }
+            return
         }
         exec("PRAGMA journal_mode=WAL;")
         exec("PRAGMA foreign_keys=ON;")
     }
 
+    /// Moves a database file that failed to open or migrate aside to a
+    /// timestamped backup so the next launch starts fresh. Returns the backup
+    /// path, or nil when there was nothing to move (or the move failed — the
+    /// failure will resurface next launch, which is preferable to data loss).
+    private static func backupDatabase(at path: String) -> String? {
+        let fm = FileManager.default
+        guard fm.fileExists(atPath: path) else { return nil }
+        let stamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "-")
+        let backup = path + ".corrupt-" + stamp
+        do {
+            try fm.moveItem(atPath: path, toPath: backup)
+            try? fm.removeItem(atPath: path + "-wal")
+            try? fm.removeItem(atPath: path + "-shm")
+            return backup
+        } catch {
+            return nil
+        }
+    }
+
     private func exec(_ sql: String) {
+        guard let db else { return }
         var err: UnsafeMutablePointer<CChar>?
         if sqlite3_exec(db, sql, nil, nil, &err) != SQLITE_OK {
             if let e = err { sqlite3_free(e) }
@@ -122,6 +180,7 @@ final class DatabaseManager {
     }
 
     private func execChecked(_ sql: String) throws {
+        guard let db else { throw DatabaseManagerError.notAvailable }
         var error: UnsafeMutablePointer<CChar>?
         guard sqlite3_exec(db, sql, nil, nil, &error) == SQLITE_OK else {
             let message = error.map { String(cString: $0) } ?? currentError()
@@ -141,6 +200,10 @@ final class DatabaseManager {
     }
 
     private func createTables() {
+        createTablesCore(retryingAfterFailure: false)
+    }
+
+    private func createTablesCore(retryingAfterFailure: Bool) {
         exec("""
         CREATE TABLE IF NOT EXISTS favorites (
             model_id TEXT PRIMARY KEY,
@@ -226,7 +289,29 @@ final class DatabaseManager {
             try addColumnIfMissing(table: "messages", column: "error_message", definition: "TEXT")
             try execChecked("PRAGMA user_version=2;")
         } catch {
-            fatalError("Failed to migrate ORB database: \(error.localizedDescription)")
+            // A failed migration must never take the app down. Back up the
+            // failing file, swap in a fresh in-memory database, and surface
+            // the problem to the user instead of crashing at launch.
+            sqlite3_close(db)
+            db = nil
+            let backupPath = Self.backupDatabase(at: dbPath)
+            let openedFallback = sqlite3_open(":memory:", &db) == SQLITE_OK
+            if openedFallback {
+                exec("PRAGMA journal_mode=WAL;")
+                exec("PRAGMA foreign_keys=ON;")
+            } else {
+                db = nil
+            }
+            launchFailure = DatabaseLaunchFailure(
+                title: "Database Migration Failed",
+                detail: backupPath != nil
+                    ? "ORB could not upgrade its local database (\(error.localizedDescription)). The previous database was moved to \(backupPath!) and ORB is starting with a fresh, empty one."
+                    : "ORB could not upgrade its local database (\(error.localizedDescription)). ORB is running with a temporary in-memory database; data will not persist for this session.",
+                backupPath: backupPath
+            )
+            if openedFallback && !retryingAfterFailure {
+                createTablesCore(retryingAfterFailure: true)
+            }
         }
     }
 
@@ -245,6 +330,7 @@ final class DatabaseManager {
     }
 
     private func prepare(_ sql: String) -> OpaquePointer? {
+        guard let db else { return nil }
         var stmt: OpaquePointer?
         if sqlite3_prepare_v2(db, sql, -1, &stmt, nil) != SQLITE_OK {
             return nil
