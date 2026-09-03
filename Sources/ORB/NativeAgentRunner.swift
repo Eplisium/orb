@@ -62,6 +62,10 @@ enum NativeAgentRunner {
         var displays: [ToolCallDisplay] = []
         var toolMessages: [ChatMessage] = []
         var seenCallIDs = Set<String>()
+        // Counts turns that ended with only chain-of-thought (no visible answer,
+        // no tool call). Bounds the recovery nudge so a model that never
+        // converges still terminates with a clear error instead of looping.
+        var reasoningOnlyStreak = 0
 
         for turn in 0..<maximumTurns {
             try Task.checkCancellation()
@@ -73,6 +77,7 @@ enum NativeAgentRunner {
             )
             let stream = try await client.stream(request)
             var text = ""
+            var reasoning = ""
             var finishReason: String?
             var turnUsage: ChatUsage?
             var fragments: [Int: ToolBuilder] = [:]
@@ -84,6 +89,7 @@ enum NativeAgentRunner {
                     text += delta
                     await onEvent(.textDelta(delta))
                 case .reasoningDelta(let choice, let delta) where choice == 0:
+                    reasoning += delta
                     await onEvent(.reasoningDelta(delta))
                 case .toolCallFragment(let choice, let index, let id, let type, let name, let arguments) where choice == 0:
                     var builder = fragments[index] ?? ToolBuilder(index: index)
@@ -151,14 +157,40 @@ enum NativeAgentRunner {
             if calls.isEmpty, !rejected.isEmpty { continue }
 
             if calls.isEmpty {
-                guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-                    throw NativeAgentError.invalidResponse
+                let hasText = !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                if hasText {
+                    await onEvent(.runCompleted)
+                    return .init(
+                        response: text, history: messages, usage: aggregateUsage,
+                        toolNames: usedTools, toolCallDisplays: displays, toolMessages: toolMessages
+                    )
                 }
-                await onEvent(.runCompleted)
-                return .init(
-                    response: text, history: messages, usage: aggregateUsage,
-                    toolNames: usedTools, toolCallDisplays: displays, toolMessages: toolMessages
-                )
+
+                // No visible answer and no tool call. Some providers (thinking
+                // models in particular) stream only chain-of-thought and then
+                // finish without ever emitting a visible answer or a tool call.
+                // Instead of failing the whole run, nudge the model once to
+                // finish — bounded so a model that can never converge still
+                // terminates with a clear error.
+                let hasReasoning = !reasoning.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                if hasReasoning {
+                    reasoningOnlyStreak += 1
+                    guard reasoningOnlyStreak <= 2 else { throw NativeAgentError.reasoningOnly }
+                    // Drop the empty assistant message appended above so the
+                    // history sent upstream stays clean (a bare assistant message
+                    // with no content and no tool calls can confuse providers).
+                    if let last = messages.last,
+                       last.role == "assistant", last.content == nil, last.toolCalls == nil {
+                        messages.removeLast()
+                    }
+                    messages.append(.init(
+                        role: "user",
+                        content: "You provided only internal reasoning with no final answer and no tool call. Continue now and give your final answer."
+                    ))
+                    continue
+                }
+
+                throw NativeAgentError.invalidResponse
             }
 
             for call in calls {

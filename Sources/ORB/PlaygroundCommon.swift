@@ -272,58 +272,44 @@ struct ToolCallCard: View {
     }
 }
 
-// MARK: - Tool Result Card (expandable)
+// MARK: - Tool Call Activity Group
 
-struct ToolResultCard: View {
-    let message: ChatMessage
+/// A collapsed, at-a-glance summary of every tool call an agent made, instead of
+/// a tall stack of individual cards. Shows live progress (running/done/failed
+/// counts) in the header and expands to the full card list on demand. This is
+/// what keeps a 20-tool run from turning into 20 full-height cards.
+struct ToolCallActivityGroup: View {
+    let toolCalls: [ToolCallDisplay]
     let accent: Color
     @State private var isExpanded = false
 
-    private var toolIcon: String {
-        switch message.toolName {
-        case "read_file": return "doc.text"
-        case "list_directory": return "folder"
-        case "search_files": return "magnifyingglass"
-        case "write_file": return "square.and.pencil"
-        case "run_command": return "terminal"
-        case "run_applescript": return "applescript"
-        case "open_application": return "app.badge"
-        case "open_url": return "globe"
-        case "capture_screen": return "camera.viewfinder"
-        case "computer_action": return "desktopcomputer"
-        case "fetch_url": return "network"
-        default: return "wrench.and.screwdriver"
-        }
-    }
+    private var runningCount: Int { toolCalls.filter(\.isExecuting).count }
+    private var doneCount: Int { toolCalls.filter { $0.result != nil && !$0.isError }.count }
+    private var failedCount: Int { toolCalls.filter { $0.result != nil && $0.isError }.count }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
+        VStack(alignment: .leading, spacing: 4) {
             Button {
                 withAnimation(.easeInOut(duration: 0.15)) { isExpanded.toggle() }
             } label: {
-                HStack(spacing: 8) {
-                    Image(systemName: toolIcon)
-                        .font(.system(size: 10, weight: .semibold))
-                        .foregroundStyle(.secondary)
-                        .frame(width: 20, height: 20)
-                        .background(Color.orange.opacity(0.08))
-                        .clipShape(RoundedRectangle(cornerRadius: 5))
-                    Text("\(message.toolName ?? "tool") result")
-                        .font(.system(size: 10, weight: .medium))
-                        .foregroundStyle(.secondary)
-                    Spacer(minLength: 8)
-                    let preview = message.content.prefix(80).replacingOccurrences(of: "\n", with: " ")
-                    if !isExpanded {
-                        Text(preview)
-                            .font(.system(size: 9))
-                            .foregroundStyle(.tertiary)
-                            .lineLimit(1)
-                            .truncationMode(.tail)
+                HStack(spacing: 7) {
+                    if runningCount > 0 {
+                        ProgressView()
+                            .controlSize(.mini)
+                            .tint(accent)
+                    } else {
+                        Image(systemName: "wrench.and.screwdriver")
+                            .font(.system(size: 10, weight: .semibold))
+                            .foregroundStyle(accent)
                     }
-                    Image(systemName: "chevron.down")
-                        .font(.system(size: 8, weight: .bold))
+                    Text("\(toolCalls.count) tool call\(toolCalls.count == 1 ? "" : "s")")
+                        .font(.system(size: 11, weight: .semibold))
+                    statusSummary
+                    Spacer(minLength: 8)
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 8, weight: .semibold))
                         .foregroundStyle(.tertiary)
-                        .rotationEffect(.degrees(isExpanded ? 180 : 0))
+                        .rotationEffect(.degrees(isExpanded ? 90 : 0))
                 }
                 .padding(.horizontal, 10)
                 .padding(.vertical, 7)
@@ -332,22 +318,44 @@ struct ToolResultCard: View {
             .buttonStyle(.plain)
 
             if isExpanded {
-                Divider().padding(.horizontal, 8)
-                CodeBlockView(
-                    language: message.toolName ?? "output",
-                    source: message.content,
-                    accent: accent
-                )
-                .padding(.horizontal, 8)
-                .padding(.vertical, 6)
+                VStack(alignment: .leading, spacing: 4) {
+                    ForEach(toolCalls) { tc in
+                        ToolCallCard(toolCall: tc, accent: accent)
+                    }
+                }
+                .padding(.horizontal, 4)
+                .padding(.bottom, 4)
             }
         }
-        .background(Color.orange.opacity(0.035))
+        .background(Color.primary.opacity(0.025))
         .overlay {
             RoundedRectangle(cornerRadius: 8)
-                .stroke(Color.orange.opacity(0.10), lineWidth: 0.5)
+                .stroke(Color.primary.opacity(0.06), lineWidth: 0.5)
         }
         .clipShape(RoundedRectangle(cornerRadius: 8))
+    }
+
+    private var statusSummary: some View {
+        HStack(spacing: 6) {
+            if doneCount > 0 {
+                status("checkmark.circle.fill", "\(doneCount)", .green)
+            }
+            if failedCount > 0 {
+                status("xmark.circle.fill", "\(failedCount)", .red)
+            }
+            if runningCount > 0 {
+                status("circle.dashed", "\(runningCount)", accent)
+            }
+        }
+        .font(.system(size: 9, design: .monospaced))
+        .foregroundStyle(.secondary)
+    }
+
+    private func status(_ icon: String, _ text: String, _ color: Color) -> some View {
+        HStack(spacing: 2) {
+            Image(systemName: icon).foregroundStyle(color)
+            Text(text)
+        }
     }
 }
 
@@ -365,45 +373,35 @@ struct PlaygroundMessageView: View {
     @State private var showCopyCheck = false
 
     private var isUser: Bool { message.role == "user" }
-    private var isToolResult: Bool { message.role == "tool" }
 
     var body: some View {
-        if isToolResult {
-            ToolResultCard(message: message, accent: accent)
-                .padding(.horizontal, 4)
-        } else {
-            HStack(alignment: .top, spacing: 10) {
-                if isUser {
-                    Spacer(minLength: 60)
-                    VStack(alignment: .trailing, spacing: 6) {
-                        Text("You")
-                            .font(.system(size: 9, weight: .bold))
-                            .foregroundStyle(.secondary)
-                            .padding(.trailing, 4)
-                        bubbleWithActions
-                    }
-                    avatar
-                } else {
-                    avatar
-                    VStack(alignment: .leading, spacing: 6) {
-                        Text(assistantName)
-                            .font(.system(size: 9, weight: .bold))
-                            .foregroundStyle(.secondary)
-                            .padding(.leading, 4)
-                        if showToolCalls, let toolCalls = message.toolCalls, !toolCalls.isEmpty {
-                            VStack(alignment: .leading, spacing: 4) {
-                                ForEach(toolCalls) { tc in
-                                    ToolCallCard(toolCall: tc, accent: accent)
-                                }
-                            }
-                        }
-                        bubbleWithActions
-                    }
-                    Spacer(minLength: 60)
+        HStack(alignment: .top, spacing: 10) {
+            if isUser {
+                Spacer(minLength: 60)
+                VStack(alignment: .trailing, spacing: 6) {
+                    Text("You")
+                        .font(.system(size: 9, weight: .bold))
+                        .foregroundStyle(.secondary)
+                        .padding(.trailing, 4)
+                    bubbleWithActions
                 }
+                avatar
+            } else {
+                avatar
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(assistantName)
+                        .font(.system(size: 9, weight: .bold))
+                        .foregroundStyle(.secondary)
+                        .padding(.leading, 4)
+                    if showToolCalls, let toolCalls = message.toolCalls, !toolCalls.isEmpty {
+                        ToolCallActivityGroup(toolCalls: toolCalls, accent: accent)
+                    }
+                    bubbleWithActions
+                }
+                Spacer(minLength: 60)
             }
-            .frame(maxWidth: .infinity, alignment: isUser ? .trailing : .leading)
         }
+        .frame(maxWidth: .infinity, alignment: isUser ? .trailing : .leading)
     }
 
     /// The message bubble with action buttons embedded inside its hover zone.
@@ -460,65 +458,6 @@ struct PlaygroundMessageView: View {
                 .stroke(Color.primary.opacity(0.08), lineWidth: 0.5)
         }
         .shadow(color: .black.opacity(0.08), radius: 4, y: 2)
-    }
-}
-
-/// Compact per-run accounting: speed, tokens, cache savings, and cost.
-///
-/// Cached and reasoning tokens are only shown when non-zero — they are
-/// provider-specific and would otherwise be noise on models that never
-/// report them.
-struct UsageStatsBar: View {
-    let usage: ChatUsage?
-    let tokensPerSecond: Double
-    let accent: Color
-
-    var body: some View {
-        if let usage, hasContent(usage) {
-            HStack(spacing: 5) {
-                if tokensPerSecond > 0 {
-                    stat("speedometer", String(format: "%.0f tok/s", tokensPerSecond))
-                }
-                if let prompt = usage.promptTokens, prompt > 0 {
-                    stat("arrow.up", "\(prompt) in")
-                }
-                if let completion = usage.completionTokens, completion > 0 {
-                    stat("arrow.down", "\(completion) out")
-                }
-                if let cached = usage.cachedTokens, cached > 0 {
-                    stat("bolt.fill", "\(cached) cached")
-                }
-                if let reasoning = usage.reasoningTokens, reasoning > 0 {
-                    stat("brain", "\(reasoning) thinking")
-                }
-                if let cost = usage.cost, cost > 0 {
-                    stat("dollarsign.circle", formatCost(cost))
-                }
-            }
-            .font(.system(size: 9, design: .monospaced))
-            .foregroundStyle(.secondary)
-        }
-    }
-
-    private func hasContent(_ usage: ChatUsage) -> Bool {
-        (usage.totalTokens ?? 0) > 0 || (usage.cost ?? 0) > 0 || tokensPerSecond > 0
-    }
-
-    private func stat(_ icon: String, _ text: String) -> some View {
-        HStack(spacing: 2) {
-            Image(systemName: icon).font(.system(size: 8))
-            Text(text)
-        }
-        .padding(.horizontal, 5)
-        .padding(.vertical, 2)
-        .background(accent.opacity(0.08), in: Capsule())
-    }
-
-    /// Per-request costs are often far below a cent, so a flat 2-decimal
-    /// format would render everything as "$0.00".
-    private func formatCost(_ cost: Double) -> String {
-        if cost < 0.01 { return String(format: "$%.5f", cost) }
-        return String(format: "$%.4f", cost)
     }
 }
 

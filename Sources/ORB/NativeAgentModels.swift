@@ -250,6 +250,7 @@ enum NativeAgentError: LocalizedError {
     case invalidToolCall(String)
     case truncatedToolCall
     case duplicateToolCallID(String)
+    case reasoningOnly
 
     var errorDescription: String? {
         switch self {
@@ -265,6 +266,8 @@ enum NativeAgentError: LocalizedError {
             return "The model's tool call was truncated before completion and was not executed."
         case .duplicateToolCallID(let id):
             return "OpenRouter returned duplicate tool-call ID \(id)."
+        case .reasoningOnly:
+            return "The model returned only reasoning and never produced a final answer."
         }
     }
 }

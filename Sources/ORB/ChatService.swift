@@ -559,7 +559,11 @@ final class ChatService: ObservableObject {
                 message.toolCalls = calls
             })
             insertMessage(ChatMessage(role: "tool", content: result.content, toolCallId: call.id, toolName: call.name), before: context.assistantMessageID, conversationID: context.conversationID)
-            checkpoint(context, force: true)
+            // Persist on the same time budget as streamed content instead of
+            // forcing a SQLite write per tool result — a tool-heavy run would
+            // otherwise hit the disk once per call. The final state is always
+            // flushed by terminalCleanup at completion.
+            checkpoint(context)
         case .finalizing:
             runState.phase = .streaming
             activityLabel = "Wrapping up — summarizing results…"

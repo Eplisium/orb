@@ -548,22 +548,8 @@ struct ChatView: View {
                 Text("Streaming from OpenRouter")
                     .font(.system(size: 9))
                     .foregroundStyle(.secondary)
-                UsageStatsBar(
-                    usage: chatService.lastUsage,
-                    tokensPerSecond: chatService.tokensPerSecond,
-                    accent: accent
-                )
             }
             Spacer()
-            if chatService.tokensPerSecond > 0 {
-                Text("\(String(format: "%.1f", chatService.tokensPerSecond)) tok/s")
-                    .font(.system(size: 10, weight: .semibold, design: .monospaced))
-                    .foregroundStyle(.orange)
-                    .padding(.horizontal, 6)
-                    .padding(.vertical, 3)
-                    .background(Color.orange.opacity(0.10))
-                    .clipShape(Capsule())
-            }
             Button("Stop") { chatService.stopStreaming() }
                 .buttonStyle(.bordered)
                 .controlSize(.small)

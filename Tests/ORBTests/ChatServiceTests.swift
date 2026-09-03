@@ -355,6 +355,47 @@ struct ChatServiceTests {
         #expect(service.activeConversation?.messages.last?.reasoning == "first second")
     }
 
+    @Test("agent recovers when a turn streams only reasoning")
+    func agentReasoningOnlyTurnRecovers() async throws {
+        let (service, _, _) = service(scripts: [
+            .init(events: [
+                .reasoningDelta(choiceIndex: 0, text: "let me think about this"),
+                .finishReason(choiceIndex: 0, reason: "stop")
+            ]),
+            .init(events: [.contentDelta(choiceIndex: 0, text: "final answer"), .done])
+        ])
+
+        await service.sendAgentMessage(
+            "think it through",
+            modelId: "test/model",
+            workspace: FileManager.default.temporaryDirectory.path,
+            fullComputerAccess: false
+        )
+        try await waitUntilIdle(service)
+
+        #expect(service.lastError == nil)
+        #expect(service.activeConversation?.messages.last?.content == "final answer")
+    }
+
+    @Test("agent fails clearly when every turn is reasoning-only")
+    func agentPersistentReasoningOnlyFails() async throws {
+        let script = ScriptedOpenRouterClient.Script(events: [
+            .reasoningDelta(choiceIndex: 0, text: "thinking"),
+            .finishReason(choiceIndex: 0, reason: "stop")
+        ])
+        let (service, _, _) = service(scripts: [script, script, script])
+
+        await service.sendAgentMessage(
+            "think",
+            modelId: "test/model",
+            workspace: FileManager.default.temporaryDirectory.path,
+            fullComputerAccess: false
+        )
+        try await waitUntilIdle(service)
+
+        #expect(service.lastError?.contains("only reasoning") == true)
+    }
+
     @Test("agent tool cards retain execution result state")
     func agentToolCardLifecycle() async throws {
         let file = FileManager.default.temporaryDirectory.appendingPathComponent("ORB-tool-card-\(UUID().uuidString).txt")

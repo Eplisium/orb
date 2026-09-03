@@ -383,7 +383,12 @@ struct AgentView: View {
                     ZStack(alignment: .bottomTrailing) {
                         ScrollView {
                             LazyVStack(spacing: 16) {
-                                ForEach(conversation.messages) { message in
+                                // Tool results are already rendered inside the
+                                // assistant message's tool-call cards (each card
+                                // carries its own result when expanded), so the
+                                // separate role:"tool" transcript messages are
+                                // hidden here to avoid showing every action twice.
+                                ForEach(conversation.messages.filter { $0.role != "tool" }) { message in
                                     PlaygroundMessageView(
                                         message: message,
                                         isStreaming: chatService.isStreamingMessage(message.id, conversationID: conversation.id),
@@ -546,25 +551,10 @@ struct AgentView: View {
                 }
                 .font(.system(size: 9, design: .monospaced))
                 .foregroundStyle(.secondary)
-
-                UsageStatsBar(
-                    usage: chatService.lastUsage,
-                    tokensPerSecond: chatService.tokensPerSecond,
-                    accent: accent
-                )
             }
 
             Spacer()
 
-            if chatService.tokensPerSecond > 0 {
-                Text("\(String(format: "%.1f", chatService.tokensPerSecond)) tok/s")
-                    .font(.system(size: 10, weight: .semibold, design: .monospaced))
-                    .foregroundStyle(.orange)
-                    .padding(.horizontal, 6)
-                    .padding(.vertical, 3)
-                    .background(Color.orange.opacity(0.10))
-                    .clipShape(Capsule())
-            }
             Button("Stop") { chatService.stopStreaming() }
                 .buttonStyle(.bordered)
                 .controlSize(.small)
