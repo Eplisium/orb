@@ -10,6 +10,8 @@ struct OpenRouterAPIError: Error, Equatable, Sendable {
 enum OpenRouterStreamEvent: Equatable, Sendable {
     case contentDelta(choiceIndex: Int, text: String)
     case reasoningDelta(choiceIndex: Int, text: String)
+    /// One assistant image (`images` entry) streamed or delivered whole.
+    case imageDelta(choiceIndex: Int, imageURL: String)
     case toolCallFragment(
         choiceIndex: Int,
         toolIndex: Int,
@@ -115,8 +117,11 @@ struct ServerSentEventDecoder {
                 if let content = choice.delta?.content, !content.isEmpty {
                     events.append(.contentDelta(choiceIndex: choice.index ?? 0, text: content))
                 }
-                if let reasoning = choice.delta?.reasoning, !reasoning.isEmpty {
+                if let reasoning = choice.delta?.reasoningText, !reasoning.isEmpty {
                     events.append(.reasoningDelta(choiceIndex: choice.index ?? 0, text: reasoning))
+                }
+                for image in choice.delta?.images ?? [] where !image.url.isEmpty {
+                    events.append(.imageDelta(choiceIndex: choice.index ?? 0, imageURL: image.url))
                 }
                 for tool in choice.delta?.toolCalls ?? [] {
                     events.append(.toolCallFragment(
@@ -166,12 +171,52 @@ private struct StreamChoice: Decodable {
 
 private struct StreamDelta: Decodable {
     let content: String?
+    /// Plain-text chain-of-thought (`reasoning: "…"`, older providers).
     let reasoning: String?
+    /// Structured chain-of-thought (`reasoning_details: [{text|summary}]`,
+    /// newer providers like Meta responses-style models).
+    let reasoningDetails: [StreamReasoningDetail]?
     let toolCalls: [StreamToolFragment]?
+    /// Assistant images streamed alongside text (`images: [...]`).
+    let images: [AssistantImagePart]?
 
     enum CodingKeys: String, CodingKey {
-        case content, reasoning
+        case content, reasoning, images
+        case reasoningDetails = "reasoning_details"
         case toolCalls = "tool_calls"
+    }
+
+    /// Providers disagree on where the thinking text lives. Prefer the plain
+    /// `reasoning` field, then fall back to the detail blocks (newest last).
+    var reasoningText: String? {
+        if let reasoning, !reasoning.isEmpty { return reasoning }
+        guard let reasoningDetails else { return nil }
+        // Walk newest-first so the latest thinking wins.
+        for detail in reasoningDetails.reversed() {
+            if let text = detail.text, !text.isEmpty { return text }
+            if let summary = detail.summary, !summary.isEmpty { return summary }
+            if let data = detail.data, !data.isEmpty { return data }
+        }
+        return nil
+    }
+}
+
+/// One entry of a `reasoning_details` array. Seen shapes: `{type, text}`,
+/// `{type, summary}`, `{type, data}`. Unknown extra keys are ignored.
+private struct StreamReasoningDetail: Decodable {
+    let text: String?
+    let summary: String?
+    let data: String?
+
+    enum CodingKeys: String, CodingKey { case text, summary, data }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        // `text`/`summary`/`data` may arrive as a string or, on some
+        // providers, as a nested object — coerce only plain strings.
+        text = (try? container.decodeIfPresent(String.self, forKey: .text)) ?? nil
+        summary = (try? container.decodeIfPresent(String.self, forKey: .summary)) ?? nil
+        data = (try? container.decodeIfPresent(String.self, forKey: .data)) ?? nil
     }
 }
 

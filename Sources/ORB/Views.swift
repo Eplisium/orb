@@ -41,6 +41,18 @@ struct ModelRowView: View {
                         Image(systemName: "paintbrush")
                             .foregroundStyle(.pink)
                     }
+                    if model.supportsVideoInput {
+                        Image(systemName: "video")
+                            .foregroundStyle(.indigo)
+                    }
+                    if model.supportsAudioInput || model.supportsAudioOutput {
+                        Image(systemName: "waveform")
+                            .foregroundStyle(.mint)
+                    }
+                    if model.supportsFileInput {
+                        Image(systemName: "doc")
+                            .foregroundStyle(.cyan)
+                    }
                     if model.supportsTools {
                         Image(systemName: "wrench.and.screwdriver")
                             .foregroundStyle(.orange)
@@ -316,7 +328,9 @@ struct ModelDetailView: View {
                 .font(.headline)
             FlowLayout(spacing: 6) {
                 CapabilityTag(label: "Image In", active: model.supportsImages, color: .blue)
+                CapabilityTag(label: "Video In", active: model.supportsVideoInput, color: .indigo)
                 CapabilityTag(label: "Audio In", active: model.supportsAudioInput, color: .mint)
+                CapabilityTag(label: "Files", active: model.supportsFileInput, color: .cyan)
                 CapabilityTag(label: "Image Out", active: model.supportsImageOutput, color: .pink)
                 CapabilityTag(label: "Audio Out", active: model.supportsAudioOutput, color: .mint)
                 CapabilityTag(label: "Tools", active: model.supportsTools, color: .orange)

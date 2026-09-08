@@ -15,6 +15,11 @@ struct AdvancedSettingsView: View {
     @State private var orderEntry = ""
     @State private var ignoreEntry = ""
     @State private var fallbackEntry = ""
+    @State private var jsonSchemaName = "response"
+    @State private var jsonSchemaText = """
+        {"type":"object","properties":{"answer":{"type":"string"}},"required":["answer"]}
+        """
+    @State private var jsonSchemaStrict = true
 
     var body: some View {
         VStack(spacing: 0) {
@@ -29,6 +34,10 @@ struct AdvancedSettingsView: View {
                     reasoningSection
                     Divider()
                     routingSection
+                    Divider()
+                    outputSection
+                    Divider()
+                    identitySection
                     Divider()
                     extrasSection
                 }
@@ -204,6 +213,241 @@ struct AdvancedSettingsView: View {
                 items: $settings.fallbackModels,
                 placeholder: "openai/gpt-4o-mini"
             )
+        }
+    }
+
+    private var outputSection: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            sectionTitle("Output Shape", "text.badge.checkmark")
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Response format").font(.callout)
+                Picker("Response format", selection: responseFormatSelection) {
+                    Text("Model default").tag(0)
+                    Text("JSON object").tag(1)
+                    Text("JSON Schema").tag(2)
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                Text("JSON object requires the prompt to ask for JSON. JSON Schema needs a supporting model.")
+                    .font(.caption2).foregroundStyle(.secondary)
+            }
+            if responseFormatSelection.wrappedValue == 2 {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Schema name").font(.callout)
+                    TextField("e.g. answer", text: $jsonSchemaName)
+                        .textFieldStyle(.roundedBorder)
+                    Text("JSON Schema (object)").font(.callout)
+                    TextEditor(text: $jsonSchemaText)
+                        .font(.system(size: 11, design: .monospaced))
+                        .frame(minHeight: 90)
+                        .overlay {
+                            RoundedRectangle(cornerRadius: 6)
+                                .stroke(Color.primary.opacity(0.10), lineWidth: 1)
+                        }
+                    Toggle("Strict mode", isOn: $jsonSchemaStrict)
+                    if let schemaError {
+                        Label(schemaError, systemImage: "exclamationmark.triangle")
+                            .font(.caption).foregroundStyle(.orange)
+                    }
+                }
+            }
+            optionalIntStepper("Max completion tokens", value: $settings.maxCompletionTokens,
+                               range: 1...1_000_000, step: 256,
+                               help: "New-style completion cap. Leave off unless the model needs it.")
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Service tier").font(.callout)
+                Picker("Service tier", selection: $settings.serviceTier) {
+                    Text("Provider default").tag(ServiceTier?.none)
+                    ForEach(ServiceTier.allCases) { tier in
+                        Text(tier.label).tag(ServiceTier?.some(tier))
+                    }
+                }
+                Text("Priority costs more; flex trades speed for price.")
+                    .font(.caption2).foregroundStyle(.secondary)
+            }
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Output modalities").font(.callout)
+                Toggle("Request image output", isOn: modalityBinding(.image))
+                    .help("Ask image-capable models to return pictures alongside text.")
+                Toggle("Request audio output", isOn: modalityBinding(.audio))
+                    .help("Ask audio-capable models to return speech alongside text.")
+            }
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Image config").font(.callout)
+                TextField("Aspect ratio (e.g. 16:9, optional)", text: imageAspectBinding)
+                    .textFieldStyle(.roundedBorder)
+                TextField("Quality (e.g. high, optional)", text: imageQualityBinding)
+                    .textFieldStyle(.roundedBorder)
+                Text("Only sent for image-output models when filled in.")
+                    .font(.caption2).foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    private var identitySection: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            sectionTitle("Identity & Routing Extras", "person.badge.key")
+            VStack(alignment: .leading, spacing: 6) {
+                Text("End-user ID (optional)").font(.callout)
+                TextField("Stable ID for abuse isolation", text: endUserBinding)
+                    .textFieldStyle(.roundedBorder)
+                Text("Hashed upstream; never sent to providers verbatim.")
+                    .font(.caption2).foregroundStyle(.secondary)
+            }
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Session ID (optional)").font(.callout)
+                TextField("Groups related requests; sticky routing key", text: sessionBinding)
+                    .textFieldStyle(.roundedBorder)
+            }
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Max price caps (USD, optional)").font(.callout)
+                optionalPriceStepper("Prompt $/1M tokens", value: $settings.provider.maxPromptPrice)
+                optionalPriceStepper("Completion $/1M tokens", value: $settings.provider.maxCompletionPrice)
+                optionalPriceStepper("Per image", value: $settings.provider.maxImagePrice)
+                optionalPriceStepper("Per audio unit", value: $settings.provider.maxAudioPrice)
+                optionalPriceStepper("Per request", value: $settings.provider.maxRequestPrice)
+                Text("Requests fail rather than route above these caps.")
+                    .font(.caption2).foregroundStyle(.secondary)
+            }
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Extra plugins").font(.callout)
+                ForEach(ExtraPlugin.Kind.allCases) { kind in
+                    Toggle(kind.label, isOn: extraPluginBinding(kind))
+                }
+                Text("File parser helps PDF-heavy chats; moderation and healing run server-side.")
+                    .font(.caption2).foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    // MARK: - Output-shape bindings
+    //
+    // ResponseFormatSettings is an enum, so the picker drives transient
+    // @State that is committed back into settings on change.
+
+    private var responseFormatSelection: Binding<Int> {
+        Binding(
+            get: {
+                switch settings.responseFormat {
+                case .off: return 0
+                case .jsonObject: return 1
+                case .jsonSchema: return 2
+                }
+            },
+            set: { commitResponseFormat(selection: $0) }
+        )
+    }
+
+    private func commitResponseFormat(selection: Int) {
+        switch selection {
+        case 1:
+            settings.responseFormat = .jsonObject
+        case 2:
+            let schema = parseSchemaText(jsonSchemaText) ?? .object([:])
+            settings.responseFormat = .jsonSchema(
+                name: jsonSchemaName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                    ? "response" : jsonSchemaName.trimmingCharacters(in: .whitespacesAndNewlines),
+                schema: schema,
+                strict: jsonSchemaStrict
+            )
+        default:
+            settings.responseFormat = .off
+        }
+    }
+
+    private func parseSchemaText(_ text: String) -> JSONValue? {
+        guard let data = text.data(using: .utf8),
+              let object = try? JSONSerialization.jsonObject(with: data),
+              let dict = object as? [String: Any] else { return nil }
+        return JSONValue(any: dict)
+    }
+
+    private var schemaError: String? {
+        guard responseFormatSelection.wrappedValue == 2 else { return nil }
+        if jsonSchemaName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return "Give the schema a name."
+        }
+        guard let value = parseSchemaText(jsonSchemaText) else {
+            return "Schema must be a valid JSON object."
+        }
+        guard value.objectValue != nil else { return "Schema must be a JSON object." }
+        return nil
+    }
+
+    private func modalityBinding(_ modality: OutputModality) -> Binding<Bool> {
+        Binding(
+            get: { settings.modalities.contains(modality) },
+            set: { enabled in
+                if enabled, !settings.modalities.contains(modality) {
+                    settings.modalities.append(modality)
+                } else if !enabled {
+                    settings.modalities.removeAll { $0 == modality }
+                }
+            }
+        )
+    }
+
+    private var imageAspectBinding: Binding<String> {
+        Binding(
+            get: { settings.imageConfig.aspectRatio ?? "" },
+            set: { settings.imageConfig.aspectRatio = $0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : $0 }
+        )
+    }
+
+    private var imageQualityBinding: Binding<String> {
+        Binding(
+            get: { settings.imageConfig.quality ?? "" },
+            set: { settings.imageConfig.quality = $0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : $0 }
+        )
+    }
+
+    private var endUserBinding: Binding<String> {
+        Binding(
+            get: { settings.endUserId ?? "" },
+            set: { settings.endUserId = $0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : $0 }
+        )
+    }
+
+    private var sessionBinding: Binding<String> {
+        Binding(
+            get: { settings.sessionId ?? "" },
+            set: { settings.sessionId = $0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : $0 }
+        )
+    }
+
+    private func extraPluginBinding(_ kind: ExtraPlugin.Kind) -> Binding<Bool> {
+        Binding(
+            get: { settings.extraPlugins.contains { $0.kind == kind } },
+            set: { enabled in
+                if enabled, !settings.extraPlugins.contains(where: { $0.kind == kind }) {
+                    settings.extraPlugins.append(ExtraPlugin(kind: kind))
+                } else if !enabled {
+                    settings.extraPlugins.removeAll { $0.kind == kind }
+                }
+            }
+        )
+    }
+
+    private func optionalPriceStepper(_ title: String, value: Binding<Double?>) -> some View {
+        HStack {
+            Toggle(isOn: Binding(
+                get: { value.wrappedValue != nil },
+                set: { value.wrappedValue = $0 ? (value.wrappedValue ?? 5.0) : nil }
+            )) {
+                Text(title).font(.callout)
+            }
+            .toggleStyle(.checkbox)
+            Spacer()
+            if let current = value.wrappedValue {
+                TextField("USD", value: Binding(
+                    get: { current },
+                    set: { value.wrappedValue = $0 }
+                ), format: .number)
+                .textFieldStyle(.roundedBorder)
+                .frame(width: 90)
+            } else {
+                Text("no cap").font(.caption).foregroundStyle(.secondary)
+            }
         }
     }
 

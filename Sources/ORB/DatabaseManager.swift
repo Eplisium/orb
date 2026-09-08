@@ -270,6 +270,8 @@ final class DatabaseManager {
             status TEXT NOT NULL DEFAULT 'complete',
             finish_reason TEXT,
             error_message TEXT,
+            parts_json TEXT,
+            images_json TEXT,
             FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
         );
         """)
@@ -284,10 +286,21 @@ final class DatabaseManager {
             INSERT OR IGNORE INTO model_notes (model_id, notes)
             SELECT model_id, notes FROM favorites WHERE notes != '';
             """)
+            // Phase D: durable agent memories for remember/recall.
+            try execChecked("""
+            CREATE TABLE IF NOT EXISTS agent_memories (
+                id TEXT PRIMARY KEY,
+                content TEXT NOT NULL,
+                created_at REAL NOT NULL
+            );
+            """)
             try addColumnIfMissing(table: "messages", column: "status", definition: "TEXT NOT NULL DEFAULT 'complete'")
             try addColumnIfMissing(table: "messages", column: "finish_reason", definition: "TEXT")
             try addColumnIfMissing(table: "messages", column: "error_message", definition: "TEXT")
-            try execChecked("PRAGMA user_version=2;")
+            // A1: multimodal persistence — attachment wire parts + generated images.
+            try addColumnIfMissing(table: "messages", column: "parts_json", definition: "TEXT")
+            try addColumnIfMissing(table: "messages", column: "images_json", definition: "TEXT")
+            try execChecked("PRAGMA user_version=3;")
         } catch {
             // A failed migration must never take the app down. Back up the
             // failing file, swap in a fresh in-memory database, and surface
@@ -385,7 +398,6 @@ final class DatabaseManager {
     }
 
     // MARK: - Notes
-
     func getNotes(_ modelId: String) -> String {
         let sql = "SELECT notes FROM model_notes WHERE model_id = ?;"
         guard let stmt = prepare(sql) else { return "" }
@@ -409,6 +421,49 @@ final class DatabaseManager {
         sqlite3_bind_text(stmt, 1, modelId, -1, unsafeBitCast(-1, to: sqlite3_destructor_type.self))
         sqlite3_bind_text(stmt, 2, notes, -1, unsafeBitCast(-1, to: sqlite3_destructor_type.self))
         sqlite3_step(stmt)
+    }
+
+    // MARK: - Agent memories (remember/recall)
+
+    func saveMemory(content: String) throws {
+        let sql = "INSERT INTO agent_memories (id, content, created_at) VALUES (?, ?, ?);"
+        guard let stmt = prepare(sql) else { throw DatabaseManagerError.operationFailed(currentError()) }
+        defer { sqlite3_finalize(stmt) }
+        let t = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
+        sqlite3_bind_text(stmt, 1, UUID().uuidString, -1, t)
+        sqlite3_bind_text(stmt, 2, content, -1, t)
+        sqlite3_bind_double(stmt, 3, Date().timeIntervalSince1970)
+        try requireDone(stmt)
+    }
+
+    /// Case-insensitive substring search, newest first. LIKE wildcards in
+    /// the query are escaped so they match literally.
+    func searchMemories(query: String, limit: Int = 8) -> [AgentMemory] {
+        let escaped = query
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "%", with: "\\%")
+            .replacingOccurrences(of: "_", with: "\\_")
+        let sql = "SELECT id, content, created_at FROM agent_memories WHERE content LIKE ? ESCAPE '\\' ORDER BY created_at DESC LIMIT ?;"
+        guard let stmt = prepare(sql) else { return [] }
+        defer { sqlite3_finalize(stmt) }
+        sqlite3_bind_text(stmt, 1, "%\(escaped)%", -1, unsafeBitCast(-1, to: sqlite3_destructor_type.self))
+        sqlite3_bind_int(stmt, 2, Int32(max(limit, 1)))
+        var hits: [AgentMemory] = []
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            let id = String(cString: sqlite3_column_text(stmt, 0))
+            let content = columnTextOrNil(stmt, 1) ?? ""
+            let createdAt = Date(timeIntervalSince1970: sqlite3_column_double(stmt, 2))
+            hits.append(AgentMemory(id: id, content: content, createdAt: createdAt))
+        }
+        return hits
+    }
+
+    func deleteMemory(id: String) throws {
+        let sql = "DELETE FROM agent_memories WHERE id = ?;"
+        guard let stmt = prepare(sql) else { throw DatabaseManagerError.operationFailed(currentError()) }
+        defer { sqlite3_finalize(stmt) }
+        sqlite3_bind_text(stmt, 1, id, -1, unsafeBitCast(-1, to: sqlite3_destructor_type.self))
+        try requireDone(stmt)
     }
 
     // MARK: - Conversations
@@ -505,8 +560,8 @@ final class DatabaseManager {
     func saveMessageChecked(_ message: ChatMessage, conversationId: UUID, sortOrder: Int) throws {
         let sql = """
         INSERT OR REPLACE INTO messages
-        (id, conversation_id, role, content, tool_calls_json, tool_call_id, tool_name, sort_order, created_at, status, finish_reason, error_message)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+        (id, conversation_id, role, content, tool_calls_json, tool_call_id, tool_name, sort_order, created_at, status, finish_reason, error_message, parts_json, images_json)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
         """
         guard let stmt = prepare(sql) else { throw DatabaseManagerError.operationFailed(currentError()) }
         defer { sqlite3_finalize(stmt) }
@@ -541,6 +596,20 @@ final class DatabaseManager {
         sqlite3_bind_text(stmt, 10, message.status.rawValue, -1, t)
         if let reason = message.finishReason { sqlite3_bind_text(stmt, 11, reason, -1, t) } else { sqlite3_bind_null(stmt, 11) }
         if let error = message.errorMessage { sqlite3_bind_text(stmt, 12, error, -1, t) } else { sqlite3_bind_null(stmt, 12) }
+        if let parts = message.parts, !parts.isEmpty,
+           let data = try? JSONEncoder().encode(parts),
+           let json = String(data: data, encoding: .utf8) {
+            sqlite3_bind_text(stmt, 13, json, -1, t)
+        } else {
+            sqlite3_bind_null(stmt, 13)
+        }
+        if let images = message.images, !images.isEmpty,
+           let data = try? JSONEncoder().encode(images),
+           let json = String(data: data, encoding: .utf8) {
+            sqlite3_bind_text(stmt, 14, json, -1, t)
+        } else {
+            sqlite3_bind_null(stmt, 14)
+        }
         try requireDone(stmt)
     }
 
@@ -560,15 +629,26 @@ final class DatabaseManager {
             let status = columnTextOrNil(stmt, 9).flatMap(ChatMessageStatus.init(rawValue:)) ?? .complete
             let finishReason = columnTextOrNil(stmt, 10)
             let errorMessage = columnTextOrNil(stmt, 11)
+            let partsJSON = columnTextOrNil(stmt, 12)
+            let imagesJSON = columnTextOrNil(stmt, 13)
 
             var toolCalls: [ToolCallDisplay]? = nil
             if let json = toolCallsJSON, let data = json.data(using: .utf8) {
                 toolCalls = try? JSONDecoder().decode([ToolCallDisplay].self, from: data)
             }
+            var parts: [MessageContentPart]? = nil
+            if let json = partsJSON, let data = json.data(using: .utf8) {
+                parts = try? JSONDecoder().decode([MessageContentPart].self, from: data)
+            }
+            var images: [ChatImageAttachment]? = nil
+            if let json = imagesJSON, let data = json.data(using: .utf8) {
+                images = try? JSONDecoder().decode([ChatImageAttachment].self, from: data)
+            }
 
             guard let id = UUID(uuidString: idStr) else { continue }
             let msg = ChatMessage(
-                id: id, role: role, content: content, toolCalls: toolCalls,
+                id: id, role: role, content: content, parts: parts, images: images,
+                toolCalls: toolCalls,
                 toolCallId: toolCallId, toolName: toolName, status: status,
                 finishReason: finishReason, errorMessage: errorMessage
             )
@@ -632,7 +712,22 @@ final class DatabaseManager {
             case "system": label = "**System**"
             default: label = "**\(msg.role)**"
             }
-            md += "\(label):\n\n\(msg.content)\n\n---\n\n"
+            md += "\(label):\n\n\(msg.content)\n"
+            if let parts = msg.parts, !parts.isEmpty {
+                md += "\n*Attachments: \(parts.count) file(s) — see app to view.*\n"
+            }
+            if let images = msg.images, !images.isEmpty {
+                for (index, image) in images.enumerated() {
+                    // Remote URLs embed directly; data URLs would bloat the
+                    // file, so reference them by position instead.
+                    if image.isRemoteURL {
+                        md += "\n![generated image \(index + 1)](\(image.dataURL))\n"
+                    } else {
+                        md += "\n*[generated image \(index + 1): embedded \(image.mimeType), see app to view]*\n"
+                    }
+                }
+            }
+            md += "\n---\n\n"
         }
         return md
     }

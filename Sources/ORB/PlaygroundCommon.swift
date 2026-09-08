@@ -532,7 +532,7 @@ extension PlaygroundMessageView {
             }
 
             Group {
-                if message.content.isEmpty && isStreaming && (message.reasoning?.isEmpty ?? true) {
+                if message.content.isEmpty && (message.images?.isEmpty ?? true) && isStreaming && (message.reasoning?.isEmpty ?? true) {
                     TypingIndicator(accent: accent)
                         .padding(.vertical, 4)
                 } else if isUser {
@@ -540,6 +540,9 @@ extension PlaygroundMessageView {
                         .font(.system(size: 13))
                         .lineSpacing(3)
                         .textSelection(.enabled)
+                    if let parts = message.parts, !parts.isEmpty {
+                        SentAttachmentsLabel(count: parts.count)
+                    }
                 } else {
                     // Full block-level Markdown, including during streaming, so
                     // code fences and lists never appear as raw syntax.
@@ -547,6 +550,9 @@ extension PlaygroundMessageView {
                         .font(.system(size: 13))
                         .lineSpacing(3)
                         .textSelection(.enabled)
+                    if let images = message.images, !images.isEmpty {
+                        AssistantImageRow(images: images, accent: accent)
+                    }
                 }
             }
             .padding(.horizontal, 14)

@@ -6,7 +6,7 @@ import Foundation
 /// Schema — nested objects, arrays, enums, `oneOf`, and so on — which the flat
 /// `AgentToolProperty` model cannot represent. Schemas are forwarded to
 /// OpenRouter verbatim rather than being lossily flattened.
-enum JSONValue: Codable, Sendable, Equatable {
+enum JSONValue: Codable, Sendable, Equatable, Hashable {
     case null
     case bool(Bool)
     case number(Double)

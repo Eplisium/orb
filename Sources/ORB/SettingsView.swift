@@ -3,6 +3,7 @@ import SwiftUI
 /// Settings view: API key management, account credits, and usage activity.
 struct SettingsView: View {
     @StateObject private var account = AccountService()
+    @StateObject private var directory = DirectoryService()
     @State private var apiKeyInput = ""
     @State private var showKeySaved = false
     @State private var showKeyDeleted = false
@@ -15,6 +16,8 @@ struct SettingsView: View {
         case apiKey = "API Key"
         case credits = "Credits"
         case activity = "Activity"
+        case keyInfo = "Key Info"
+        case providers = "Providers"
         case mcp = "MCP Servers"
         case advanced = "Advanced"
     }
@@ -39,6 +42,8 @@ struct SettingsView: View {
                     case .apiKey: apiKeySection
                     case .credits: creditsSection
                     case .activity: activitySection
+                    case .keyInfo: keyInfoSection
+                    case .providers: providersSection
                     case .mcp: MCPSettingsView(accent: .accentColor)
                     case .advanced: NetworkTimeoutsView(accent: .accentColor)
                     }
@@ -370,6 +375,124 @@ struct SettingsView: View {
     private func refreshAccount() async {
         await account.fetchCredits()
         await account.fetchActivity()
+        await directory.fetchKeyInfo()
+    }
+
+    // MARK: - Key Info (`GET /key`)
+
+    private var keyInfoSection: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            HStack {
+                Label("Current Key", systemImage: "key.fill")
+                    .font(.title2.weight(.semibold))
+                Spacer()
+                Button {
+                    Task { await directory.fetchKeyInfo() }
+                } label: {
+                    Image(systemName: "arrow.clockwise")
+                }
+                .buttonStyle(.plain)
+                .help("Refresh key info")
+            }
+
+            if !KeychainManager.hasAPIKey {
+                noKeyBanner
+            } else if let error = directory.lastError, directory.keyInfo == nil {
+                ErrorBanner(message: error)
+            } else if let info = directory.keyInfo {
+                LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 16) {
+                    CreditCard(title: "Label", value: info.label ?? "—", icon: "tag.fill", color: .blue)
+                    CreditCard(
+                        title: "Spend Limit",
+                        value: info.limit.map { formatCurrency($0) } ?? "No limit",
+                        icon: "gauge.with.dots.needle.67percent", color: .purple
+                    )
+                    CreditCard(
+                        title: "Remaining",
+                        value: info.limitRemaining.map { formatCurrency($0) } ?? "—",
+                        icon: "wallet.bifold.fill",
+                        color: (info.limitRemaining ?? 1) > 0 ? .green : .red
+                    )
+                    CreditCard(title: "Used (total)", value: formatCurrency(info.usage ?? 0), icon: "chart.line.uptrend.xyaxis", color: .orange)
+                }
+                VStack(alignment: .leading, spacing: 6) {
+                    keyInfoRow("Reset", info.limitReset ?? "—")
+                    keyInfoRow("Today", formatCurrency(info.usageDaily ?? 0))
+                    keyInfoRow("This week", formatCurrency(info.usageWeekly ?? 0))
+                    keyInfoRow("This month", formatCurrency(info.usageMonthly ?? 0))
+                    if info.isFreeTier == true {
+                        keyInfoRow("Tier", "Free")
+                    }
+                    if info.isProvisioningKey == true {
+                        keyInfoRow("Provisioning key", "Yes")
+                    }
+                    if info.isManagementKey == true {
+                        keyInfoRow("Management key", "Yes")
+                    }
+                    if let expires = info.expiresAt {
+                        keyInfoRow("Expires", expires)
+                    }
+                }
+                .padding(.top, 4)
+            } else {
+                Text("Tap the arrow to load key limits and usage.")
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    private func keyInfoRow(_ label: String, _ value: String) -> some View {
+        HStack {
+            Text(label).font(.callout).foregroundStyle(.secondary)
+            Spacer()
+            Text(value).font(.system(size: 12, design: .monospaced))
+        }
+        .padding(.vertical, 2)
+    }
+
+    // MARK: - Providers (`GET /providers`)
+
+    private var providersSection: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            HStack {
+                Label("Providers", systemImage: "building.2.fill")
+                    .font(.title2.weight(.semibold))
+                Spacer()
+                Button {
+                    Task { await directory.fetchProviders() }
+                } label: {
+                    Image(systemName: "arrow.clockwise")
+                }
+                .buttonStyle(.plain)
+                .help("Refresh providers")
+            }
+            .task { await directory.fetchProviders() }
+
+            if let error = directory.lastError, directory.providers.isEmpty {
+                ErrorBanner(message: error)
+            } else if directory.providers.isEmpty {
+                Text("No providers loaded yet.")
+                    .foregroundStyle(.secondary)
+            } else {
+                Text("\(directory.providers.count) providers serve models on OpenRouter.")
+                    .font(.callout).foregroundStyle(.secondary)
+                LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 8) {
+                    ForEach(directory.providers) { provider in
+                        HStack(spacing: 6) {
+                            Circle().fill(Color.accentColor.opacity(0.6)).frame(width: 7, height: 7)
+                            VStack(alignment: .leading, spacing: 1) {
+                                Text(provider.name).font(.system(size: 12, weight: .medium)).lineLimit(1)
+                                Text(provider.slug).font(.system(size: 10, design: .monospaced)).foregroundStyle(.tertiary).lineLimit(1)
+                            }
+                            Spacer()
+                        }
+                        .padding(8)
+                        .background(Color.primary.opacity(0.04))
+                        .clipShape(RoundedRectangle(cornerRadius: 8))
+                    }
+                }
+            }
+        }
     }
 }
 

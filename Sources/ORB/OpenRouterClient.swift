@@ -482,6 +482,7 @@ private struct RequestBody: Encodable {
         case reasoning, provider, transforms, plugins, logprobs, usage
         case toolChoice = "tool_choice"
         case maxTokens = "max_tokens"
+        case maxCompletionTokens = "max_completion_tokens"
         case streamOptions = "stream_options"
         case topP = "top_p"
         case topK = "top_k"
@@ -493,6 +494,11 @@ private struct RequestBody: Encodable {
         case logitBias = "logit_bias"
         case topLogprobs = "top_logprobs"
         case parallelToolCalls = "parallel_tool_calls"
+        case responseFormat = "response_format"
+        case serviceTier = "service_tier"
+        case sessionId = "session_id"
+        case user, modalities
+        case imageConfig = "image_config"
     }
 
     func encode(to encoder: Encoder) throws {
@@ -526,7 +532,24 @@ private struct RequestBody: Encodable {
         try container.encodeIfPresent(settings.topA, forKey: .topA)
         try container.encodeIfPresent(settings.seed, forKey: .seed)
         try container.encodeIfPresent(settings.maxTokens, forKey: .maxTokens)
+        try container.encodeIfPresent(settings.maxCompletionTokens, forKey: .maxCompletionTokens)
         try container.encodeIfPresent(settings.parallelToolCalls, forKey: .parallelToolCalls)
+        // `json_object` requires the prompt to ask for JSON; structured
+        // outputs need a supporting model. Both 400 otherwise, so the
+        // settings validator drops degenerate schemas before we get here.
+        if settings.responseFormat.isConfigured {
+            try container.encode(settings.responseFormat, forKey: .responseFormat)
+        }
+        try container.encodeIfPresent(settings.serviceTier?.rawValue, forKey: .serviceTier)
+        // Stable per-end-user ID for abuse isolation; hashed upstream.
+        try container.encodeIfPresent(settings.endUserId, forKey: .user)
+        try container.encodeIfPresent(settings.sessionId, forKey: .sessionId)
+        if !settings.modalities.isEmpty {
+            try container.encode(settings.modalities.map(\.rawValue), forKey: .modalities)
+        }
+        if settings.imageConfig.isConfigured {
+            try container.encode(settings.imageConfig, forKey: .imageConfig)
+        }
 
         if !settings.stop.isEmpty { try container.encode(settings.stop, forKey: .stop) }
         if !settings.logitBias.isEmpty { try container.encode(settings.logitBias, forKey: .logitBias) }
@@ -565,10 +588,26 @@ private struct RequestBody: Encodable {
                 try provider.encode(routing.dataCollection.rawValue, forKey: .dataCollection)
             }
             if routing.zeroDataRetention { try provider.encode(true, forKey: .zdr) }
+            var maxPrice: [String: Double] = [:]
+            if let v = routing.maxPromptPrice { maxPrice["prompt"] = v }
+            if let v = routing.maxCompletionPrice { maxPrice["completion"] = v }
+            if let v = routing.maxImagePrice { maxPrice["image"] = v }
+            if let v = routing.maxAudioPrice { maxPrice["audio"] = v }
+            if let v = routing.maxRequestPrice { maxPrice["request"] = v }
+            if !maxPrice.isEmpty {
+                try provider.encode(MaxPriceCaps(caps: maxPrice), forKey: .maxPrice)
+            }
         }
 
+        var plugins: [AnyEncodablePlugin] = []
         if settings.webSearch {
-            try container.encode([WebPlugin(maxResults: settings.webSearchMaxResults)], forKey: .plugins)
+            plugins.append(AnyEncodablePlugin(WebPlugin(maxResults: settings.webSearchMaxResults)))
+        }
+        for extra in settings.extraPlugins {
+            plugins.append(AnyEncodablePlugin(extra))
+        }
+        if !plugins.isEmpty {
+            try container.encode(plugins, forKey: .plugins)
         }
     }
 
@@ -578,7 +617,7 @@ private struct RequestBody: Encodable {
     }
 
     private enum ProviderKeys: String, CodingKey {
-        case order, only, ignore, sort, zdr
+        case order, only, ignore, sort, zdr, maxPrice = "max_price"
         case allowFallbacks = "allow_fallbacks"
         case requireParameters = "require_parameters"
         case dataCollection = "data_collection"
@@ -595,6 +634,34 @@ private struct RequestBody: Encodable {
             var container = encoder.container(keyedBy: CodingKeys.self)
             try container.encode(id, forKey: .id)
             try container.encodeIfPresent(maxResults, forKey: .maxResults)
+        }
+    }
+
+    /// Type-erased plugin so the heterogeneous `[WebPlugin] + [ExtraPlugin]`
+    /// list encodes as one `plugins` array.
+    private struct AnyEncodablePlugin: Encodable {
+        let encodeBody: (Encoder) throws -> Void
+        init<P: Encodable>(_ plugin: P) {
+            encodeBody = { try plugin.encode(to: $0) }
+        }
+        func encode(to encoder: Encoder) throws { try encodeBody(encoder) }
+    }
+
+    /// `provider.max_price` caps: USD per 1M tokens (prompt/completion),
+    /// per image, per audio unit, or per request.
+    private struct MaxPriceCaps: Encodable {
+        let caps: [String: Double]
+        func encode(to encoder: Encoder) throws {
+            var container = encoder.container(keyedBy: DynamicKey.self)
+            for (key, value) in caps {
+                try container.encode(value, forKey: DynamicKey(stringValue: key)!)
+            }
+        }
+        private struct DynamicKey: CodingKey {
+            var stringValue: String
+            var intValue: Int? { nil }
+            init?(stringValue: String) { self.stringValue = stringValue }
+            init?(intValue: Int) { nil }
         }
     }
 }

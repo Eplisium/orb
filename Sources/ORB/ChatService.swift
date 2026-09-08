@@ -24,20 +24,30 @@ final class ChatService: ObservableObject {
 
     // MARK: - Streaming cadence
     //
-    // Tuned for perceived snappiness across both fast and slow models. The
-    // frame interval is just under one 60Hz frame, so text lands at display
-    // rate without queueing redundant redraws; the character threshold makes a
-    // burst from a fast model flush early rather than waiting out the timer.
+    // Tuned for perceived snappiness across both fast and slow models: the
+    // frame interval sits at roughly two 60Hz frames, the character threshold
+    // makes a burst from a fast model flush early rather than waiting out the
+    // timer, and the checkpoint interval keeps SQLite writes well below one
+    // per second.
+    //
+    // Why not faster: 16ms publishes re-rendered the whole Markdown tree at
+    // display rate AND fired a follow-scroll each frame; on longer answers
+    // the layout work exceeded the frame budget and text visibly stuttered.
+    // Why not slower: beyond ~50ms the first paint feels laggy on quick
+    // answers. 33ms with a small backstop is the sweet spot. Keep the test
+    // `contentPublishCount < 20` for 1,000 deltas green when touching these.
 
     /// Minimum wall-clock gap between UI publishes during streaming.
-    static let streamFrameInterval: Duration = .milliseconds(16)
+    static let streamFrameInterval: Duration = .milliseconds(33)
     /// Safety valve for oversized bursts: if a provider hands us a very large
     /// chunk (or many deltas inside one frame), render rather than hold it.
     ///
     /// Deliberately well above a typical token. A small value here would fire on
     /// nearly every delta and defeat time-based coalescing entirely, producing
-    /// hundreds of redundant redraws per response.
-    static let streamFlushCharacters = 512
+    /// hundreds of redundant redraws per response. 120 chars is ~30 tokens —
+    /// small enough that a fast model still paints several times a second,
+    /// large enough that single-token drips coalesce into frame-rate frames.
+    static let streamFlushCharacters = 120
     /// Minimum gap between SQLite checkpoints while a run is in flight.
     static let streamCheckpointInterval: Duration = .milliseconds(750)
 
@@ -168,9 +178,10 @@ final class ChatService: ObservableObject {
     func sendMessage(
         _ text: String,
         modelId: String,
-        settings: GenerationSettings = .default
+        settings: GenerationSettings = .default,
+        parts: [MessageContentPart]? = nil
     ) {
-        _ = startDirectMessage(text, modelId: modelId, settings: settings, appendUser: true)
+        _ = startDirectMessage(text, modelId: modelId, settings: settings, appendUser: true, parts: parts)
     }
 
     private func startDirectMessage(
@@ -178,7 +189,8 @@ final class ChatService: ObservableObject {
         modelId: String,
         settings: GenerationSettings,
         appendUser: Bool,
-        replacingAssistant: ChatMessage? = nil
+        replacingAssistant: ChatMessage? = nil,
+        parts: [MessageContentPart]? = nil
     ) -> PlaygroundRunContext? {
         guard !isStreaming else { lastError = "A generation is already running."; return nil }
         guard let apiKey = apiKeyProvider(), !apiKey.isEmpty else {
@@ -192,7 +204,13 @@ final class ChatService: ObservableObject {
               let conversationIndex = conversations.firstIndex(where: { $0.id == conversationID }) else { return nil }
 
         if appendUser {
-            conversations[conversationIndex].messages.append(ChatMessage(role: "user", content: text))
+            let userMessage: ChatMessage
+            if let parts, !parts.isEmpty {
+                userMessage = ChatMessage(role: "user", content: text, parts: parts)
+            } else {
+                userMessage = ChatMessage(role: "user", content: text)
+            }
+            conversations[conversationIndex].messages.append(userMessage)
             if conversations[conversationIndex].messages.count == 1 {
                 conversations[conversationIndex].title = String(text.prefix(44)) + (text.count > 44 ? "…" : "")
             }
@@ -213,7 +231,7 @@ final class ChatService: ObservableObject {
         let conversation = conversations[conversationIndex]
         if !conversation.systemPrompt.isEmpty { messages.append(.init(role: "system", content: conversation.systemPrompt)) }
         messages += conversation.messages.dropLast().filter { $0.role == "user" || $0.role == "assistant" }.map {
-            .init(role: $0.role, content: $0.content)
+            wireMessage(for: $0)
         }
 
         let context = PlaygroundRunContext(
@@ -244,6 +262,7 @@ final class ChatService: ObservableObject {
     private func consumeDirect(request: OpenRouterRequest, context: PlaygroundRunContext) async {
         var fullContent = ""
         var reasoningContent = ""
+        var streamedImages: [ChatImageAttachment] = []
         var latestUsage: ChatUsage?
         var finishReason: String?
         let contentCoalescer = StreamPublishCoalescer<String>(
@@ -273,6 +292,14 @@ final class ChatService: ObservableObject {
                 case .reasoningDelta(let choice, let text) where choice == 0:
                     reasoningContent += text
                     reasoningCoalescer.submit(reasoningContent, addedCharacters: text.count)
+                case .imageDelta(let choice, let imageURL) where choice == 0:
+                    // Dedupe: some providers re-emit the same image URL.
+                    if !streamedImages.contains(where: { $0.dataURL == imageURL }) {
+                        streamedImages.append(ChatImageAttachment(dataURL: imageURL))
+                        _ = mutateMessage(context, mutation: { $0.images = streamedImages })
+                        synchronizeActive(context.conversationID)
+                        checkpoint(context)
+                    }
                 case .usage(let usage): latestUsage = usage
                 case .finishReason(let choice, let reason) where choice == 0: finishReason = reason
                 case .apiError(let error):
@@ -287,7 +314,11 @@ final class ChatService: ObservableObject {
             contentCoalescer.flush()
             reasoningCoalescer.flush()
             guard owns(context.runID) else { return }
-            if fullContent.isEmpty {
+            // Image-only turns (image-output models) are complete even with
+            // no text — the images are the answer.
+            if fullContent.isEmpty, !streamedImages.isEmpty {
+                finish(context: context, status: .complete, finishReason: finishReason, usage: latestUsage)
+            } else if fullContent.isEmpty {
                 if restoreRegeneration(context, message: "The model returned no supported output.") { return }
                 fail(context: context, message: "The model returned no supported output.", status: .failed, finishReason: finishReason, usage: latestUsage)
             } else {
@@ -309,6 +340,14 @@ final class ChatService: ObservableObject {
         }
     }
 
+    /// Publishes streamed content. Publishes are already coalesced to frame
+    /// cadence upstream (`streamFrameInterval` + `streamFlushCharacters`), so
+    /// this stays a direct write: any extra gating here would hold visible
+    /// text back and read as "not streaming".
+    ///
+    /// Checkpointing (SQLite writes) is NOT done here — it stays on its own
+    /// 750ms timer via `checkpoint(context)`, because a disk write per frame
+    /// janked layout on longer answers.
     private func publish(content: String, context: PlaygroundRunContext) {
         guard owns(context.runID), mutateMessage(context, mutation: { $0.content = content }) else { return }
         streamingContent = content
@@ -621,7 +660,7 @@ final class ChatService: ObservableObject {
         var history: [AgentAPIMessage] = []
         for message in conversation.messages {
             if message.role == "user" {
-                history.append(.init(role: "user", content: message.content))
+                history.append(wireMessage(for: message))
                 continue
             }
             guard message.role == "assistant" else { continue }
@@ -659,5 +698,20 @@ final class ChatService: ObservableObject {
 
     func formattedCost(_ cost: Double) -> String {
         cost < 0.01 ? String(format: "$%.4f", cost) : String(format: "$%.2f", cost)
+    }
+
+    // MARK: - Multimodal wire mapping
+
+    /// Maps a UI `ChatMessage` to its wire form. Messages carrying attachment
+    /// parts encode as a content-part array (text first, then attachments);
+    /// plain messages stay strings so provider cache keys don't churn.
+    private func wireMessage(for message: ChatMessage) -> AgentAPIMessage {
+        if let parts = message.parts, !parts.isEmpty {
+            var all: [MessageContentPart] = []
+            if !message.content.isEmpty { all.append(.textPart(message.content)) }
+            all += parts
+            return .init(role: message.role, parts: all)
+        }
+        return .init(role: message.role, content: message.content)
     }
 }

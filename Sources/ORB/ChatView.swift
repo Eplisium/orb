@@ -19,6 +19,8 @@ struct ChatView: View {
     @State private var showModelPicker = false
     @State private var modelSearchText = ""
     @State private var followsLatest = true
+    @State private var attachmentDrafts: [ChatAttachmentDraft] = []
+    @State private var attachmentWarnings: [String] = []
     /// Latest sentinel maxY in the scroll coordinate space. Updated by
     /// onPreferenceChange; read by the scroll decision in onChange.
     @State private var bottomOffset: CGFloat = .infinity
@@ -563,6 +565,31 @@ struct ChatView: View {
 
     private var composer: some View {
         VStack(spacing: 8) {
+            if !attachmentDrafts.isEmpty {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 6) {
+                        ForEach(attachmentDrafts) { draft in
+                            AttachmentDraftChip(draft: draft) {
+                                attachmentDrafts.removeAll { $0.id == draft.id }
+                                refreshAttachmentWarnings()
+                            }
+                        }
+                    }
+                    .padding(.horizontal, 2)
+                }
+            }
+
+            if !attachmentWarnings.isEmpty {
+                VStack(alignment: .leading, spacing: 3) {
+                    ForEach(attachmentWarnings, id: \.self) { warning in
+                        Label(warning, systemImage: "exclamationmark.triangle")
+                    }
+                }
+                .font(.system(size: 9))
+                .foregroundStyle(.orange)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+
             VStack(spacing: 0) {
                 TextField(composerPlaceholder, text: $messageText, axis: .vertical)
                     .textFieldStyle(.plain)
@@ -575,6 +602,17 @@ struct ChatView: View {
                     .onSubmit { sendMessage() }
 
                 HStack(spacing: 9) {
+                    Button(action: chooseAttachments) {
+                        Image(systemName: "paperclip")
+                            .font(.system(size: 12, weight: .semibold))
+                            .frame(width: 25, height: 25)
+                            .background(Color.primary.opacity(0.05))
+                            .clipShape(Circle())
+                    }
+                    .buttonStyle(.plain)
+                    .help("Attach images, audio, video, or documents")
+                    .disabled(chatService.isStreaming)
+
                     Spacer()
                     Text("↩ send")
                         .font(.system(size: 9, weight: .medium))
@@ -631,7 +669,7 @@ struct ChatView: View {
 
     private var canSend: Bool {
         let hasText = !messageText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-        return hasText && KeychainManager.hasAPIKey && !chatService.isStreaming
+        return (hasText || !attachmentDrafts.isEmpty) && KeychainManager.hasAPIKey && !chatService.isStreaming
     }
 
     private var composerPlaceholder: String {
@@ -670,6 +708,8 @@ struct ChatView: View {
         selectedModelId = preferredModelId
         _ = chatService.newConversation(modelId: selectedModelId, mode: .chat)
         messageText = ""
+        attachmentDrafts = []
+        attachmentWarnings = []
         inputFocused = true
     }
 
@@ -686,13 +726,47 @@ struct ChatView: View {
         }
 
         let prompt = messageText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let drafts = attachmentDrafts
         messageText = ""
+        attachmentDrafts = []
+        attachmentWarnings = []
+
+        let wireParts: [MessageContentPart]?
+        do {
+            wireParts = drafts.isEmpty ? nil : try ChatAttachmentBuilder.parts(for: drafts)
+        } catch {
+            chatService.lastError = "Could not read attachments: \(error.localizedDescription)"
+            return
+        }
 
         chatService.sendMessage(
             prompt,
             modelId: currentModelId,
-            settings: requestSettings
+            settings: requestSettings,
+            parts: wireParts
         )
+    }
+
+    private func chooseAttachments() {
+        let panel = NSOpenPanel()
+        panel.title = "Attach Files for Chat"
+        panel.prompt = "Attach"
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = true
+        panel.allowedContentTypes = ChatAttachmentPanelTypes.allowed
+        if panel.runModal() == .OK {
+            let result = ChatAttachmentBuilder.classify(urls: panel.urls)
+            attachmentDrafts.append(contentsOf: result.drafts)
+            refreshAttachmentWarnings(extra: result.warnings)
+        }
+    }
+
+    private func refreshAttachmentWarnings(extra: [String] = []) {
+        var warnings = extra
+        let model = viewModel.api.models.first { $0.id == currentModelId }
+        warnings += AttachmentCapability.warnings(model: model, drafts: attachmentDrafts)
+        attachmentWarnings = warnings
     }
 
     private func exportConversation(_ conv: ChatConversation) {
@@ -717,14 +791,15 @@ struct ChatView: View {
     /// got taller.
     private func scrollFollowKey(_ conversation: ChatConversation) -> String {
         let last = conversation.messages.last
-        return [
-            String(conversation.messages.count),
-            String(last?.content.count ?? 0),
-            String(last?.reasoning?.count ?? 0),
-            String(last?.toolCalls?.count ?? 0),
-            String(last?.toolCalls?.reduce(0) { $0 + ($1.result?.count ?? 0) } ?? 0),
-            chatService.activityLabel
-        ].joined(separator: "|")
+        var segments: [String] = []
+        segments.append(String(conversation.messages.count))
+        segments.append(String(last?.content.count ?? 0))
+        segments.append(String(last?.reasoning?.count ?? 0))
+        segments.append(String(last?.toolCalls?.count ?? 0))
+        segments.append(String(last?.toolCalls?.reduce(0) { $0 + ($1.result?.count ?? 0) } ?? 0))
+        segments.append(String(last?.images?.count ?? 0))
+        segments.append(chatService.activityLabel)
+        return segments.joined(separator: "|")
     }
 
     /// Hysteresis thresholds for follow behavior. We follow when within
@@ -760,6 +835,11 @@ struct ChatView: View {
     /// intentionally omitted during streaming: content is already growing
     /// at frame rate, so animating each scroll request stacks overlapping
     /// animations and can crash NSScrollView under load.
+    ///
+    /// NOTE: the throttle constant lives here (not in ChatService) because it
+    /// gates *layout work* (scrollTo forces a full LazyVStack layout), not
+    /// data publishes. Streaming at 33ms frames with 33ms scrolls is fine;
+    /// dropping this to ~16ms re-introduces the stutter users reported.
     private func requestFollowScroll(_ proxy: ScrollViewProxy) {
         let now = ContinuousClock.now
         if let last = lastScrollRequest, now - last < Self.scrollThrottle {

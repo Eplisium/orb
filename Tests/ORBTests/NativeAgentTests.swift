@@ -43,7 +43,9 @@ private func model(
         knowledgeCutoff: nil,
         expirationDate: nil,
         supportedVoices: nil,
-        benchmarks: nil
+        benchmarks: nil,
+        perRequestLimits: nil,
+        defaultParameters: nil
     )
 }
 

@@ -89,29 +89,86 @@ struct AgentChoice: Decodable {
 
 struct AgentAPIMessage: Codable, Sendable {
     let role: String
+    /// Plain-text content. Mutually exclusive with `parts` on the wire: when
+    /// attachments are present the message encodes as a content-part array.
     let content: String?
+    /// Multimodal content parts. Encodes as `content: [...]` when non-nil.
+    let parts: [MessageContentPart]?
     let toolCalls: [AgentToolCall]?
     let toolCallId: String?
     let name: String?
+    /// Generated images attached to an assistant message (`images: [...]`).
+    let images: [AssistantImagePart]?
 
     init(
         role: String,
         content: String? = nil,
+        parts: [MessageContentPart]? = nil,
         toolCalls: [AgentToolCall]? = nil,
         toolCallId: String? = nil,
-        name: String? = nil
+        name: String? = nil,
+        images: [AssistantImagePart]? = nil
     ) {
         self.role = role
         self.content = content
+        self.parts = parts
         self.toolCalls = toolCalls
         self.toolCallId = toolCallId
         self.name = name
+        self.images = images
+    }
+
+    /// Convenience for a multimodal user turn: text plus attachment parts.
+    /// A nil/empty text produces a parts-only message with no empty text part.
+    static func multimodal(role: String = "user", text: String?, parts: [MessageContentPart]) -> AgentAPIMessage {
+        var all: [MessageContentPart] = []
+        if let text, !text.isEmpty { all.append(.textPart(text)) }
+        all += parts
+        return .init(role: role, parts: all)
     }
 
     enum CodingKeys: String, CodingKey {
-        case role, content, name
+        case role, content, name, images
         case toolCalls = "tool_calls"
         case toolCallId = "tool_call_id"
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        role = try container.decode(String.self, forKey: .role)
+        // `content` is polymorphic: a string, a part array, or null.
+        // Try the string form first; the part array only when that fails.
+        if let text = try? container.decode(String.self, forKey: .content) {
+            content = text
+            parts = nil
+        } else if let decoded = try? container.decode([MessageContentPart].self, forKey: .content) {
+            parts = decoded
+            content = nil
+        } else if (try? container.decodeNil(forKey: .content)) == true {
+            content = nil
+            parts = nil
+        } else {
+            content = try container.decodeIfPresent(String.self, forKey: .content)
+            parts = nil
+        }
+        toolCalls = try container.decodeIfPresent([AgentToolCall].self, forKey: .toolCalls)
+        toolCallId = try container.decodeIfPresent(String.self, forKey: .toolCallId)
+        name = try container.decodeIfPresent(String.self, forKey: .name)
+        images = try container.decodeIfPresent([AssistantImagePart].self, forKey: .images)
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(role, forKey: .role)
+        if let parts {
+            try container.encode(parts, forKey: .content)
+        } else {
+            try container.encodeIfPresent(content, forKey: .content)
+        }
+        try container.encodeIfPresent(toolCalls, forKey: .toolCalls)
+        try container.encodeIfPresent(toolCallId, forKey: .toolCallId)
+        try container.encodeIfPresent(name, forKey: .name)
+        try container.encodeIfPresent(images, forKey: .images)
     }
 }
 

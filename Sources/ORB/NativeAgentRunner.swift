@@ -305,6 +305,15 @@ enum NativeAgentRunner {
         - Do not perform destructive, privacy-sensitive, or financial actions unless the user's request clearly requires them.
         - After changing code or files, verify the result with the appropriate function.
         - Keep the final response clear and concise, summarizing real actions and outcomes.
+
+        Your function toolbox:
+        - Files & shell: read_file, list_directory, search_files, write_file, run_command.
+        - Mac automation: run_applescript, open_application, open_url, capture_screen, computer_action.
+        - Vision: after capture_screen, call view_image on the PNG to actually see the screen before clicking coordinates. Never guess coordinates blind.
+        - Memory: recall a topic before starting (past sessions may have learned it); remember durable facts worth keeping.
+        - Planning: for multi-step tasks, set up plan_tasks first and update it as you finish each step.
+        - Web: web_search for current information (docs, prices, news) instead of guessing; fetch_url to read a specific page.
+        - Media (spend credits, ask only for large work): generate_image saves AI pictures to disk; speak_text saves narration audio to disk.
         """
     }
 
@@ -328,6 +337,13 @@ enum NativeAgentRunner {
         case "write_file": "Writing a file…"
         case "run_command": "Running a command…"
         case "fetch_url": "Fetching the web…"
+        case "view_image": "Looking at an image…"
+        case "remember": "Saving a memory…"
+        case "recall": "Recalling memories…"
+        case "plan_tasks": "Planning tasks…"
+        case "web_search": "Searching the web…"
+        case "speak_text": "Synthesizing speech…"
+        case "generate_image": "Generating an image…"
         default: "Using \(tool)…"
         }
     }

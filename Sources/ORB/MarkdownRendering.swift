@@ -194,24 +194,38 @@ struct MarkdownText: View {
     /// Cached parse result, invalidated when `content` changes. Without this
     /// the entire document is re-parsed from scratch on every 16ms streaming
     /// frame — O(n) per publish, which causes frame drops on longer responses.
+    ///
+    /// NOTE: the cache lives here (in the view's own `@State`) rather than in
+    /// the parser on purpose. Moving it into `MarkdownParser` statics would
+    /// make renders impure-callers of shared mutable state and races between
+    /// concurrent streams.
+    ///
+    /// IMPORTANT: `body` must stay a pure read of this cache. Mutating `@State`
+    /// during `body` evaluation (the old `blocks` computed property assigned
+    /// `cachedContent`/`cachedBlocks` inside its getter) warns
+    /// "Modifying state during view update, this will cause undefined
+    /// behavior" and can leave rows blank mid-stream. Cache updates happen in
+    /// `onChange(of: content)` below and in `onAppear` for the first frame.
     @State private var cachedBlocks: [MarkdownBlock] = []
-    @State private var cachedContent: String = ""
-
-    private var blocks: [MarkdownBlock] {
-        if cachedContent != content {
-            cachedContent = content
-            cachedBlocks = MarkdownParser.parse(content)
-        }
-        return cachedBlocks
-    }
+    @State private var cachedContent: String? = nil
 
     var body: some View {
         VStack(alignment: .leading, spacing: 9) {
-            ForEach(Array(blocks.enumerated()), id: \.offset) { index, block in
-                view(for: block, isLast: index == blocks.count - 1)
+            ForEach(Array(cachedBlocks.enumerated()), id: \.offset) { index, block in
+                view(for: block, isLast: index == cachedBlocks.count - 1)
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+        .onAppear {
+            if cachedContent != content {
+                cachedContent = content
+                cachedBlocks = MarkdownParser.parse(content)
+            }
+        }
+        .onChange(of: content) { _, newContent in
+            cachedContent = newContent
+            cachedBlocks = MarkdownParser.parse(newContent)
+        }
     }
 
     @ViewBuilder

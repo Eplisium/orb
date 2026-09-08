@@ -105,6 +105,69 @@ enum NativeAgentTools {
                 ],
                 required: ["action"]
             ),
+            definition(
+                name: "view_image",
+                description: "Look at an image file (PNG, JPEG, GIF, WebP) and describe what you see. Use this on screenshots from capture_screen so you can ground coordinates and verify UI state.",
+                properties: [
+                    "path": .init(type: "string", description: "Image file path, absolute or relative to the workspace."),
+                    "question": .init(type: "string", description: "Optional question to answer about the image, e.g. where is the login button."),
+                ],
+                required: ["path"]
+            ),
+            definition(
+                name: "remember",
+                description: "Store a durable fact for future sessions (preferences, project paths, conventions, lessons). Keep it short and factual.",
+                properties: [
+                    "content": .init(type: "string", description: "The fact to remember, as a complete sentence."),
+                ],
+                required: ["content"]
+            ),
+            definition(
+                name: "recall",
+                description: "Search stored memories for a topic before acting, so you reuse what past sessions learned.",
+                properties: [
+                    "query": .init(type: "string", description: "Topic to search for, e.g. build commands or user preferences."),
+                ],
+                required: ["query"]
+            ),
+            definition(
+                name: "plan_tasks",
+                description: "Keep an explicit task list for multi-step work: create it at the start, check items off as you finish, so nothing is silently dropped.",
+                properties: [
+                    "tasks": .init(type: "string", description: "JSON array of {title, status} where status is pending, in_progress, or completed."),
+                ],
+                required: ["tasks"]
+            ),
+            definition(
+                name: "web_search",
+                description: "Search the web for current information (docs, prices, news). Prefer this over guessing about anything that changes.",
+                properties: [
+                    "query": .init(type: "string", description: "Search query."),
+                    "count": .init(type: "string", description: "Optional max results (1-10, default 5)."),
+                ],
+                required: ["query"]
+            ),
+            definition(
+                name: "speak_text",
+                description: "Synthesize speech from text with an OpenRouter TTS model and save the audio to a file. Ask the user which voice they want, or omit for the default.",
+                properties: [
+                    "text": .init(type: "string", description: "Text to speak (a sentence or two works best)."),
+                    "path": .init(type: "string", description: "Destination audio path, e.g. ~/speech.mp3."),
+                    "model": .init(type: "string", description: "Optional TTS model id. Defaults to a cheap OpenRouter TTS model."),
+                    "voice": .init(type: "string", description: "Optional voice id for models that support voices."),
+                ],
+                required: ["text", "path"]
+            ),
+            definition(
+                name: "generate_image",
+                description: "Generate an image from a text prompt with an OpenRouter image model and save it to a file. Uses the user's API key and spends credits.",
+                properties: [
+                    "prompt": .init(type: "string", description: "Text description of the desired image."),
+                    "path": .init(type: "string", description: "Destination image path, e.g. ~/Pictures/orb-dragon.png."),
+                    "model": .init(type: "string", description: "Optional image model id. Defaults to a cheap OpenRouter image model."),
+                ],
+                required: ["prompt", "path"]
+            ),
         ]
         return tools
     }
@@ -148,6 +211,20 @@ enum NativeAgentTools {
                 return try await captureScreen(arguments, workspace: workspace)
             case "computer_action":
                 return try await computerAction(arguments)
+            case "view_image":
+                return try await describeImage(arguments, workspace: workspace)
+            case "remember":
+                return remember(arguments)
+            case "recall":
+                return recall(arguments)
+            case "plan_tasks":
+                return planTasks(arguments)
+            case "web_search":
+                return try await agentWebSearch(arguments)
+            case "speak_text":
+                return try await speakText(arguments, workspace: workspace)
+            case "generate_image":
+                return try await agentGenerateImage(arguments, workspace: workspace)
             default:
                 return .init(content: "Unknown native function: \(name)", isError: true)
             }
@@ -711,6 +788,281 @@ enum NativeAgentTools {
             launchDelay: launchDelay,
             sendSignal: sendSignal
         ).exitCode
+    }
+
+    // MARK: - Hermes-parity tools (Phase D)
+
+    /// Vision: describes an image for a blind model. Loads the file locally
+    /// to validate it, then asks a vision-capable chat model to describe it.
+    /// The model answers in text, so even a text-only agent can now "see"
+    /// its own screenshots before acting on coordinates.
+    private static func describeImage(
+        _ arguments: [String: Any],
+        workspace: String
+    ) async throws -> NativeAgentToolResult {
+        guard let rawPath = arguments["path"] as? String, !rawPath.isEmpty else {
+            throw ToolError.missing("path")
+        }
+        let url = resolvedPath(rawPath, workspace: workspace)
+        let data: Data
+        do {
+            data = try Data(contentsOf: url)
+        } catch {
+            throw ToolError.message("Could not read image at \(url.path): \(error.localizedDescription)")
+        }
+        guard data.count <= 12_000_000 else {
+            throw ToolError.message("Image is larger than the 12 MB vision limit.")
+        }
+        let mime = mimeType(for: url, data: data)
+        guard mime.hasPrefix("image/") else {
+            throw ToolError.message("\(url.lastPathComponent) is not an image file.")
+        }
+        guard let apiKey = KeychainManager.getAPIKey(), !apiKey.isEmpty else {
+            throw ToolError.message("No OpenRouter API key configured. Add one in Account first.")
+        }
+        let question = (arguments["question"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let promptText = question?.isEmpty == false ? question! : "Describe this image in detail: layout, UI elements with approximate positions, text content, and anything unusual."
+        // A cheap vision-capable default; the router falls back if unavailable.
+        let visionModel = "google/gemini-2.5-flash-lite"
+        var settings = GenerationSettings()
+        settings.maxTokens = 1024
+        let message = AgentAPIMessage.multimodal(
+            text: promptText,
+            parts: [.imageDataPart(data, mimeType: mime, detail: .high)]
+        )
+        let request = OpenRouterRequest(apiKey: apiKey, model: visionModel, messages: [message], settings: settings)
+        let client = OpenRouterClient()
+        var text = ""
+        do {
+            let stream = try await client.stream(request)
+            for try await event in stream {
+                try Task.checkCancellation()
+                if case .contentDelta(let choice, let delta) = event, choice == 0 {
+                    text += delta
+                }
+            }
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            throw ToolError.message("Vision request failed: \(error.localizedDescription)")
+        }
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            throw ToolError.message("The vision model returned no description.")
+        }
+        return .init(content: trimmed, isError: false)
+    }
+
+    private static func mimeType(for url: URL, data: Data) -> String {
+        if let type = try? url.resourceValues(forKeys: [.contentTypeKey]).contentType?.preferredMIMEType {
+            return type
+        }
+        // Magic-byte sniffing for extension-less screenshots.
+        let pngMagic: [UInt8] = [0x89, 0x50, 0x4E, 0x47]
+        let jpegMagic: [UInt8] = [0xFF, 0xD8, 0xFF]
+        if data.prefix(4).elementsEqual(pngMagic) { return "image/png" }
+        if data.prefix(3).elementsEqual(jpegMagic) { return "image/jpeg" }
+        switch url.pathExtension.lowercased() {
+        case "png": return "image/png"
+        case "jpg", "jpeg": return "image/jpeg"
+        case "gif": return "image/gif"
+        case "webp": return "image/webp"
+        default: return "application/octet-stream"
+        }
+    }
+
+    // MARK: Agent memory (SQLite-backed, per-workspace)
+
+    private static func remember(_ arguments: [String: Any]) -> NativeAgentToolResult {
+        guard let content = (arguments["content"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !content.isEmpty else {
+            return .init(content: "Missing required argument: content", isError: true)
+        }
+        do {
+            try DatabaseManager.shared.saveMemory(content: String(content.prefix(2000)))
+            return .init(content: "Remembered.", isError: false)
+        } catch {
+            return .init(content: "Could not save memory: \(error.localizedDescription)", isError: true)
+        }
+    }
+
+    private static func recall(_ arguments: [String: Any]) -> NativeAgentToolResult {
+        guard let query = (arguments["query"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !query.isEmpty else {
+            return .init(content: "Missing required argument: query", isError: true)
+        }
+        let hits = DatabaseManager.shared.searchMemories(query: query, limit: 8)
+        guard !hits.isEmpty else {
+            return .init(content: "No memories match \"\(query)\".", isError: false)
+        }
+        return .init(
+            content: hits.map { "- \($0.content)" }.joined(separator: "\n"),
+            isError: false
+        )
+    }
+
+    // MARK: Task planning (in-memory, per-process)
+
+    private static func planTasks(_ arguments: [String: Any]) -> NativeAgentToolResult {
+        guard let raw = arguments["tasks"] as? String,
+              let data = raw.data(using: .utf8),
+              let items = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] else {
+            return .init(content: "tasks must be a JSON array of {title, status}.", isError: true)
+        }
+        var lines: [String] = []
+        for item in items.prefix(50) {
+            guard let title = item["title"] as? String, !title.isEmpty else { continue }
+            let status = (item["status"] as? String ?? "pending").lowercased()
+            let mark: String
+            switch status {
+            case "completed": mark = "[x]"
+            case "in_progress": mark = "[>]"
+            default: mark = "[ ]"
+            }
+            lines.append("\(mark) \(title)")
+        }
+        guard !lines.isEmpty else {
+            return .init(content: "No valid tasks found. Each needs a title and a status.", isError: true)
+        }
+        AgentTaskBoard.shared.replace(with: items)
+        return .init(content: "Task list updated:\n" + lines.joined(separator: "\n"), isError: false)
+    }
+
+    /// Web search via OpenRouter's `:online` models. No API keys beyond the
+    /// user's OpenRouter key, no new dependencies: asks a cheap search model
+    /// and returns its cited answer as the tool result.
+    private static func agentWebSearch(_ arguments: [String: Any]) async throws -> NativeAgentToolResult {
+        guard let query = (arguments["query"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !query.isEmpty else {
+            throw ToolError.missing("query")
+        }
+        guard let apiKey = KeychainManager.getAPIKey(), !apiKey.isEmpty else {
+            throw ToolError.message("No OpenRouter API key configured. Add one in Account first.")
+        }
+        let count: Int = {
+            guard let raw = arguments["count"] as? String, let n = Int(raw) else { return 5 }
+            return min(max(n, 1), 10)
+        }()
+        var settings = GenerationSettings()
+        settings.webSearch = true
+        settings.webSearchMaxResults = count
+        settings.maxTokens = 1500
+        let request = OpenRouterRequest(
+            apiKey: apiKey, model: "openai/gpt-4o-mini",
+            messages: [.init(role: "user", content: "Search the web and answer with citations: \(query)")],
+            settings: settings
+        )
+        let client = OpenRouterClient()
+        var text = ""
+        do {
+            let stream = try await client.stream(request)
+            for try await event in stream {
+                try Task.checkCancellation()
+                if case .contentDelta(let choice, let delta) = event, choice == 0 {
+                    text += delta
+                }
+            }
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            throw ToolError.message("Web search failed: \(error.localizedDescription)")
+        }
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            throw ToolError.message("Web search returned no answer.")
+        }
+        return .init(content: trimmed, isError: false)
+    }
+
+    /// TTS via `POST /audio/speech`, run synchronously on the MainActor
+    /// service. Spends credits; the model default is cheap.
+    private static func speakText(
+        _ arguments: [String: Any],
+        workspace: String
+    ) async throws -> NativeAgentToolResult {
+        guard let text = (arguments["text"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !text.isEmpty else {
+            throw ToolError.missing("text")
+        }
+        guard let rawPath = arguments["path"] as? String, !rawPath.isEmpty else {
+            throw ToolError.missing("path")
+        }
+        let url = resolvedPath(rawPath, workspace: workspace)
+        let modelArg = ((arguments["model"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)).orbNilIfEmpty
+            ?? "openai/gpt-4o-mini-tts"
+        var request = SpeechRequest(
+            model: modelArg,
+            input: String(text.prefix(4000))
+        )
+        let voice = (arguments["voice"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+        request.voice = voice?.isEmpty == false ? voice : nil
+        let (data, contentType): (Data, String?)
+        let capturedRequest = request
+        let speechService = await MainActor.run { SpeechService() }
+        do {
+            (data, contentType) = try await speechService.synthesize(capturedRequest)
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            throw ToolError.message("Speech synthesis failed: \(error.localizedDescription)")
+        }
+        do {
+            try FileManager.default.createDirectory(
+                at: url.deletingLastPathComponent(), withIntermediateDirectories: true
+            )
+            try data.write(to: url)
+        } catch {
+            throw ToolError.message("Could not save audio to \(url.path): \(error.localizedDescription)")
+        }
+        return .init(
+            content: "Saved \(data.count) bytes of audio (\(contentType ?? "audio")) to \(url.path).",
+            isError: false
+        )
+    }
+
+    /// Image generation via `POST /images`, saved straight to disk.
+    /// Spends credits; defaults to a cheap image model.
+    private static func agentGenerateImage(
+        _ arguments: [String: Any],
+        workspace: String
+    ) async throws -> NativeAgentToolResult {
+        guard let prompt = (arguments["prompt"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !prompt.isEmpty else {
+            throw ToolError.missing("prompt")
+        }
+        guard let rawPath = arguments["path"] as? String, !rawPath.isEmpty else {
+            throw ToolError.missing("path")
+        }
+        let url = resolvedPath(rawPath, workspace: workspace)
+        let imageModelArg = ((arguments["model"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)).orbNilIfEmpty
+            ?? "google/gemini-2.0-flash-preview-image-generation"
+        var request = ImageGenRequest(
+            model: imageModelArg,
+            prompt: prompt
+        )
+        request.outputFormat = "png"
+        let attachments: [ChatImageAttachment]
+        let capturedImageRequest = request
+        let imageService = await MainActor.run { ImageGenService() }
+        do {
+            attachments = try await imageService.generate(capturedImageRequest)
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            throw ToolError.message("Image generation failed: \(error.localizedDescription)")
+        }
+        guard let first = attachments.first, let data = first.inlineData else {
+            throw ToolError.message("Image generation returned no image data.")
+        }
+        do {
+            try FileManager.default.createDirectory(
+                at: url.deletingLastPathComponent(), withIntermediateDirectories: true
+            )
+            try data.write(to: url)
+        } catch {
+            throw ToolError.message("Could not save image to \(url.path): \(error.localizedDescription)")
+        }
+        return .init(content: "Saved image to \(url.path).", isError: false)
     }
 
     private enum ToolError: LocalizedError {

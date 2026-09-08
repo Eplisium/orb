@@ -49,11 +49,15 @@ final class BrowserViewModel: ObservableObject {
 
         switch modalityFilter {
         case .all: break
-        case .textOnly: result = result.filter { !$0.supportsImages }
+        case .textOnly: result = result.filter { $0.inputModalities == ["text"] }
         case .multimodal: result = result.filter { $0.supportsImages }
         case .imageOut: result = result.filter { $0.supportsImageOutput }
+        case .videoIn: result = result.filter { $0.supportsVideoInput }
+        case .audio: result = result.filter { $0.supportsAudioInput || $0.supportsAudioOutput }
+        case .files: result = result.filter { $0.supportsFileInput }
         case .tools: result = result.filter { $0.supportsTools }
         case .reasoning: result = result.filter { $0.supportsReasoning }
+        case .embeddings: result = result.filter { $0.isEmbeddingModel }
         case .freeOnly: result = result.filter { $0.isFree }
         }
 
@@ -173,6 +177,11 @@ enum SidebarSection: String, CaseIterable, Identifiable {
     case newThisWeek = "New This Week"
     case agent = "Agent"
     case chat = "Chat"
+    case images = "Images"
+    case video = "Video"
+    case files = "Files"
+    case speech = "Speech"
+    case embeddings = "Embeddings"
     case testSuite = "Test Suite"
     case account = "Account"
 
@@ -184,6 +193,11 @@ enum SidebarSection: String, CaseIterable, Identifiable {
         case .newThisWeek: return "sparkles"
         case .agent: return "wand.and.stars"
         case .chat: return "bubble.left.fill"
+        case .images: return "photo.fill"
+        case .video: return "video.fill"
+        case .files: return "folder.fill"
+        case .speech: return "speaker.wave.2.fill"
+        case .embeddings: return "vector"
         case .testSuite: return "checkmark.seal.fill"
         case .account: return "gearshape.fill"
         }
@@ -191,6 +205,13 @@ enum SidebarSection: String, CaseIterable, Identifiable {
 
     var isBrowser: Bool {
         self == .allModels || self == .favorites || self == .newThisWeek
+    }
+
+    var isMediaTool: Bool {
+        switch self {
+        case .images, .video, .files, .speech, .embeddings: return true
+        default: return false
+        }
     }
 }
 
@@ -225,6 +246,16 @@ struct ContentView: View {
                         AgentView(viewModel: vm, chatService: agentService)
                     } else if selectedSection == .chat {
                         ChatView(viewModel: vm, chatService: chatService)
+                    } else if selectedSection == .images {
+                        ImagesView()
+                    } else if selectedSection == .video {
+                        VideoView()
+                    } else if selectedSection == .files {
+                        FilesView()
+                    } else if selectedSection == .speech {
+                        SpeechView()
+                    } else if selectedSection == .embeddings {
+                        EmbeddingsView()
                     } else if selectedSection == .testSuite {
                         TestSuiteView(viewModel: vm)
                     } else if selectedSection == .account {
@@ -278,6 +309,14 @@ struct ContentView: View {
                 sidebarRow(.testSuite)
                 sidebarRow(.account)
             }
+            // Generate
+            Section("Generate") {
+                sidebarRow(.images)
+                sidebarRow(.video)
+                sidebarRow(.files)
+                sidebarRow(.speech)
+                sidebarRow(.embeddings)
+            }
         }
         .listStyle(.sidebar)
         .navigationSplitViewColumnWidth(min: 160, ideal: 180, max: 220)
@@ -323,6 +362,7 @@ struct ContentView: View {
         case .favorites: return vm.favoriteIds.count
         case .newThisWeek: return vm.newThisWeekCount
         case .agent, .chat, .testSuite, .account: return 0
+        case .images, .video, .files, .speech, .embeddings: return 0
         }
     }
 
@@ -364,13 +404,14 @@ struct ContentView: View {
 
     private var filterBar: some View {
         VStack(alignment: .leading, spacing: 6) {
-            Picker("Filter", selection: $vm.modalityFilter) {
+            // Wrapping chips, not a segmented picker: 11 tabs in one line
+            // overflow the column, forcing horizontal scroll that slides the
+            // whole list underneath the sidebar.
+            FlowLayout(spacing: 6) {
                 ForEach(ModalityFilter.allCases) { f in
-                    Text(f.rawValue).tag(f)
+                    filterChip(f)
                 }
             }
-            .pickerStyle(.segmented)
-            .labelsHidden()
 
             HStack {
                 // Provider filter
@@ -435,6 +476,23 @@ struct ContentView: View {
         }
         .padding(.horizontal, 12)
         .padding(.bottom, 6)
+    }
+
+    private func filterChip(_ filter: ModalityFilter) -> some View {
+        let isSelected = vm.modalityFilter == filter
+        return Button {
+            vm.modalityFilter = filter
+        } label: {
+            Text(filter.rawValue)
+                .font(.system(size: 11, weight: isSelected ? .semibold : .regular))
+                .padding(.horizontal, 9)
+                .padding(.vertical, 4)
+                .background(isSelected ? Color.accentColor.opacity(0.18) : Color.primary.opacity(0.08))
+                .foregroundStyle(isSelected ? Color.accentColor : Color.primary)
+                .clipShape(Capsule())
+        }
+        .buttonStyle(.plain)
+        .help("\(filter.rawValue) models")
     }
 
     private var statusBar: some View {

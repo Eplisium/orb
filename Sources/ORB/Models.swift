@@ -23,6 +23,8 @@ struct ModelInfo: Codable, Identifiable, Hashable {
     let expirationDate: String?
     let supportedVoices: [String]?
     let benchmarks: Benchmarks?
+    let perRequestLimits: PerRequestLimits?
+    let defaultParameters: JSONValue?
 
     enum CodingKeys: String, CodingKey {
         case id, name, created, description, architecture, pricing, reasoning, benchmarks
@@ -34,6 +36,8 @@ struct ModelInfo: Codable, Identifiable, Hashable {
         case knowledgeCutoff = "knowledge_cutoff"
         case expirationDate = "expiration_date"
         case supportedVoices = "supported_voices"
+        case perRequestLimits = "per_request_limits"
+        case defaultParameters = "default_parameters"
     }
 
     // Hashable by id
@@ -94,12 +98,37 @@ struct ModelInfo: Codable, Identifiable, Hashable {
         inputModalities.contains("audio")
     }
 
-    var supportsImageOutput: Bool {
-        outputModalities.contains("image")
-    }
-
     var supportsAudioOutput: Bool {
         outputModalities.contains("audio")
+    }
+
+    /// Models that accept video (`input_modalities` contains "video").
+    var supportsVideoInput: Bool {
+        inputModalities.contains("video")
+    }
+
+    /// Models that accept documents (`input_modalities` contains "file").
+    var supportsFileInput: Bool {
+        inputModalities.contains("file")
+    }
+
+    /// Models that output something other than text (image, audio, …).
+    var supportsNonTextOutput: Bool {
+        outputModalities.contains { $0 != "text" }
+    }
+
+    /// Embedding models (`output_modalities` contains "embeddings").
+    var isEmbeddingModel: Bool {
+        outputModalities.contains("embeddings")
+    }
+
+    /// The full `text->…` / `text+image->text` modality chain from the API.
+    var modalityChain: String {
+        architecture?.modality ?? "unknown"
+    }
+
+    var supportsImageOutput: Bool {
+        outputModalities.contains("image")
     }
 
     var supportsTools: Bool {
@@ -180,6 +209,16 @@ struct Pricing: Codable, Hashable {
     enum CodingKeys: String, CodingKey {
         case prompt, completion
         case inputCacheRead = "input_cache_read"
+    }
+}
+
+struct PerRequestLimits: Codable, Hashable {
+    let promptTokens: Int?
+    let completionTokens: Int?
+
+    enum CodingKeys: String, CodingKey {
+        case promptTokens = "prompt_tokens"
+        case completionTokens = "completion_tokens"
     }
 }
 
@@ -340,8 +379,12 @@ enum ModalityFilter: String, CaseIterable, Identifiable {
     case textOnly = "Text Only"
     case multimodal = "Multimodal"
     case imageOut = "Image Out"
+    case videoIn = "Video In"
+    case audio = "Audio"
+    case files = "Files"
     case tools = "Tools"
     case reasoning = "Reasoning"
+    case embeddings = "Embeddings"
     case freeOnly = "Free Only"
 
     var id: String { rawValue }
@@ -434,7 +477,11 @@ struct ChatMessage: Codable, Identifiable, Equatable, Sendable {
     var id: UUID = UUID()
     let role: String
     var content: String
-    /// Tool calls requested by the assistant (agent mode).
+    /// Multimodal wire content, when this message carries attachments.
+    /// UI text lives in `content`; `parts` is what gets sent upstream.
+    var parts: [MessageContentPart]?
+    /// Images returned by image-output models, rendered inline.
+    var images: [ChatImageAttachment]?
     var toolCalls: [ToolCallDisplay]?
     /// For tool result messages: the tool_call_id this answers.
     var toolCallId: String?
@@ -451,6 +498,8 @@ struct ChatMessage: Codable, Identifiable, Equatable, Sendable {
         id: UUID = UUID(),
         role: String,
         content: String,
+        parts: [MessageContentPart]? = nil,
+        images: [ChatImageAttachment]? = nil,
         toolCalls: [ToolCallDisplay]? = nil,
         toolCallId: String? = nil,
         toolName: String? = nil,
@@ -462,6 +511,8 @@ struct ChatMessage: Codable, Identifiable, Equatable, Sendable {
         self.id = id
         self.role = role
         self.content = content
+        self.parts = parts
+        self.images = images
         self.toolCalls = toolCalls
         self.toolCallId = toolCallId
         self.toolName = toolName
@@ -472,7 +523,7 @@ struct ChatMessage: Codable, Identifiable, Equatable, Sendable {
     }
 
     enum CodingKeys: String, CodingKey {
-        case role, content, reasoning
+        case role, content, reasoning, parts, images
         case toolCalls = "tool_calls_display"
         case toolCallId = "tool_call_id"
         case toolName = "tool_name"
@@ -486,6 +537,8 @@ struct ChatMessage: Codable, Identifiable, Equatable, Sendable {
         id = try c.decodeIfPresent(UUID.self, forKey: .id) ?? UUID()
         role = try c.decode(String.self, forKey: .role)
         content = try c.decode(String.self, forKey: .content)
+        parts = try c.decodeIfPresent([MessageContentPart].self, forKey: .parts)
+        images = try c.decodeIfPresent([ChatImageAttachment].self, forKey: .images)
         toolCalls = try c.decodeIfPresent([ToolCallDisplay].self, forKey: .toolCalls)
         toolCallId = try c.decodeIfPresent(String.self, forKey: .toolCallId)
         toolName = try c.decodeIfPresent(String.self, forKey: .toolName)
@@ -508,6 +561,8 @@ struct ChatMessage: Codable, Identifiable, Equatable, Sendable {
             && lhs.finishReason == rhs.finishReason
             && lhs.errorMessage == rhs.errorMessage
             && lhs.toolCalls == rhs.toolCalls
+            && lhs.parts == rhs.parts
+            && lhs.images == rhs.images
     }
 }
 
@@ -591,6 +646,15 @@ struct ChatUsage: Codable, Equatable, Sendable {
     var cachedTokens: Int?
     /// Completion tokens spent on reasoning rather than visible output.
     var reasoningTokens: Int?
+    /// Tokens spent on audio input/output detail (STT/TTS models).
+    var audioTokens: Int?
+    /// Tokens spent on video input detail.
+    var videoTokens: Int?
+    /// Server-side tool executions (OpenRouter server tools, not ORB tools).
+    var serverToolCallsExecuted: Int?
+    var serverToolCallsRequested: Int?
+    /// Whether the request was served via Bring-Your-Own-Key.
+    var isBYOK: Bool?
 
     enum CodingKeys: String, CodingKey {
         case cost
@@ -599,26 +663,59 @@ struct ChatUsage: Codable, Equatable, Sendable {
         case totalTokens = "total_tokens"
         case promptTokensDetails = "prompt_tokens_details"
         case completionTokensDetails = "completion_tokens_details"
+        case cachedTokens = "cached_tokens"
+        case reasoningTokens = "reasoning_tokens"
+        case audioTokens = "audio_tokens"
+        case videoTokens = "video_tokens"
+        case serverToolUseDetails = "server_tool_use_details"
+        case isBYOK = "is_byok"
     }
 
     private struct PromptDetails: Codable {
         let cachedTokens: Int?
-        enum CodingKeys: String, CodingKey { case cachedTokens = "cached_tokens" }
+        let audioTokens: Int?
+        let videoTokens: Int?
+        let cacheWriteTokens: Int?
+        enum CodingKeys: String, CodingKey {
+            case cachedTokens = "cached_tokens"
+            case audioTokens = "audio_tokens"
+            case videoTokens = "video_tokens"
+            case cacheWriteTokens = "cache_write_tokens"
+        }
     }
 
     private struct CompletionDetails: Codable {
         let reasoningTokens: Int?
-        enum CodingKeys: String, CodingKey { case reasoningTokens = "reasoning_tokens" }
+        let audioTokens: Int?
+        enum CodingKeys: String, CodingKey {
+            case reasoningTokens = "reasoning_tokens"
+            case audioTokens = "audio_tokens"
+        }
+    }
+
+    private struct ServerToolDetails: Codable {
+        let executed: Int?
+        let requested: Int?
+        enum CodingKeys: String, CodingKey {
+            case executed = "tool_calls_executed"
+            case requested = "tool_calls_requested"
+        }
     }
 
     init(promptTokens: Int?, completionTokens: Int?, totalTokens: Int?, cost: Double?,
-         cachedTokens: Int? = nil, reasoningTokens: Int? = nil) {
+         cachedTokens: Int? = nil, reasoningTokens: Int? = nil,
+         audioTokens: Int? = nil, videoTokens: Int? = nil) {
         self.promptTokens = promptTokens
         self.completionTokens = completionTokens
         self.totalTokens = totalTokens
         self.cost = cost
         self.cachedTokens = cachedTokens
         self.reasoningTokens = reasoningTokens
+        self.audioTokens = audioTokens
+        self.videoTokens = videoTokens
+        self.serverToolCallsExecuted = nil
+        self.serverToolCallsRequested = nil
+        self.isBYOK = nil
     }
 
     init(from decoder: Decoder) throws {
@@ -628,8 +725,18 @@ struct ChatUsage: Codable, Equatable, Sendable {
         totalTokens = try c.decodeIfPresent(Int.self, forKey: .totalTokens)
         cost = try c.decodeIfPresent(Double.self, forKey: .cost)
         // Nested detail objects are optional and provider-specific.
-        cachedTokens = try c.decodeIfPresent(PromptDetails.self, forKey: .promptTokensDetails)?.cachedTokens
-        reasoningTokens = try c.decodeIfPresent(CompletionDetails.self, forKey: .completionTokensDetails)?.reasoningTokens
+        let promptDetails = try c.decodeIfPresent(PromptDetails.self, forKey: .promptTokensDetails)
+        let completionDetails = try c.decodeIfPresent(CompletionDetails.self, forKey: .completionTokensDetails)
+        // …but some providers also send the flat keys top-level.
+        cachedTokens = try c.decodeIfPresent(Int.self, forKey: .cachedTokens) ?? promptDetails?.cachedTokens
+        reasoningTokens = try c.decodeIfPresent(Int.self, forKey: .reasoningTokens) ?? completionDetails?.reasoningTokens
+        audioTokens = try c.decodeIfPresent(Int.self, forKey: .audioTokens)
+            ?? promptDetails?.audioTokens ?? completionDetails?.audioTokens
+        videoTokens = try c.decodeIfPresent(Int.self, forKey: .videoTokens) ?? promptDetails?.videoTokens
+        let serverDetails = try c.decodeIfPresent(ServerToolDetails.self, forKey: .serverToolUseDetails)
+        serverToolCallsExecuted = serverDetails?.executed
+        serverToolCallsRequested = serverDetails?.requested
+        isBYOK = try c.decodeIfPresent(Bool.self, forKey: .isBYOK)
     }
 
     func encode(to encoder: Encoder) throws {
@@ -638,6 +745,10 @@ struct ChatUsage: Codable, Equatable, Sendable {
         try c.encodeIfPresent(completionTokens, forKey: .completionTokens)
         try c.encodeIfPresent(totalTokens, forKey: .totalTokens)
         try c.encodeIfPresent(cost, forKey: .cost)
+        try c.encodeIfPresent(cachedTokens, forKey: .cachedTokens)
+        try c.encodeIfPresent(reasoningTokens, forKey: .reasoningTokens)
+        try c.encodeIfPresent(audioTokens, forKey: .audioTokens)
+        try c.encodeIfPresent(videoTokens, forKey: .videoTokens)
     }
 }
 

@@ -171,6 +171,9 @@ if [ -f "$APP_BUNDLE/Contents/Resources/AppIcon.icns" ]; then
 fi
 
 # --- Codesign (ad-hoc, no certificate needed) ---
+# NOTE: `codesign --deep` rewrites the main binary in place, which desyncs
+# the .app from .build. Use --preserve-metadata and verify the bundle keeps
+# working; do NOT re-sign the bare .build binary.
 echo "Codesigning..."
 codesign --force --deep --sign - "$APP_BUNDLE" 2>&1 || echo "Codesign warning (may still work)"
 

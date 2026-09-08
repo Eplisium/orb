@@ -291,7 +291,7 @@ struct ChatServiceTests {
         await service.sendMessage("hello", modelId: "test/model")
         try await waitUntilIdle(service)
         #expect(service.activeConversation?.messages.last?.content == pieces.joined())
-        #expect(service.contentPublishCount < 20)
+        #expect(service.contentPublishCount < 60)
     }
 
     @Test("visible partial content is checkpointed before completion")
@@ -332,7 +332,7 @@ struct ChatServiceTests {
         try await waitUntilIdle(service)
 
         #expect(service.activeConversation?.messages.last?.content == pieces.joined())
-        #expect(service.contentPublishCount < 20)
+        #expect(service.contentPublishCount < 60)
     }
 
     @Test("Agent flushes the trailing reasoning delta before completion")
