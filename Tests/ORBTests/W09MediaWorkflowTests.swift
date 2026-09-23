@@ -4,7 +4,7 @@ import Testing
 
 // W09 — media and file workflows, testable core:
 //   1. video resume from durable job records (no new submission),
-//   2. credential-free video download guarantee (unsigned CDN URLs),
+//   2. authenticated canonical video content route,
 //   3. image per-endpoint discovery (`GET /images/models/{author}/{slug}/endpoints`),
 //   4. file upload validation + explicit-delete confirmation.
 // No network: every flow uses the shared MockMediaTransport from
@@ -152,13 +152,13 @@ struct VideoResumeTests {
     }
 }
 
-// MARK: - 2. Credential-free video download
+// MARK: - 2. Authenticated video content download
 
-@Suite("Video download credential guarantee", .serialized)
+@Suite("Video download authentication guarantee", .serialized)
 @MainActor
 struct VideoDownloadCredentialTests {
-    @Test("download sends no Authorization header to the unsigned CDN URL")
-    func downloadIsCredentialFree() async throws {
+    @Test("download sends Authorization only to canonical content route")
+    func downloadUsesCanonicalRoute() async throws {
         let transport = MockMediaTransport(
             responses: [],
             rawResponses: [.bytes(Data("fake-mp4-bytes".utf8), "video/mp4")]
@@ -176,26 +176,20 @@ struct VideoDownloadCredentialTests {
         let raw = transport.sentRawRequests()
         #expect(raw.count == 1)
         let request = try #require(raw.first)
-        #expect(request.url?.absoluteString == "https://cdn.openrouter.ai/videos/job-dl/file.mp4")
+        #expect(request.url?.absoluteString == "https://openrouter.ai/api/v1/videos/job-dl/content?index=0")
         #expect(request.httpMethod == "GET")
-        // The download is credential-free by contract (plan 7.2): no bearer
-        // token, and no credential fetch, ever reached the key provider.
-        #expect(request.value(forHTTPHeaderField: "Authorization") == nil)
-        #expect(transport.keyCounter?.current == 0)
+        #expect(request.value(forHTTPHeaderField: "Authorization") == "Bearer test-key")
+        #expect(transport.keyCounter?.current == 1)
     }
 
-    @Test("download without an unsigned URL fails before any request")
-    func downloadWithoutURLFailsCleanly() async throws {
-        let transport = MockMediaTransport(responses: [], rawResponses: [])
+    @Test("download needs no unsigned URL")
+    func downloadWithoutURLUsesCanonicalRoute() async throws {
+        let transport = MockMediaTransport(responses: [], rawResponses: [.bytes(Data([1]), "video/mp4")])
         let service = VideoGenService(transport: transport)
-        do {
-            _ = try await service.download(VideoJob(id: "job-nodl", status: "completed"))
-            Issue.record("Expected the missing-URL download to throw.")
-        } catch {
-            #expect(error is MediaServiceError)
-        }
+        let result = try await service.download(VideoJob(id: "job-nodl", status: "completed"))
+        #expect(result.0 == Data([1]))
         #expect(transport.sentCount() == 0)
-        #expect(transport.sentRawRequests().isEmpty)
+        #expect(transport.sentRawRequests().first?.url?.path == "/api/v1/videos/job-nodl/content")
     }
 }
 

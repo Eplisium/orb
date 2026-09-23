@@ -49,6 +49,7 @@ enum OpenRouterStreamError: Error, Equatable, LocalizedError {
 /// UTF-8 scalars without ever producing replacement characters.
 struct ServerSentEventDecoder {
     private var pending = Data()
+    private var previousWasCR = false
     private var dataLines: [Data] = []
     private var eventBytes = 0
     private let maxEventBytes: Int
@@ -60,38 +61,52 @@ struct ServerSentEventDecoder {
     }
 
     mutating func consume<S: DataProtocol>(_ fragment: S) throws -> [OpenRouterStreamEvent] {
-        pending.append(contentsOf: fragment)
-        guard pending.count <= maxEventBytes - eventBytes + 1 else {
-            throw OpenRouterStreamError.eventTooLarge(limit: maxEventBytes)
-        }
-
         var output: [OpenRouterStreamEvent] = []
-        while let newline = pending.firstIndex(of: 0x0A) {
-            var line = Data(pending[..<newline])
-            pending.removeSubrange(...newline)
-            if line.last == 0x0D { line.removeLast() }
-
-            if line.isEmpty {
-                if !dataLines.isEmpty {
-                    output += try decodeCurrentEvent()
-                    dataLines.removeAll(keepingCapacity: true)
-                    eventBytes = 0
-                }
+        // Process the chunk as it arrives rather than checking its total size:
+        // one URLSession delivery can contain many individually small events.
+        // A complete line is only materialized once, not rescanned per byte.
+        for byte in fragment {
+            if byte == 0x0A && previousWasCR {
+                previousWasCR = false // CRLF is one line ending, even across chunks
                 continue
             }
-            if line.first == 0x3A { continue } // comment / keepalive
-
-            let prefix = Data("data:".utf8)
-            guard line.starts(with: prefix) else { continue }
-            var value = Data(line.dropFirst(prefix.count))
-            if value.first == 0x20 { value.removeFirst() }
-            eventBytes += value.count + (dataLines.isEmpty ? 0 : 1)
-            guard eventBytes <= maxEventBytes else {
-                throw OpenRouterStreamError.eventTooLarge(limit: maxEventBytes)
+            if byte == 0x0D || byte == 0x0A {
+                previousWasCR = byte == 0x0D
+                output += try finishLine()
+            } else {
+                previousWasCR = false
+                pending.append(byte)
+                // Count comments and unknown fields too; a malicious keepalive
+                // must not grow indefinitely without emitting a data event.
+                guard pending.count <= maxEventBytes - eventBytes else {
+                    throw OpenRouterStreamError.eventTooLarge(limit: maxEventBytes)
+                }
             }
-            dataLines.append(value)
         }
         return output
+    }
+
+    private mutating func finishLine() throws -> [OpenRouterStreamEvent] {
+        let line = pending
+        pending.removeAll(keepingCapacity: true)
+        if line.isEmpty {
+            defer {
+                dataLines.removeAll(keepingCapacity: true)
+                eventBytes = 0
+            }
+            return dataLines.isEmpty ? [] : try decodeCurrentEvent()
+        }
+        eventBytes += line.count + 1
+        guard eventBytes <= maxEventBytes else {
+            throw OpenRouterStreamError.eventTooLarge(limit: maxEventBytes)
+        }
+        if line.first == 0x3A { return [] } // comment / keepalive
+        let prefix = Data("data:".utf8)
+        guard line.starts(with: prefix) else { return [] }
+        var value = Data(line.dropFirst(prefix.count))
+        if value.first == 0x20 { value.removeFirst() }
+        dataLines.append(value)
+        return []
     }
 
     mutating func finish() throws -> [OpenRouterStreamEvent] {
@@ -118,9 +133,9 @@ struct ServerSentEventDecoder {
 
             var events: [OpenRouterStreamEvent] = []
             for choice in envelope.choices ?? [] {
-                if let content = choice.delta?.content, !content.isEmpty {
-                    events.append(.contentDelta(choiceIndex: choice.index ?? 0, text: content))
-                }
+                // One provider chunk may contain the last reasoning token and
+                // the first answer token together. Emit reasoning first so the
+                // active thinking span freezes on the answer, not afterward.
                 if let reasoning = choice.delta?.reasoningText, !reasoning.isEmpty {
                     events.append(.reasoningDelta(choiceIndex: choice.index ?? 0, text: reasoning))
                 }
@@ -128,6 +143,9 @@ struct ServerSentEventDecoder {
                 // wire order, alongside the flattened display text above.
                 if let details = choice.delta?.reasoningDetails, !details.isEmpty {
                     events.append(.reasoningDetails(choiceIndex: choice.index ?? 0, details: details))
+                }
+                if let content = choice.delta?.content, !content.isEmpty {
+                    events.append(.contentDelta(choiceIndex: choice.index ?? 0, text: content))
                 }
                 for image in choice.delta?.images ?? [] where !image.url.isEmpty {
                     events.append(.imageDelta(choiceIndex: choice.index ?? 0, imageURL: image.url))

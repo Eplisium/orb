@@ -44,6 +44,55 @@ struct MessageBottomOffsetKey: PreferenceKey {
     }
 }
 
+struct MessageTopGeometry: Equatable {
+    let top: CGFloat
+    let height: CGFloat
+}
+
+struct MessageTopOffsetKey: PreferenceKey {
+    static var defaultValue = MessageTopGeometry(top: .infinity, height: 0)
+    static func reduce(value: inout MessageTopGeometry, nextValue: () -> MessageTopGeometry) {
+        value = nextValue()
+    }
+}
+
+/// Distinguishes an upward scroll (the content origin moves down) from a
+/// growing or collapsing reply. Small wheel ticks add up across follow-scroll
+/// corrections; layout shrinkage and window resizing must not count as input.
+struct MessageScrollIntent {
+    private(set) var previousTop: CGFloat?
+    private var previousContentHeight: CGFloat?
+    private var previousViewportHeight: CGFloat?
+    private(set) var upwardDistance: CGFloat = 0
+
+    mutating func observe(top: CGFloat, contentHeight: CGFloat, viewportHeight: CGFloat, threshold: CGFloat) -> Bool {
+        guard top.isFinite, contentHeight.isFinite, viewportHeight.isFinite else { return false }
+        defer {
+            previousTop = top
+            previousContentHeight = contentHeight
+            previousViewportHeight = viewportHeight
+        }
+        guard let previousTop, let previousContentHeight, let previousViewportHeight else { return false }
+        // At the bottom, collapsing a panel or expanding the window clamps
+        // the content origin upward without any wheel input. Discount that
+        // layout-driven movement before accumulating manual upward travel.
+        let layoutShift = max(0, previousContentHeight - contentHeight)
+            + max(0, viewportHeight - previousViewportHeight)
+        let upwardStep = max(0, top - previousTop - layoutShift)
+        // Automatic follow-scrolls move the origin back down between wheel
+        // ticks. Only returning to the bottom (or switching sessions) resets.
+        upwardDistance += upwardStep
+        return upwardDistance > threshold
+    }
+
+    mutating func reset() {
+        previousTop = nil
+        previousContentHeight = nil
+        previousViewportHeight = nil
+        upwardDistance = 0
+    }
+}
+
 // MARK: - Suggestion
 
 struct PlaygroundSuggestion {
@@ -217,8 +266,8 @@ struct ToolCallCard: View {
                         .foregroundStyle(.primary)
                         .layoutPriority(1)
                     Text(subtitle)
-                        .font(.system(size: 10, design: .monospaced))
-                        .foregroundStyle(.tertiary)
+                        .font(.system(size: 11, design: .monospaced))
+                        .foregroundStyle(.secondary)
                         .lineLimit(1)
                         .truncationMode(.middle)
                     Spacer(minLength: 8)
@@ -260,12 +309,12 @@ struct ToolCallCard: View {
                 }
             }
         }
-        .background(Color.primary.opacity(0.028))
-        .overlay {
-            RoundedRectangle(cornerRadius: 8)
-                .stroke(toolCall.isExecuting ? accent.opacity(0.30) : Color.primary.opacity(0.06), lineWidth: 0.5)
+        .padding(.leading, 5)
+        .overlay(alignment: .leading) {
+            RoundedRectangle(cornerRadius: 1)
+                .fill(toolCall.isExecuting ? accent.opacity(0.45) : Color.primary.opacity(0.12))
+                .frame(width: 2)
         }
-        .clipShape(RoundedRectangle(cornerRadius: 8))
     }
 
     /// Pretty-printed JSON so expanded arguments are readable rather than a
@@ -296,6 +345,13 @@ struct ToolCallActivityGroup: View {
     private var runningCount: Int { toolCalls.filter(\.isExecuting).count }
     private var doneCount: Int { toolCalls.filter { $0.result != nil && !$0.isError }.count }
     private var failedCount: Int { toolCalls.filter { $0.result != nil && $0.isError }.count }
+    private var summaryLabel: String {
+        if let running = toolCalls.last(where: { $0.isExecuting }) {
+            return "Running \(running.name)…"
+        }
+        if toolCalls.count == 1 { return toolCalls[0].name }
+        return "\(toolCalls.count) tool calls"
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
@@ -312,7 +368,7 @@ struct ToolCallActivityGroup: View {
                             .font(.system(size: 10, weight: .semibold))
                             .foregroundStyle(accent)
                     }
-                    Text("\(toolCalls.count) tool call\(toolCalls.count == 1 ? "" : "s")")
+                    Text(summaryLabel)
                         .font(.system(size: 11, weight: .semibold))
                     statusSummary
                     Spacer(minLength: 8)
@@ -353,7 +409,7 @@ struct ToolCallActivityGroup: View {
             if failedCount > 0 {
                 status("xmark.circle.fill", "\(failedCount)", .red)
             }
-            if runningCount > 0 {
+            if runningCount > 1 {
                 status("circle.dashed", "\(runningCount)", accent)
             }
         }
@@ -376,6 +432,7 @@ struct PlaygroundMessageView: View {
     let isStreaming: Bool
     let assistantName: String
     let accent: Color
+    var isReasoning: Bool = false
     var onDelete: (() -> Void)?
     var showToolCalls: Bool = false
 
@@ -385,59 +442,53 @@ struct PlaygroundMessageView: View {
     private var isUser: Bool { message.role == "user" }
 
     var body: some View {
-        HStack(alignment: .top, spacing: 10) {
-            if isUser {
-                Spacer(minLength: 60)
-                VStack(alignment: .trailing, spacing: 6) {
-                    Text("You")
-                        .font(.system(size: 9, weight: .bold))
-                        .foregroundStyle(.secondary)
-                        .padding(.trailing, 4)
-                    bubbleWithActions
-                }
-                avatar
-            } else {
-                avatar
-                VStack(alignment: .leading, spacing: 6) {
-                    Text(assistantName)
-                        .font(.system(size: 9, weight: .bold))
-                        .foregroundStyle(.secondary)
-                        .padding(.leading, 4)
-                    if showToolCalls, let toolCalls = message.toolCalls, !toolCalls.isEmpty {
-                        ToolCallActivityGroup(toolCalls: toolCalls, accent: accent)
-                    }
-                    bubbleWithActions
-                }
-                Spacer(minLength: 60)
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(spacing: 8) {
+                Image(systemName: isUser ? "person.crop.circle" : "sparkle")
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(isUser ? Color.secondary : accent)
+                Text(isUser ? "You" : assistantName)
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(isUser ? Color.secondary : Color.primary)
+                Spacer()
+                messageActions
+                    .opacity(isHovering || showCopyCheck ? 1 : 0)
+                    .disabled(isStreaming)
+            }
+            messageBubble
+        }
+        .padding(.horizontal, isUser ? 18 : 0)
+        .padding(.vertical, isUser ? 15 : 8)
+        .background(isUser ? Color.primary.opacity(0.045) : Color.clear,
+                    in: RoundedRectangle(cornerRadius: 14))
+        .frame(maxWidth: 780, alignment: .leading)
+        .frame(maxWidth: .infinity, alignment: .center)
+        .onHover { isHovering = $0 }
+        .contextMenu {
+            if !message.content.isEmpty {
+                Button("Copy message", systemImage: "doc.on.doc") { copyMessage() }
+            }
+            if !isStreaming, let onDelete {
+                Button("Delete message", systemImage: "trash", role: .destructive) { onDelete() }
             }
         }
-        .frame(maxWidth: .infinity, alignment: isUser ? .trailing : .leading)
+        .accessibilityActions {
+            if !message.content.isEmpty { Button("Copy message") { copyMessage() } }
+            if !isStreaming, let onDelete { Button("Delete message") { onDelete() } }
+        }
     }
 
-    /// The message bubble with action buttons embedded inside its hover zone.
-    /// Actions appear at the top-trailing corner of the bubble itself — no dead gap.
-    private var bubbleWithActions: some View {
-        messageBubble
-            .overlay(alignment: isUser ? .topTrailing : .topLeading) {
-                if isHovering && !isStreaming {
-                    messageActions
-                        .padding(6)
-                }
-            }
-            .clipShape(RoundedRectangle(cornerRadius: 14))
-            .onHover { hovering in
-                withAnimation(.easeInOut(duration: 0.12)) { isHovering = hovering }
-            }
+    private func copyMessage() {
+        guard !message.content.isEmpty else { return }
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(message.content, forType: .string)
+        showCopyCheck = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { showCopyCheck = false }
     }
 
     private var messageActions: some View {
         HStack(spacing: 3) {
-            Button {
-                NSPasteboard.general.clearContents()
-                NSPasteboard.general.setString(message.content, forType: .string)
-                showCopyCheck = true
-                DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { showCopyCheck = false }
-            } label: {
+            Button(action: copyMessage) {
                 Image(systemName: showCopyCheck ? "checkmark" : "doc.on.doc")
                     .font(.system(size: 9, weight: .semibold))
                     .foregroundStyle(showCopyCheck ? .green : .secondary)
@@ -481,21 +532,15 @@ struct ReasoningDisclosure: View {
     let text: String
     let accent: Color
     let isStreaming: Bool
+    let startedAt: Date?
+    let duration: TimeInterval?
 
     @State private var isExpanded = false
     @State private var userToggled = false
-    @State private var thoughtStartedAt: Date?
-    @State private var frozenDuration: TimeInterval?
     @State private var breathe = false
 
     private var effectiveExpansion: Bool {
         userToggled ? isExpanded : isStreaming
-    }
-
-    private var elapsed: TimeInterval? {
-        if let frozenDuration { return frozenDuration }
-        guard let thoughtStartedAt else { return nil }
-        return Date().timeIntervalSince(thoughtStartedAt)
     }
 
     var body: some View {
@@ -508,35 +553,32 @@ struct ReasoningDisclosure: View {
         }
         .animation(.spring(response: 0.3, dampingFraction: 0.85), value: effectiveExpansion)
         .onAppear {
-            if isStreaming, thoughtStartedAt == nil { thoughtStartedAt = Date() }
-            withAnimation(.easeInOut(duration: 0.9).repeatForever(autoreverses: true)) {
-                breathe = true
+            if isStreaming {
+                withAnimation(.easeInOut(duration: 0.9).repeatForever(autoreverses: true)) {
+                    breathe = true
+                }
             }
         }
         .onChange(of: isStreaming) { _, streaming in
             if streaming {
-                frozenDuration = nil
-                if thoughtStartedAt == nil { thoughtStartedAt = Date() }
-            } else if let start = thoughtStartedAt, frozenDuration == nil {
-                frozenDuration = max(1, Date().timeIntervalSince(start))
+                withAnimation(.easeInOut(duration: 0.9).repeatForever(autoreverses: true)) {
+                    breathe = true
+                }
+            } else {
+                breathe = false
             }
         }
     }
 
     private var headerTitle: String {
-        if isStreaming, let elapsed {
-            return ThoughtDurationFormatter.live(elapsed)
-        }
-        if let frozenDuration {
-            return ThoughtDurationFormatter.summary(frozenDuration)
-        }
+        if let duration { return ThoughtDurationFormatter.summary(duration) }
         return "Thoughts"
     }
 
     private var header: some View {
         Button {
+            isExpanded = !effectiveExpansion
             userToggled = true
-            isExpanded.toggle()
         } label: {
             HStack(spacing: 6) {
                 Image(systemName: "sparkles")
@@ -544,14 +586,15 @@ struct ReasoningDisclosure: View {
                     .foregroundStyle(accent)
                     .opacity(isStreaming ? (breathe ? 1.0 : 0.45) : 0.8)
                 if isStreaming {
-                    TimelineView(.periodic(from: .now, by: 1)) { _ in
-                        Text(headerTitle)
-                            .font(.system(size: 10, weight: .medium))
+                    TimelineView(.periodic(from: .now, by: 1)) { context in
+                        let elapsed = startedAt.map { (duration ?? 0) + max(0, context.date.timeIntervalSince($0)) }
+                        Text(elapsed.map(ThoughtDurationFormatter.live) ?? "Thinking…")
+                            .font(.system(size: 12, weight: .medium))
                             .foregroundStyle(.secondary)
                     }
                 } else {
                     Text(headerTitle)
-                        .font(.system(size: 10, weight: .medium))
+                        .font(.system(size: 12, weight: .medium))
                         .foregroundStyle(.secondary)
                 }
                 Image(systemName: "chevron.right")
@@ -559,38 +602,26 @@ struct ReasoningDisclosure: View {
                     .foregroundStyle(.tertiary)
                     .rotationEffect(.degrees(effectiveExpansion ? 90 : 0))
             }
-            .padding(.horizontal, 9)
-            .padding(.vertical, 5)
-            .background(Capsule().fill(Color.primary.opacity(0.04)))
-            .overlay(Capsule().stroke(Color.primary.opacity(0.06), lineWidth: 0.5))
+            .padding(.vertical, 3)
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
     }
 
     private var bodyPanel: some View {
-        HStack(alignment: .top, spacing: 0) {
-            // Accent rail — quietly marks the block as "the model's own words".
-            RoundedRectangle(cornerRadius: 2)
-                .fill(accent.opacity(0.5))
-                .frame(width: 3)
-                .padding(.vertical, 12)
-                .padding(.leading, 3)
-            ScrollView {
-                (Text(text) + Text(isStreaming ? " ▍" : "").foregroundColor(accent.opacity(0.55)))
-                    .font(.system(size: 12))
-                    .foregroundStyle(.secondary)
-                    .lineSpacing(5)
-                    .textSelection(.enabled)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 10)
+        MarkdownText(content: ReasoningTextFormatter.display(text), accent: accent, showsCursor: isStreaming)
+            .font(.system(size: 13))
+            .foregroundStyle(.secondary)
+            .lineSpacing(5)
+            .textSelection(.enabled)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.leading, 15)
+            .padding(.vertical, 3)
+            .overlay(alignment: .leading) {
+                RoundedRectangle(cornerRadius: 1)
+                    .fill(Color.primary.opacity(0.12))
+                    .frame(width: 2)
             }
-            // Long chains of thought must not push the answer off screen.
-            .frame(maxHeight: 240)
-        }
-        .background(RoundedRectangle(cornerRadius: 10).fill(Color.primary.opacity(0.03)))
-        .clipShape(RoundedRectangle(cornerRadius: 10))
     }
 }
 
@@ -618,6 +649,7 @@ enum ThoughtDurationFormatter {
 /// Pulsing accent orb for the run-activity row while the agent works.
 struct ActivityPulseOrb: View {
     let accent: Color
+    let isActive: Bool
     @State private var breathing = false
 
     var body: some View {
@@ -634,88 +666,84 @@ struct ActivityPulseOrb: View {
                 .shadow(color: accent.opacity(0.5), radius: 3)
         }
         .frame(width: 32, height: 32)
-        .onAppear {
+        .onAppear { updateAnimation(isActive) }
+        .onChange(of: isActive) { _, active in updateAnimation(active) }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("Working")
+    }
+
+    private func updateAnimation(_ active: Bool) {
+        if active {
             withAnimation(.easeInOut(duration: 0.9).repeatForever(autoreverses: true)) {
                 breathing = true
             }
+        } else {
+            breathing = false
         }
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel("Working")
     }
 }
 
 extension PlaygroundMessageView {
     private var messageBubble: some View {
-        VStack(alignment: isUser ? .trailing : .leading, spacing: 6) {
-            // Reasoning arrives before visible content, so rendering it here
-            // gives immediate feedback on thinking models instead of a long
-            // silent gap.
-            if !isUser, let reasoning = message.reasoning, !reasoning.isEmpty {
-                ReasoningDisclosure(
-                    text: reasoning,
-                    accent: accent,
-                    isStreaming: isStreaming && message.content.isEmpty
-                )
-            }
-
-            Group {
-                if message.content.isEmpty && (message.images?.isEmpty ?? true) && isStreaming && (message.reasoning?.isEmpty ?? true) {
-                    TypingIndicator(accent: accent)
-                        .padding(.vertical, 4)
-                } else if isUser {
-                    Text(message.content)
-                        .font(.system(size: 13))
-                        .lineSpacing(4)
-                        .textSelection(.enabled)
-                    if let parts = message.parts, !parts.isEmpty {
-                        SentAttachmentsLabel(count: parts.count)
-                    }
-                } else {
-                    // Full block-level Markdown, including during streaming, so
-                    // code fences and lists never appear as raw syntax.
-                    MarkdownText(content: message.content, accent: accent, showsCursor: isStreaming)
-                        .font(.system(size: 13))
-                        .lineSpacing(4)
-                        .textSelection(.enabled)
-                    if let images = message.images, !images.isEmpty {
-                        AssistantImageRow(images: images, accent: accent)
-                    }
+        VStack(alignment: .leading, spacing: 16) {
+            if isUser {
+                Text(message.content)
+                    .font(.system(size: 14))
+                    .lineSpacing(5)
+                    .textSelection(.enabled)
+                if let parts = message.parts, !parts.isEmpty {
+                    SentAttachmentsLabel(count: parts.count)
+                }
+            } else {
+                transcriptBody
+                if let images = message.images, !images.isEmpty {
+                    AssistantImageRow(images: images, accent: accent)
+                }
+                if message.displayTranscript.isEmpty && isStreaming {
+                    TypingIndicator(accent: accent).padding(.vertical, 4)
                 }
             }
-            .padding(.horizontal, 14)
-            .padding(.vertical, 10)
-            .background(isUser ? accent.opacity(0.14) : Color.primary.opacity(0.045))
-            .overlay {
-                RoundedRectangle(cornerRadius: 14)
-                    .stroke(isUser ? accent.opacity(0.18) : Color.primary.opacity(0.055), lineWidth: 1)
-            }
-            .clipShape(RoundedRectangle(cornerRadius: 14))
-
             if !isUser, !isStreaming, message.status != .complete {
-                HStack(spacing: 5) {
-                    Image(systemName: message.status == .failed ? "exclamationmark.triangle.fill" : "pause.circle")
+                Label {
                     Text(messageStatusText)
-                    if let error = message.errorMessage, !error.isEmpty {
-                        Text("· \(error)").lineLimit(2)
-                    }
+                    if let error = message.errorMessage, !error.isEmpty { Text(error).lineLimit(2) }
+                } icon: {
+                    Image(systemName: message.status == .failed ? "exclamationmark.triangle" : "pause.circle")
                 }
-                .font(.system(size: 9, weight: .medium))
+                .font(.system(size: 11, weight: .medium))
                 .foregroundStyle(message.status == .failed ? Color.orange : Color.secondary)
             }
         }
-        .frame(maxWidth: 680, alignment: isUser ? .trailing : .leading)
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
-    private var avatar: some View {
-        ZStack {
-            Circle()
-                .fill(isUser ? Color.green.opacity(0.14) : accent.opacity(0.13))
-            Image(systemName: isUser ? "person.fill" : "wand.and.stars")
-                .font(.system(size: 12, weight: .bold))
-                .foregroundStyle(isUser ? Color.green.opacity(0.85) : accent.opacity(0.85))
+    private var transcriptBody: some View {
+        let segments = message.displayTranscript
+        return VStack(alignment: .leading, spacing: 16) {
+            ForEach(segments) { segment in
+                switch segment.kind {
+                case .reasoning:
+                    ReasoningDisclosure(
+                        text: segment.text,
+                        accent: accent,
+                        isStreaming: isReasoning && segment.id == segments.last?.id,
+                        startedAt: message.reasoningStartedAt,
+                        duration: segments.filter { $0.kind == .reasoning }.count == 1 ? message.reasoningDuration : nil
+                    )
+                case .text:
+                    MarkdownText(content: segment.text, accent: accent,
+                                 showsCursor: isStreaming && !isReasoning && segment.id == segments.last?.id)
+                        .font(.system(size: 14))
+                        .lineSpacing(6)
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                case .tool:
+                    if showToolCalls, let call = message.toolCalls?.first(where: { $0.id == segment.toolCallID }) {
+                        ToolCallCard(toolCall: call, accent: accent)
+                    }
+                }
+            }
         }
-        .frame(width: 28, height: 28)
-        .padding(.top, 14)
     }
 
     private var messageStatusText: String {

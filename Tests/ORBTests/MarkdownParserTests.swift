@@ -4,6 +4,18 @@ import Testing
 
 @Suite("Markdown block parsing")
 struct MarkdownParserTests {
+    @Test("render cache parses new content once and never returns stale blocks")
+    @MainActor
+    func renderCacheTracksContent() {
+        let cache = MarkdownRenderCache()
+        let first = cache.blocks(for: "# Hello")
+        #expect(first == [.heading(level: 1, text: "Hello")])
+        #expect(cache.blocks(for: "# Hello") == first)
+        #expect(cache.parseCount == 1)
+        #expect(cache.blocks(for: "# Hello\n\nMore") != first)
+        #expect(cache.parseCount == 2)
+    }
+
     @Test("headings, paragraphs, and rules are separated")
     func basicBlocks() {
         let blocks = MarkdownParser.parse("# Title\n\nBody text.\n\n---")

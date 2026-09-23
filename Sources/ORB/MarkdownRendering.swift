@@ -185,47 +185,43 @@ enum MarkdownParser {
 
 // MARK: - Rendering
 
+/// Per-view memoization. This mutates only a private reference (not SwiftUI
+/// `@State` during body evaluation), so the first frame and subsequent token
+/// frames use exactly one parse per distinct content value.
+@MainActor
+final class MarkdownRenderCache {
+    private var content: String?
+    private var parsed: [MarkdownBlock] = []
+    private(set) var parseCount = 0
+
+    func blocks(for newContent: String) -> [MarkdownBlock] {
+        guard content != newContent else { return parsed }
+        let next = MarkdownParser.parse(newContent)
+        content = newContent
+        parsed = next
+        parseCount += 1
+        return next
+    }
+}
+
 struct MarkdownText: View {
     let content: String
     var accent: Color = .accentColor
     /// Streaming messages get a caret on the trailing block.
     var showsCursor: Bool = false
 
-    /// Cached parse result, invalidated when `content` changes. Without this
-    /// the entire document is re-parsed from scratch on every 16ms streaming
-    /// frame — O(n) per publish, which causes frame drops on longer responses.
-    ///
-    /// NOTE: the cache lives here (in the view's own `@State`) rather than in
-    /// the parser on purpose. Moving it into `MarkdownParser` statics would
-    /// make renders impure-callers of shared mutable state and races between
-    /// concurrent streams.
-    ///
-    /// IMPORTANT: `body` must stay a pure read of this cache. Mutating `@State`
-    /// during `body` evaluation (the old `blocks` computed property assigned
-    /// `cachedContent`/`cachedBlocks` inside its getter) warns
-    /// "Modifying state during view update, this will cause undefined
-    /// behavior" and can leave rows blank mid-stream. Cache updates happen in
-    /// `onChange(of: content)` below and in `onAppear` for the first frame.
-    @State private var cachedBlocks: [MarkdownBlock] = []
-    @State private var cachedContent: String? = nil
+    /// Local reference cache is not observable state: it avoids duplicate
+    /// parses on initial mount and on every streaming content change.
+    @State private var renderCache = MarkdownRenderCache()
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 9) {
-            ForEach(Array(cachedBlocks.enumerated()), id: \.offset) { index, block in
-                view(for: block, isLast: index == cachedBlocks.count - 1)
+        let blocks = renderCache.blocks(for: content)
+        return VStack(alignment: .leading, spacing: 9) {
+            ForEach(Array(blocks.enumerated()), id: \.offset) { index, block in
+                view(for: block, isLast: index == blocks.count - 1)
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .onAppear {
-            if cachedContent != content {
-                cachedContent = content
-                cachedBlocks = MarkdownParser.parse(content)
-            }
-        }
-        .onChange(of: content) { _, newContent in
-            cachedContent = newContent
-            cachedBlocks = MarkdownParser.parse(newContent)
-        }
     }
 
     @ViewBuilder
@@ -318,12 +314,7 @@ struct CodeBlockView: View {
                 }
                 Spacer(minLength: 8)
                 if isHovering || copied {
-                    Button {
-                        NSPasteboard.general.clearContents()
-                        NSPasteboard.general.setString(source, forType: .string)
-                        copied = true
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 1.4) { copied = false }
-                    } label: {
+                    Button(action: copyCode) {
                         Label(copied ? "Copied" : "Copy", systemImage: copied ? "checkmark" : "doc.on.doc")
                             .font(.system(size: 9, weight: .medium))
                             .foregroundStyle(copied ? Color.green : Color.secondary)
@@ -353,5 +344,14 @@ struct CodeBlockView: View {
                 .stroke(Color.primary.opacity(0.07), lineWidth: 0.5)
         }
         .onHover { isHovering = $0 }
+        .contextMenu { Button("Copy code", systemImage: "doc.on.doc") { copyCode() } }
+        .accessibilityAction(named: Text("Copy code")) { copyCode() }
+    }
+
+    private func copyCode() {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(source, forType: .string)
+        copied = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.4) { copied = false }
     }
 }

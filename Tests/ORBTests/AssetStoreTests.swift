@@ -166,6 +166,100 @@ struct AssetStoreTests {
         }
     }
 
+    @Test("forged dedupe metadata cannot return a path outside the library")
+    func forgedDedupePathIsRejected() async throws {
+        let root = makeTempRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let database = DatabaseManager()
+        let store = AssetStore(baseDirectory: root.appendingPathComponent("Assets"), database: database)
+        let bytes = Data("forged metadata".utf8)
+        var record = try await store.store(bytes)
+        record.relativePath = "../../outside"
+        try database.saveAssetRecordChecked(record)
+        await #expect(throws: AssetStoreError.invalidPath(record.relativePath)) {
+            try await store.store(bytes)
+        }
+    }
+
+    @Test("dedupe checks existing file bytes rather than trusting a checksum row")
+    func corruptDedupeIsRejected() async throws {
+        let root = makeTempRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = AssetStore(baseDirectory: root.appendingPathComponent("Assets"), database: DatabaseManager())
+        let bytes = Data("original".utf8)
+        let record = try await store.store(bytes)
+        try Data("altered".utf8).write(to: store.baseDirectory.appendingPathComponent(record.relativePath))
+        await #expect(throws: AssetStoreError.corrupt(relativePath: record.relativePath)) {
+            try await store.store(bytes)
+        }
+    }
+
+    @Test("a symlinked shard is refused on read and on write")
+    func symlinkShardIsRejected() async throws {
+        let root = makeTempRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let outside = root.appendingPathComponent("outside", isDirectory: true)
+        try FileManager.default.createDirectory(at: outside, withIntermediateDirectories: true)
+        let store = AssetStore(baseDirectory: root.appendingPathComponent("Assets"), database: DatabaseManager())
+        let bytes = Data("linked".utf8)
+        let record = try await store.store(bytes)
+        let shard = store.baseDirectory.appendingPathComponent(String(record.checksum.prefix(2)))
+        try FileManager.default.moveItem(at: shard, to: outside.appendingPathComponent("shard"))
+        try FileManager.default.createSymbolicLink(at: shard, withDestinationURL: outside.appendingPathComponent("shard"))
+        await #expect(throws: AssetStoreError.invalidPath(record.relativePath)) {
+            try await store.data(for: record)
+        }
+        await #expect(throws: AssetStoreError.invalidPath(record.relativePath)) {
+            try await store.store(bytes)
+        }
+        let newBytes = Data("new linked content".utf8)
+        let newChecksum = Self.sha256Hex(newBytes)
+        let newShard = store.baseDirectory.appendingPathComponent(String(newChecksum.prefix(2)))
+        try FileManager.default.createSymbolicLink(at: newShard, withDestinationURL: outside)
+        let newPath = AssetStore.relativePath(forChecksum: newChecksum, mimeType: nil)
+        await #expect(throws: AssetStoreError.invalidPath(newPath)) {
+            try await store.store(newBytes)
+        }
+        #expect(!FileManager.default.fileExists(atPath: outside.appendingPathComponent(newChecksum).path))
+    }
+
+    @Test("orphaned content-addressed file is not recorded when its bytes disagree")
+    func corruptOrphanIsRejected() async throws {
+        let root = makeTempRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let database = DatabaseManager()
+        let store = AssetStore(baseDirectory: root.appendingPathComponent("Assets"), database: database)
+        let bytes = Data("expected".utf8)
+        let path = AssetStore.relativePath(forChecksum: Self.sha256Hex(bytes), mimeType: nil)
+        let url = store.baseDirectory.appendingPathComponent(path)
+        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data("not expected".utf8).write(to: url)
+        await #expect(throws: AssetStoreError.corrupt(relativePath: path)) {
+            try await store.store(bytes)
+        }
+        #expect(database.loadAssetRecords().isEmpty)
+    }
+
+    @Test("a symlinked asset file is refused even if its bytes match")
+    func symlinkFileIsRejected() async throws {
+        let root = makeTempRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = AssetStore(baseDirectory: root.appendingPathComponent("Assets"), database: DatabaseManager())
+        let bytes = Data("linked file".utf8)
+        let record = try await store.store(bytes)
+        let file = store.baseDirectory.appendingPathComponent(record.relativePath)
+        let outside = root.appendingPathComponent("outside")
+        try FileManager.default.moveItem(at: file, to: outside)
+        try FileManager.default.createSymbolicLink(at: file, withDestinationURL: outside)
+        await #expect(throws: AssetStoreError.invalidPath(record.relativePath)) {
+            try await store.data(atRelativePath: record.relativePath)
+        }
+        await #expect(throws: AssetStoreError.invalidPath(record.relativePath)) {
+            try await store.store(bytes)
+        }
+        #expect(try Data(contentsOf: outside) == bytes)
+    }
+
     @Test("asset metadata round-trips through the database")
     func metadataRoundTripsThroughDatabase() async throws {
         let root = makeTempRoot()

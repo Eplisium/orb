@@ -493,11 +493,18 @@ struct ChatMessage: Codable, Identifiable, Equatable, Sendable {
     /// Chain-of-thought emitted by reasoning models, shown in a collapsible
     /// section so it never crowds out the answer.
     var reasoning: String?
+    /// Start of the current or most recent reasoning segment, taken from its
+    /// first stream delta (not the time a SwiftUI row becomes visible).
+    var reasoningStartedAt: Date?
+    /// Sum of finished reasoning segments; excludes answer and tool time and
+    /// survives app relaunch.
+    var reasoningDuration: TimeInterval?
     /// Structured reasoning blocks the API returned (`reasoning_details`).
     /// Wire state kept separately from the visible `reasoning` summary so
     /// opaque signature/encrypted payloads survive round trips without ever
     /// being rendered (F07).
     var reasoningDetails: [ReasoningDetail]?
+    var transcript: [MessageTranscriptSegment]?
 
     init(
         id: UUID = UUID(),
@@ -512,7 +519,10 @@ struct ChatMessage: Codable, Identifiable, Equatable, Sendable {
         finishReason: String? = nil,
         errorMessage: String? = nil,
         reasoning: String? = nil,
-        reasoningDetails: [ReasoningDetail]? = nil
+        reasoningStartedAt: Date? = nil,
+        reasoningDuration: TimeInterval? = nil,
+        reasoningDetails: [ReasoningDetail]? = nil,
+        transcript: [MessageTranscriptSegment]? = nil
     ) {
         self.id = id
         self.role = role
@@ -526,11 +536,14 @@ struct ChatMessage: Codable, Identifiable, Equatable, Sendable {
         self.finishReason = finishReason
         self.errorMessage = errorMessage
         self.reasoning = reasoning
+        self.reasoningStartedAt = reasoningStartedAt
+        self.reasoningDuration = reasoningDuration
         self.reasoningDetails = reasoningDetails
+        self.transcript = transcript
     }
 
     enum CodingKeys: String, CodingKey {
-        case role, content, reasoning, parts, images
+        case role, content, reasoning, reasoningStartedAt, reasoningDuration, parts, images, transcript
         case reasoningDetails = "reasoning_details"
         case toolCalls = "tool_calls_display"
         case toolCallId = "tool_call_id"
@@ -554,7 +567,10 @@ struct ChatMessage: Codable, Identifiable, Equatable, Sendable {
         finishReason = try c.decodeIfPresent(String.self, forKey: .finishReason)
         errorMessage = try c.decodeIfPresent(String.self, forKey: .errorMessage)
         reasoning = try c.decodeIfPresent(String.self, forKey: .reasoning)
+        reasoningStartedAt = try c.decodeIfPresent(Date.self, forKey: .reasoningStartedAt)
+        reasoningDuration = try c.decodeIfPresent(TimeInterval.self, forKey: .reasoningDuration)
         reasoningDetails = try c.decodeIfPresent([ReasoningDetail].self, forKey: .reasoningDetails)
+        transcript = try c.decodeIfPresent([MessageTranscriptSegment].self, forKey: .transcript)
     }
 
     /// Compares the fields that actually drive rendering. The previous version
@@ -567,12 +583,15 @@ struct ChatMessage: Codable, Identifiable, Equatable, Sendable {
             && lhs.content == rhs.content
             && lhs.status == rhs.status
             && lhs.reasoning == rhs.reasoning
+            && lhs.reasoningStartedAt == rhs.reasoningStartedAt
+            && lhs.reasoningDuration == rhs.reasoningDuration
             && lhs.finishReason == rhs.finishReason
             && lhs.errorMessage == rhs.errorMessage
             && lhs.toolCalls == rhs.toolCalls
             && lhs.parts == rhs.parts
             && lhs.images == rhs.images
             && lhs.reasoningDetails == rhs.reasoningDetails
+            && lhs.transcript == rhs.transcript
     }
 }
 

@@ -21,7 +21,7 @@ struct StreamingTransportLatencyTests {
         private var socket: Int32 = -1
         let port: UInt16
 
-        init(chunks: [String], gap: TimeInterval) throws {
+        init(chunks: [String], gap: TimeInterval, headerDelay: TimeInterval = 0) throws {
             var fd = Darwin.socket(AF_INET, SOCK_STREAM, 0)
             var yes: Int32 = 1
             setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &yes, socklen_t(MemoryLayout<Int32>.size))
@@ -58,11 +58,14 @@ struct StreamingTransportLatencyTests {
                 var clientLen = socklen_t(MemoryLayout<sockaddr>.size)
                 let client = Darwin.accept(listenFD, &clientAddr, &clientLen)
                 guard client >= 0 else { return }
+                var noSignal: Int32 = 1
+                setsockopt(client, SOL_SOCKET, SO_NOSIGPIPE, &noSignal, socklen_t(MemoryLayout<Int32>.size))
                 defer { close(client) }
 
                 // Drain the request line/headers so the client can proceed.
                 var scratch = [UInt8](repeating: 0, count: 4096)
                 _ = Darwin.recv(client, &scratch, scratch.count, 0)
+                if headerDelay > 0 { Thread.sleep(forTimeInterval: headerDelay) }
 
                 let header = """
                 HTTP/1.1 200 OK\r
@@ -150,6 +153,53 @@ struct StreamingTransportLatencyTests {
 
         let arrival = try #require(firstAt)
         #expect(arrival < 0.3, "tiny chunk withheld for \(arrival)s")
+    }
+
+    @Test("cancelling a body reader releases it before the next network chunk")
+    func cancelWhileWaitingForBody() async throws {
+        let server = try ChunkedServer(chunks: ["first", "second"], gap: 0.8)
+        defer { server.shutdown() }
+        let body = try await URLSessionStreamingTransport().bytes(for: makeRequest(port: server.port)).body
+        let (firstChunk, signal) = AsyncStream<Void>.makeStream()
+        let reader = Task {
+            do {
+                for try await _ in body { signal.yield(()) }
+                return true
+            } catch is CancellationError { return true }
+            catch { return false }
+        }
+        var iterator = firstChunk.makeAsyncIterator()
+        _ = await iterator.next()
+        let cancelledAt = ContinuousClock.now
+        reader.cancel()
+        let stopped = await reader.value
+        #expect(stopped)
+        #expect(cancelledAt.duration(to: .now) < .milliseconds(300))
+        signal.finish()
+    }
+
+    @Test("cancelling before headers promptly releases the caller")
+    func cancelWhileAwaitingHeaders() async throws {
+        let server = try ChunkedServer(chunks: ["data: [DONE]\n\n"], gap: 0, headerDelay: 0.8)
+        defer { server.shutdown() }
+        let transport = URLSessionStreamingTransport()
+        let request = makeRequest(port: server.port)
+        let start = ContinuousClock.now
+        let waiting = Task {
+            do {
+                _ = try await transport.bytes(for: request)
+                return false
+            } catch is CancellationError {
+                return true
+            } catch {
+                return false
+            }
+        }
+        try await Task.sleep(for: .milliseconds(50))
+        waiting.cancel()
+        let wasCancelled = await waiting.value
+        #expect(wasCancelled)
+        #expect(start.duration(to: .now) < .milliseconds(350), "Stop must not wait for response headers")
     }
 
     @Test("HTTP status and headers are surfaced before the body streams")

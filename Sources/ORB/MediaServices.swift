@@ -383,6 +383,19 @@ struct ImageModelEndpointsResponse: Decodable, Sendable {
     let endpoints: [ImageModelEndpoint]
 }
 
+/// `/images` provider routing uses `provider.only`, not a top-level slug.
+struct ImageGenerationProviderPreferences: Encodable {
+    var only: [String]? = nil
+    var order: [String]? = nil
+    var ignore: [String]? = nil
+    var allowFallbacks: Bool? = nil
+
+    enum CodingKeys: String, CodingKey {
+        case only, order, ignore
+        case allowFallbacks = "allow_fallbacks"
+    }
+}
+
 struct ImageGenRequest: Encodable {
     var model: String
     var prompt: String
@@ -391,6 +404,9 @@ struct ImageGenRequest: Encodable {
     var resolution: String? = nil
     var quality: String? = nil
     var outputFormat: String? = nil
+    var outputCompression: Int? = nil
+    var background: String? = nil
+    var provider: ImageGenerationProviderPreferences? = nil
     var seed: Int? = nil
     var size: String? = nil
     /// Reference images (image-to-image): base64 data URLs or HTTPS URLs.
@@ -398,10 +414,11 @@ struct ImageGenRequest: Encodable {
     var user: String? = nil
 
     enum CodingKeys: String, CodingKey {
-        case model, prompt, n, seed, size, user
+        case model, prompt, n, seed, size, user, background, provider
         case aspectRatio = "aspect_ratio"
         case resolution, quality
         case outputFormat = "output_format"
+        case outputCompression = "output_compression"
         case inputReferences = "input_references"
     }
 
@@ -414,11 +431,23 @@ struct ImageGenRequest: Encodable {
         try container.encodeIfPresent(resolution, forKey: .resolution)
         try container.encodeIfPresent(quality, forKey: .quality)
         try container.encodeIfPresent(outputFormat, forKey: .outputFormat)
+        try container.encodeIfPresent(outputCompression, forKey: .outputCompression)
+        try container.encodeIfPresent(background, forKey: .background)
+        try container.encodeIfPresent(provider, forKey: .provider)
         try container.encodeIfPresent(seed, forKey: .seed)
         try container.encodeIfPresent(size, forKey: .size)
-        try container.encodeIfPresent(inputReferences, forKey: .inputReferences)
+        try container.encodeIfPresent(inputReferences?.map { ImageReference(url: $0) }, forKey: .inputReferences)
         try container.encodeIfPresent(user, forKey: .user)
     }
+}
+
+/// OpenRouter ContentPartImage for image-to-image references.
+private struct ImageReference: Encodable {
+    let type = "image_url"
+    let imageURL: URLValue
+    struct URLValue: Encodable { let url: String }
+    init(url: String) { imageURL = URLValue(url: url) }
+    enum CodingKeys: String, CodingKey { case type; case imageURL = "image_url" }
 }
 
 struct ImageGenResponse: Decodable {
@@ -496,6 +525,15 @@ final class ImageGenService: ObservableObject {
     /// Generates images. Returns one `ChatImageAttachment` per image, with
     /// the prompt attached for gallery context.
     func generate(_ request: ImageGenRequest) async throws -> [ChatImageAttachment] {
+        guard (1...10).contains(request.n ?? 1),
+              (0...100).contains(request.outputCompression ?? 0),
+              request.background != "transparent" || request.outputFormat == "png" || request.outputFormat == "webp",
+              request.provider?.only?.isEmpty != true else {
+            throw MediaServiceError.invalidUpload("Invalid image options: n must be 1–10, compression 0–100, transparent output png/webp, and a provider pin must be nonempty.")
+        }
+        guard request.inputReferences.map({ $0.count <= 16 }) ?? true else {
+            throw MediaServiceError.invalidUpload("Image generation allows at most 16 reference images.")
+        }
         isGenerating = true
         defer { isGenerating = false }
         let body = try JSONEncoder().encode(request)
@@ -526,21 +564,64 @@ struct VideoGenModel: Codable, Sendable, Identifiable, Hashable {
     let supportedResolutions: [String]?
     let supportedDurations: [Int]?
     let supportedFrameImages: [String]?
+    let supportedSizes: [String]?
+    let canonicalSlug: String?
+    let allowedPassthroughParameters: [String]?
+    let creativity: [Int]?
+    let upscaleFactor: UpscaleFactor?
     let pricingSkus: [String: String]?
 
+    struct UpscaleFactor: Codable, Sendable, Hashable {
+        let min: Double?
+        let max: Double?
+    }
+
     enum CodingKeys: String, CodingKey {
-        case id, name, description, created, seed
+        case id, name, description, created, seed, creativity
         case generateAudio = "generate_audio"
         case supportedAspectRatios = "supported_aspect_ratios"
         case supportedResolutions = "supported_resolutions"
         case supportedDurations = "supported_durations"
         case supportedFrameImages = "supported_frame_images"
+        case supportedSizes = "supported_sizes"
+        case canonicalSlug = "canonical_slug"
+        case allowedPassthroughParameters = "allowed_passthrough_parameters"
+        case upscaleFactor = "upscale_factor"
         case pricingSkus = "pricing_skus"
     }
 }
 
 struct VideoGenModelList: Decodable {
     let data: [VideoGenModel]
+}
+
+/// OpenAPI `InputReference`: a tagged image/audio/video URL content part.
+enum VideoInputReference: Encodable {
+    case image(url: String)
+    case audio(url: String)
+    case video(url: String)
+
+    private enum Keys: String, CodingKey {
+        case type
+        case imageURL = "image_url"
+        case audioURL = "audio_url"
+        case videoURL = "video_url"
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: Keys.self)
+        switch self {
+        case .image(let url):
+            try container.encode("image_url", forKey: .type)
+            try container.encode(ImageReference.URLValue(url: url), forKey: .imageURL)
+        case .audio(let url):
+            try container.encode("audio_url", forKey: .type)
+            try container.encode(ImageReference.URLValue(url: url), forKey: .audioURL)
+        case .video(let url):
+            try container.encode("video_url", forKey: .type)
+            try container.encode(ImageReference.URLValue(url: url), forKey: .videoURL)
+        }
+    }
 }
 
 struct VideoGenRequest: Encodable {
@@ -552,6 +633,7 @@ struct VideoGenRequest: Encodable {
     var duration: Int? = nil
     var seed: Int? = nil
     var generateAudio: Bool? = nil
+    var inputReferences: [VideoInputReference]? = nil
     /// Frame images as base64 data URLs or HTTPS URLs.
     var firstFrameImage: String? = nil
     var lastFrameImage: String? = nil
@@ -561,14 +643,21 @@ struct VideoGenRequest: Encodable {
         case aspectRatio = "aspect_ratio"
         case generateAudio = "generate_audio"
         case frameImages = "frame_images"
+        case inputReferences = "input_references"
     }
 
     private struct FrameImage: Encodable {
         let frameType: String
-        let image: String
+        let type = "image_url"
+        let imageURL: ImageReference.URLValue
         enum CodingKeys: String, CodingKey {
-            case image
+            case type
+            case imageURL = "image_url"
             case frameType = "frame_type"
+        }
+        init(frameType: String, url: String) {
+            self.frameType = frameType
+            imageURL = .init(url: url)
         }
     }
 
@@ -582,9 +671,10 @@ struct VideoGenRequest: Encodable {
         try container.encodeIfPresent(duration, forKey: .duration)
         try container.encodeIfPresent(seed, forKey: .seed)
         try container.encodeIfPresent(generateAudio, forKey: .generateAudio)
+        try container.encodeIfPresent(inputReferences, forKey: .inputReferences)
         var frames: [FrameImage] = []
-        if let firstFrameImage { frames.append(.init(frameType: "first_frame", image: firstFrameImage)) }
-        if let lastFrameImage { frames.append(.init(frameType: "last_frame", image: lastFrameImage)) }
+        if let firstFrameImage { frames.append(.init(frameType: "first_frame", url: firstFrameImage)) }
+        if let lastFrameImage { frames.append(.init(frameType: "last_frame", url: lastFrameImage)) }
         if !frames.isEmpty { try container.encode(frames, forKey: .frameImages) }
     }
 }
@@ -840,13 +930,12 @@ final class VideoGenService: ObservableObject {
         return try transport.request(path: "videos/\(job.id)")
     }
 
-    /// Downloads the finished video bytes (first unsigned URL).
-    func download(_ job: VideoJob) async throws -> (Data, String?) {
-        guard let urlString = job.unsignedURLs?.first, let url = URL(string: urlString) else {
-            throw MediaServiceError.decoding("Video job has no download URL yet.")
+    /// Download through the canonical authenticated proxy, never unsigned URLs.
+    func download(_ job: VideoJob, index: Int = 0) async throws -> (Data, String?) {
+        guard !job.id.isEmpty, !job.id.contains("/"), !job.id.contains("?"), !job.id.contains("#"), index >= 0 else {
+            throw MediaServiceError.invalidPath(job.id)
         }
-        var request = URLRequest(url: url, timeoutInterval: NetworkTimeouts.request)
-        request.httpMethod = "GET"
+        let request = try transport.request(path: "videos/\(job.id)/content", queryItems: [URLQueryItem(name: "index", value: String(index))])
         return try await transport.sendRaw(request)
     }
 
@@ -921,10 +1010,43 @@ struct TranscriptionRequest: Encodable {
     var language: String? = nil
     var responseFormat: String? = nil
     var temperature: Double? = nil
+    var timestampGranularities: [String]? = nil
+
+    /// Multipart is limited to 25 MB; the documented JSON input_audio form
+    /// accepts larger files. Keep threshold independently testable without
+    /// allocating a giant fixture.
+    static func usesJSONInputAudio(byteCount: Int) -> Bool { byteCount > 25_000_000 }
+
+    /// STTRequest JSON: raw base64 bytes, never a data URI.
+    func jsonBody() throws -> Data {
+        struct InputAudio: Encodable { let data: String; let format: String }
+        struct Body: Encodable {
+            let model: String
+            let inputAudio: InputAudio
+            let language: String?
+            let responseFormat: String?
+            let temperature: Double?
+            let timestampGranularities: [String]?
+            enum CodingKeys: String, CodingKey {
+                case model, language, temperature
+                case inputAudio = "input_audio"
+                case responseFormat = "response_format"
+                case timestampGranularities = "timestamp_granularities"
+            }
+        }
+        let format = (filename as NSString).pathExtension.lowercased()
+        guard !format.isEmpty, format.range(of: "^[a-zA-Z0-9][a-zA-Z0-9+._-]{0,15}$", options: .regularExpression) != nil else {
+            throw MediaServiceError.invalidUpload("JSON transcription requires a supported audio filename extension (format).")
+        }
+        return try JSONEncoder().encode(Body(model: model,
+            inputAudio: InputAudio(data: audioData.base64EncodedString(), format: format),
+            language: language, responseFormat: responseFormat,
+            temperature: temperature, timestampGranularities: timestampGranularities))
+    }
 
     /// Multipart body. OpenRouter also accepts a JSON `input_audio` form,
     /// but multipart avoids an extra ~33% base64 overhead on device.
-    /// Max 25 MB; larger files must use the JSON form (not implemented).
+    /// Files above 25 MB use the documented JSON input_audio form instead.
     func multipartBody(boundary: String) -> Data {
         var body = Data()
         func append(_ text: String) { body.append(Data(text.utf8)) }
@@ -937,6 +1059,7 @@ struct TranscriptionRequest: Encodable {
         if let language { field("language", language) }
         if let responseFormat { field("response_format", responseFormat) }
         if let temperature { field("temperature", String(temperature)) }
+        for granularity in timestampGranularities ?? [] { field("timestamp_granularities[]", granularity) }
         append("--\(boundary)\r\n")
         append("Content-Disposition: form-data; name=\"file\"; filename=\"\(filename)\"\r\n")
         append("Content-Type: \(mimeType)\r\n\r\n")
@@ -951,8 +1074,52 @@ struct TranscriptionResponse: Decodable {
     let language: String?
     let duration: Double?
     let task: String?
+    let confidence: Double?
+    let usage: Usage?
+    let segments: [Segment]?
+    let words: [Word]?
 
-    enum CodingKeys: String, CodingKey { case text, language, duration, task }
+    struct Usage: Decodable {
+        let cost: Double?
+        let inputTokens: Int?
+        let outputTokens: Int?
+        let totalTokens: Int?
+        let seconds: Double?
+        enum CodingKeys: String, CodingKey {
+            case cost, seconds
+            case inputTokens = "input_tokens"
+            case outputTokens = "output_tokens"
+            case totalTokens = "total_tokens"
+        }
+    }
+    struct Segment: Decodable {
+        let id: Int
+        let start: Double
+        let end: Double
+        let text: String
+        let speaker: Int?
+        let seek: Int?
+        let tokens: [Int]?
+        let temperature: Double?
+        let avgLogprob: Double?
+        let compressionRatio: Double?
+        let noSpeechProb: Double?
+        enum CodingKeys: String, CodingKey {
+            case id, start, end, text, speaker, seek, tokens, temperature
+            case avgLogprob = "avg_logprob"
+            case compressionRatio = "compression_ratio"
+            case noSpeechProb = "no_speech_prob"
+        }
+    }
+    struct Word: Decodable {
+        let word: String
+        let start: Double
+        let end: Double
+        let confidence: Double?
+        let speaker: Int?
+    }
+
+    enum CodingKeys: String, CodingKey { case text, language, duration, task, confidence, usage, segments, words }
 }
 
 @MainActor
@@ -974,13 +1141,17 @@ final class SpeechService: ObservableObject {
     }
 
     /// Transcribes audio bytes to text via multipart upload.
-    /// Max 25 MB — the API rejects larger multipart files.
+    /// Multipart through 25 MB, documented base64 JSON for larger files.
     func transcribe(_ request: TranscriptionRequest) async throws -> TranscriptionResponse {
-        guard request.audioData.count <= 25_000_000 else {
-            throw MediaServiceError.transport("Audio file is larger than the 25 MB transcription limit.")
+        guard request.timestampGranularities?.allSatisfy({ ["word", "segment"].contains($0) }) ?? true else {
+            throw MediaServiceError.invalidUpload("Timestamp granularity must be word or segment.")
         }
         isWorking = true
         defer { isWorking = false }
+        if TranscriptionRequest.usesJSONInputAudio(byteCount: request.audioData.count) {
+            let body = try request.jsonBody()
+            return try await transport.send(transport.request(path: "audio/transcriptions", method: "POST", body: body))
+        }
         let boundary = "ORB-\(UUID().uuidString)"
         var urlRequest = try transport.request(path: "audio/transcriptions", method: "POST")
         urlRequest.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
@@ -989,19 +1160,75 @@ final class SpeechService: ObservableObject {
     }
 }
 
+// MARK: - Shared Generate model catalog
+
+/// The general models route defaults to text unless output_modalities is sent.
+/// Optional capability fields distinguish unknown catalog support from false.
+struct GenerateCatalogModel: Decodable, Sendable, Identifiable {
+    let id: String
+    let name: String
+    let supportedVoices: [String]?
+    let architecture: Architecture?
+    struct Architecture: Decodable, Sendable {
+        let inputModalities: [String]?
+        let outputModalities: [String]?
+        enum CodingKeys: String, CodingKey {
+            case inputModalities = "input_modalities"
+            case outputModalities = "output_modalities"
+        }
+    }
+    var outputModalities: [String]? { architecture?.outputModalities }
+    enum CodingKeys: String, CodingKey {
+        case id, name, architecture
+        case supportedVoices = "supported_voices"
+    }
+}
+
+@MainActor
+final class GenerateModelCatalog {
+    private let transport: MediaTransport
+    init(transport: MediaTransport = MediaTransport()) { self.transport = transport }
+
+    /// Fetch speech/transcription/rerank through /models, embeddings through
+    /// /embeddings/models; omit pagination to receive the full catalog.
+    func fetch(outputModalities: [String]) async throws -> [GenerateCatalogModel] {
+        guard !outputModalities.isEmpty,
+              outputModalities.allSatisfy({ ["speech", "transcription", "rerank", "embeddings"].contains($0) }) else {
+            throw MediaServiceError.invalidPath("output_modalities")
+        }
+        struct List: Decodable { let data: [GenerateCatalogModel] }
+        let embeddingsOnly = outputModalities == ["embeddings"]
+        let request = try transport.request(
+            path: embeddingsOnly ? "embeddings/models" : "models",
+            queryItems: embeddingsOnly ? [] : [URLQueryItem(name: "output_modalities", value: outputModalities.joined(separator: ","))]
+        )
+        return try await transport.send(request, as: List.self).data
+    }
+}
+
 // MARK: - Embeddings (`POST /embeddings`) + rerank (`POST /rerank`)
 
 struct EmbeddingRequest: Encodable {
     var model: String
     var input: [String]
+    var dimensions: Int? = nil
+    var inputType: String? = nil
+    var encodingFormat: String? = nil
 
     func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: EmbedKeys.self)
         try container.encode(model, forKey: .model)
         try container.encode(input, forKey: .input)
+        try container.encodeIfPresent(dimensions, forKey: .dimensions)
+        try container.encodeIfPresent(inputType, forKey: .inputType)
+        try container.encodeIfPresent(encodingFormat, forKey: .encodingFormat)
     }
 
-    private enum EmbedKeys: String, CodingKey { case model, input }
+    private enum EmbedKeys: String, CodingKey {
+        case model, input, dimensions
+        case inputType = "input_type"
+        case encodingFormat = "encoding_format"
+    }
 }
 
 struct EmbeddingResponse: Decodable {
@@ -1011,6 +1238,9 @@ struct EmbeddingResponse: Decodable {
     }
     let data: [Item]
     let usage: ImageGenUsage?
+    let id: String?
+    let model: String?
+    let object: String?
 }
 
 struct RerankRequest: Encodable {
@@ -1034,16 +1264,32 @@ struct RerankRequest: Encodable {
 }
 
 struct RerankResponse: Decodable {
+    struct Document: Decodable { let text: String?; let image: String? }
+    struct Usage: Decodable {
+        let searchUnits: Int?
+        let totalTokens: Int?
+        let cost: Double?
+        enum CodingKeys: String, CodingKey {
+            case cost
+            case searchUnits = "search_units"
+            case totalTokens = "total_tokens"
+        }
+    }
     struct Item: Decodable {
         let index: Int
         let relevanceScore: Double?
+        let document: Document?
 
         enum CodingKeys: String, CodingKey {
-            case index
+            case index, document
             case relevanceScore = "relevance_score"
         }
     }
     let results: [Item]
+    let id: String?
+    let model: String?
+    let provider: String?
+    let usage: Usage?
 }
 
 @MainActor
@@ -1056,6 +1302,10 @@ final class EmbeddingService: ObservableObject {
     init(transport: MediaTransport = MediaTransport()) { self.transport = transport }
 
     func embed(_ request: EmbeddingRequest) async throws -> EmbeddingResponse {
+        guard request.dimensions.map({ $0 > 0 }) ?? true,
+              request.encodingFormat == nil || request.encodingFormat == "float" else {
+            throw MediaServiceError.invalidUpload("Embeddings require positive dimensions and float encoding for vector decoding.")
+        }
         isWorking = true
         defer { isWorking = false }
         let body = try JSONEncoder().encode(request)
@@ -1064,6 +1314,9 @@ final class EmbeddingService: ObservableObject {
     }
 
     func rerank(_ request: RerankRequest) async throws -> RerankResponse {
+        guard !request.documents.isEmpty, request.topN.map({ $0 > 0 }) ?? true else {
+            throw MediaServiceError.invalidUpload("Rerank needs documents and a positive top_n.")
+        }
         isWorking = true
         defer { isWorking = false }
         let body = try JSONEncoder().encode(request)
@@ -1094,6 +1347,16 @@ struct WorkspaceFile: Codable, Sendable, Identifiable, Hashable {
 
 struct WorkspaceFileList: Decodable {
     let data: [WorkspaceFile]
+    let cursor: String?
+    let hasMore: Bool?
+    let firstID: String?
+    let lastID: String?
+    enum CodingKeys: String, CodingKey {
+        case data, cursor
+        case hasMore = "has_more"
+        case firstID = "first_id"
+        case lastID = "last_id"
+    }
 }
 
 /// Confirmation returned by `DELETE /api/v1/files/{file_id}`. The live
@@ -1134,14 +1397,32 @@ final class FileService: ObservableObject {
 
     init(transport: MediaTransport = MediaTransport()) { self.transport = transport }
 
+    /// Return a page with its opaque cursor instead of silently dropping pagination.
+    func listPage(cursor: String? = nil, limit: Int? = nil) async throws -> WorkspaceFileList {
+        guard limit.map({ (1...1000).contains($0) }) ?? true else {
+            throw MediaServiceError.invalidUpload("File page limit must be 1 through 1000.")
+        }
+        var query: [URLQueryItem] = []
+        if let limit { query.append(URLQueryItem(name: "limit", value: String(limit))) }
+        if let cursor { query.append(URLQueryItem(name: "cursor", value: cursor)) }
+        return try await transport.send(transport.request(path: "files", queryItems: query))
+    }
+
+    /// `GET /files/{file_id}` returns a direct FileResponse (no data envelope).
+    func getMetadata(id: String) async throws -> WorkspaceFile {
+        guard !id.isEmpty, !id.contains("/"), !id.contains("?"), !id.contains("#") else {
+            throw MediaServiceError.invalidPath(id)
+        }
+        return try await transport.send(transport.request(path: "files/\(id)"))
+    }
+
     func fetchFiles() async {
         guard !isLoading else { return }
         isLoading = true
         lastError = nil
         defer { isLoading = false }
         do {
-            let request = try transport.request(path: "files")
-            let list: WorkspaceFileList = try await transport.send(request)
+            let list = try await listPage()
             files = list.data
         } catch is CancellationError {
             // Leave prior files in place; a cancelled refresh is not an error.
@@ -1169,7 +1450,7 @@ final class FileService: ObservableObject {
         var body = Data()
         func append(_ text: String) { body.append(Data(text.utf8)) }
         append("--\(boundary)\r\n")
-        append("Content-Disposition: form-data; name=\"file\"; filename=\"\(filename)\"\r\n")
+        append("Content-Disposition: form-data; name=\"file\"; filename=\"\(Self.safeMultipartFilename(filename))\"\r\n")
         append("Content-Type: \(mimeType)\r\n\r\n")
         body.append(data)
         append("\r\n--\(boundary)--\r\n")
@@ -1178,6 +1459,13 @@ final class FileService: ObservableObject {
         request.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
         request.httpBody = body
         return try await transport.send(request)
+    }
+
+    private static func safeMultipartFilename(_ name: String) -> String {
+        name.replacingOccurrences(of: "\\", with: "_")
+            .replacingOccurrences(of: "\"", with: "_")
+            .replacingOccurrences(of: "\r", with: "_")
+            .replacingOccurrences(of: "\n", with: "_")
     }
 
     /// Deletes a workspace file (`DELETE /api/v1/files/{file_id}`).

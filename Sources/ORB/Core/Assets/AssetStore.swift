@@ -104,35 +104,43 @@ final class AssetStore {
         // Dedupe by checksum: identical content already stored returns the
         // same relative path and never overwrites the existing file.
         if let existing = database.findAssetRecord(checksum: checksum) {
+            guard existing.relativePath == Self.relativePath(forChecksum: checksum, mimeType: existing.mimeType) else {
+                throw AssetStoreError.invalidPath(existing.relativePath)
+            }
+            let stored = try await self.data(for: existing)
+            guard stored.count == existing.sizeBytes else {
+                throw AssetStoreError.corrupt(relativePath: existing.relativePath)
+            }
             return existing
         }
 
         let relativePath = Self.relativePath(forChecksum: checksum, mimeType: mimeType)
-        let finalURL = baseDirectory.appendingPathComponent(relativePath)
 
         do {
-            // Ensure the base and shard directory exist. A failure here
-            // (disk full, permissions, parent-is-a-file) is recoverable.
+            // Validate before and after creation: a pre-existing shard must
+            // never redirect writes through a symbolic link.
+            let finalURL = try resolvedURL(forRelativePath: relativePath)
             try FileManager.default.createDirectory(
                 at: finalURL.deletingLastPathComponent(),
                 withIntermediateDirectories: true
             )
+            _ = try resolvedURL(forRelativePath: relativePath)
             if FileManager.default.fileExists(atPath: finalURL.path) {
-                // The file is present but had no record (e.g. a crash between
-                // file write and metadata write). Record it instead of
-                // rewriting it.
+                // A crash may leave an unindexed file; trust it only when
+                // its bytes actually match the content-addressed filename.
+                _ = try await self.data(atRelativePath: relativePath, expectedChecksum: checksum)
                 return try recordStoredAsset(
                     data: data, relativePath: relativePath, mimeType: mimeType,
                     remoteReference: remoteReference, jobID: jobID, messageID: messageID
                 )
             }
-            // Atomic write: write to a temporary file in the same directory
-            // (same volume) and rename into place.
-            let temporaryURL = baseDirectory.appendingPathComponent(
+            // Atomic write: temporary file and rename on the same volume.
+            let temporaryURL = finalURL.deletingLastPathComponent().appendingPathComponent(
                 ".tmp-\(UUID().uuidString)", isDirectory: false
             )
             try data.write(to: temporaryURL, options: .atomic)
             do {
+                _ = try resolvedURL(forRelativePath: relativePath)
                 try FileManager.default.moveItem(at: temporaryURL, to: finalURL)
             } catch {
                 try? FileManager.default.removeItem(at: temporaryURL)
@@ -239,19 +247,37 @@ final class AssetStore {
         }
     }
 
-    /// Resolves a relative path inside the base directory, rejecting
-    /// absolute paths and traversal (`..`, symlink-free standardization).
+    /// Check both lexical and filesystem containment. Foundation's lexical
+    /// standardization alone does not catch a shard redirected by a symlink.
     private func resolvedURL(forRelativePath relativePath: String) throws -> URL {
+        let components = relativePath.split(separator: "/", omittingEmptySubsequences: false)
         guard !relativePath.hasPrefix("/"),
-              !relativePath.contains(".."),
-              !relativePath.isEmpty
+              !components.isEmpty,
+              components.allSatisfy({ !$0.isEmpty && $0 != "." && $0 != ".." })
         else {
             throw AssetStoreError.invalidPath(relativePath)
         }
-        let url = baseDirectory.appendingPathComponent(relativePath)
-        let standardized = url.standardizedFileURL.path
-        let base = baseDirectory.standardizedFileURL.path
-        guard standardized.hasPrefix(base + "/") else {
+        let base = baseDirectory.standardizedFileURL
+        let url = base.appendingPathComponent(relativePath)
+        guard url.standardizedFileURL.path.hasPrefix(base.path + "/") else {
+            throw AssetStoreError.invalidPath(relativePath)
+        }
+
+        // Reject links even if their target happens to be inside the library:
+        // a shard or final file can otherwise be retargeted outside later.
+        // attributesOfItem sees dangling symlinks too, unlike fileExists.
+        var componentURL = base
+        for component in [nil] + components.map({ Optional(String($0)) }) {
+            if let component { componentURL.appendPathComponent(component) }
+            if let attributes = try? FileManager.default.attributesOfItem(atPath: componentURL.path),
+               let type = attributes[.type] as? FileAttributeType,
+               type == .typeSymbolicLink {
+                throw AssetStoreError.invalidPath(relativePath)
+            }
+        }
+        let canonicalBase = base.resolvingSymlinksInPath().standardizedFileURL.path
+        let canonicalFile = url.resolvingSymlinksInPath().standardizedFileURL.path
+        guard canonicalFile.hasPrefix(canonicalBase + "/") else {
             throw AssetStoreError.invalidPath(relativePath)
         }
         return url

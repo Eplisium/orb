@@ -1,16 +1,91 @@
 import AppKit
+import AVFoundation
 import SwiftUI
 import UniformTypeIdentifiers
 
+/// Catalog absence is not the same as a model explicitly lacking a capability.
+enum CatalogCapability: Equatable {
+    case unknown, supported, unsupported
+
+    static func voice(for model: GenerateCatalogModel?) -> Self {
+        guard let voices = model?.supportedVoices else { return .unknown }
+        return voices.isEmpty ? .unsupported : .supported
+    }
+}
+
+@MainActor
+@Observable final class ModalityModelChoices {
+    private(set) var models: [GenerateCatalogModel] = []
+    private(set) var isLoading = false
+    private(set) var error: String?
+    private let catalog: GenerateModelCatalog
+    init(catalog: GenerateModelCatalog? = nil) { self.catalog = catalog ?? GenerateModelCatalog() }
+
+    func load(_ modality: String) async {
+        guard !isLoading else { return }
+        isLoading = true
+        error = nil
+        defer { isLoading = false }
+        do { models = try await catalog.fetch(outputModalities: [modality]) }
+        catch is CancellationError { }
+        catch { self.error = error.localizedDescription }
+    }
+
+    var status: String? {
+        if isLoading { return "Discovering models…" }
+        if let error { return "Model discovery unavailable: \(error). Enter a model ID manually." }
+        if models.isEmpty { return "No models listed for this modality. Enter a model ID manually." }
+        return nil
+    }
+
+    func preferredID(current: String) -> String {
+        if models.contains(where: { $0.id == current }) { return current }
+        return models.first?.id ?? current
+    }
+}
+
+struct ModalityModelField: View {
+    let title: String
+    @Binding var modelID: String
+    let choices: ModalityModelChoices
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            Text(title).font(.system(size: 9, weight: .bold)).foregroundStyle(.secondary)
+            if !choices.models.isEmpty {
+                Picker("Discovered models", selection: $modelID) {
+                    if !choices.models.contains(where: { $0.id == modelID }) {
+                        Text("Custom: \(modelID.isEmpty ? "enter below" : modelID)").tag(modelID)
+                    }
+                    ForEach(choices.models) { model in
+                        Text("\(model.name) (\(model.id))").tag(model.id)
+                    }
+                }
+            }
+            TextField("Model ID (manual fallback)", text: $modelID)
+                .textFieldStyle(.roundedBorder)
+                .font(.system(size: 12, design: .monospaced))
+            if let status = choices.status {
+                Text(status).font(.caption2).foregroundStyle(choices.error == nil ? Color.secondary : Color.orange)
+            }
+        }
+    }
+}
+
 // MARK: - Files manager
 //
-// Workspace files (`/files`): list, upload, download server-side files,
-// delete. Uploaded files get IDs that chat's file parts can reference.
+// Remote workspace uploads are separate from locally saved creations.
 
 struct FilesView: View {
     @StateObject private var service = FileService()
+    @State private var remoteFiles: [WorkspaceFile] = []
+    @State private var nextCursor: String?
+    @State private var hasMore = false
+    @State private var isFetchingPage = false
+    @State private var pageError: String?
     @State private var errorMessage: String?
-    @State private var showSaved = false
+    @State private var showingCreations = false
+    @State private var isUploading = false
     /// The file awaiting delete confirmation. The service layer refuses an
     /// unconfirmed delete, so the confirmation dialog is the only way the
     /// destructive call is ever issued.
@@ -22,9 +97,11 @@ struct FilesView: View {
         VStack(spacing: 0) {
             headerBar
             Divider()
-            if service.isLoading && service.files.isEmpty {
+            if showingCreations {
+                SavedCreationsLibraryView()
+            } else if isFetchingPage && remoteFiles.isEmpty {
                 ProgressView().frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else if service.files.isEmpty {
+            } else if remoteFiles.isEmpty {
                 emptyState
             } else {
                 fileList
@@ -32,7 +109,10 @@ struct FilesView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color(nsColor: .windowBackgroundColor))
-        .task { await service.fetchFiles() }
+        .task { await refreshPages() }
+        .onChange(of: showingCreations) { _, selected in
+            if !selected { Task { await refreshPages() } }
+        }
         .confirmationDialog(
             "Delete “\(pendingDelete?.filename ?? pendingDelete?.id ?? "")”? This cannot be undone.",
             isPresented: Binding(
@@ -47,7 +127,7 @@ struct FilesView: View {
             }
             Button("Cancel", role: .cancel) { pendingDelete = nil }
         } message: {
-            Text("The file is removed from the workspace and its storage quota is freed. Chat references to it stop working.")
+            Text("The remote file is removed and chat references to it stop working. Local creations are unaffected.")
         }
     }
 
@@ -59,28 +139,36 @@ struct FilesView: View {
             }
             VStack(alignment: .leading, spacing: 1) {
                 Text("Files").font(.system(size: 15, weight: .semibold))
-                Text("Workspace uploads for chat references")
+                Text("Remote uploads (load more available) · creations stay on this Mac")
                     .font(.system(size: 10)).foregroundStyle(.secondary)
             }
             Spacer()
-            if service.isLoading {
+            Picker("Library", selection: $showingCreations) {
+                Text("Uploaded files").tag(false)
+                Text("Saved creations").tag(true)
+            }
+            .pickerStyle(.segmented)
+            .fixedSize()
+            if !showingCreations && isFetchingPage {
                 ProgressView().controlSize(.small)
-            } else {
-                Button { Task { await service.fetchFiles() } } label: {
+            } else if !showingCreations {
+                Button { Task { await refreshPages() } } label: {
                     Image(systemName: "arrow.clockwise")
                 }
                 .buttonStyle(.plain)
                 .help("Refresh files")
             }
-            Button(action: upload) {
-                Label("Upload", systemImage: "square.and.arrow.up")
-                    .font(.system(size: 11, weight: .semibold))
-                    .padding(.horizontal, 10).padding(.vertical, 6)
-                    .background(accent.opacity(0.12))
-                    .clipShape(Capsule())
+            if !showingCreations {
+                Button(action: upload) {
+                    Label(isUploading ? "Uploading…" : "Upload", systemImage: "square.and.arrow.up")
+                        .font(.system(size: 11, weight: .semibold))
+                        .padding(.horizontal, 10).padding(.vertical, 6)
+                        .background(accent.opacity(0.12))
+                        .clipShape(Capsule())
+                }
+                .buttonStyle(.plain)
+                .disabled(isUploading || !KeychainManager.hasAPIKey)
             }
-            .buttonStyle(.plain)
-            .disabled(!KeychainManager.hasAPIKey)
         }
         .padding(.horizontal, 18)
         .padding(.vertical, 11)
@@ -91,16 +179,20 @@ struct FilesView: View {
         VStack(spacing: 12) {
             Image(systemName: "tray")
                 .font(.system(size: 36)).foregroundStyle(.tertiary)
-            Text("No files yet")
+            Text("No remote uploads yet")
                 .font(.headline).foregroundStyle(.secondary)
-            Text("Upload PDFs, images, documents, audio, or text (max 100 MB). Reference them from chat with file parts.")
+            Text("Upload files (max 100 MiB) to reference them in chat. Uploaded files cannot be downloaded through the OpenRouter Files API; keep your original. Generated media is in Saved creations.")
                 .font(.caption).foregroundStyle(.tertiary)
                 .multilineTextAlignment(.center).frame(maxWidth: 420)
             if let errorMessage {
                 PlaygroundErrorBanner(message: errorMessage) { self.errorMessage = nil }
                     .frame(maxWidth: 520)
-            } else if let error = service.lastError {
+            } else if let error = pageError ?? service.lastError {
                 Text(error).font(.caption).foregroundStyle(.orange)
+            }
+            if hasMore {
+                Button(isFetchingPage ? "Loading…" : "Load more") { Task { await loadMore() } }
+                    .disabled(isFetchingPage)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -109,11 +201,21 @@ struct FilesView: View {
     private var fileList: some View {
         ScrollView {
             LazyVStack(spacing: 8) {
+                Text("Showing loaded remote files. Uploads are chat references, not backups: uploaded content cannot be downloaded through the Files API. Keep your originals.")
+                    .font(.caption).foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                if let error = pageError ?? service.lastError {
+                    PlaygroundErrorBanner(message: error) { pageError = nil; service.lastError = nil }
+                }
                 if let errorMessage {
                     PlaygroundErrorBanner(message: errorMessage) { self.errorMessage = nil }
                 }
-                ForEach(service.files) { file in
+                ForEach(remoteFiles) { file in
                     fileRow(file)
+                }
+                if hasMore {
+                    Button(isFetchingPage ? "Loading…" : "Load more") { Task { await loadMore() } }
+                        .disabled(isFetchingPage)
                 }
             }
             .padding(16)
@@ -136,16 +238,9 @@ struct FilesView: View {
                         Text(ByteCountFormatter.string(fromByteCount: Int64(bytes), countStyle: .file))
                             .font(.caption).foregroundStyle(.secondary)
                     }
-                    if file.downloadable == true {
-                        Text("downloadable").font(.caption2).foregroundStyle(.green)
-                    }
                 }
             }
             Spacer()
-            if file.downloadable == true {
-                Button("Save…") { download(file) }
-                    .font(.caption)
-            }
             Button {
                 NSPasteboard.general.clearContents()
                 NSPasteboard.general.setString(file.id, forType: .string)
@@ -181,7 +276,11 @@ struct FilesView: View {
         panel.canChooseDirectories = false
         panel.allowsMultipleSelection = true
         if panel.runModal() == .OK {
+            isUploading = true
+            errorMessage = nil
             Task {
+                defer { isUploading = false }
+                var failures: [String] = []
                 for url in panel.urls {
                     do {
                         let scoped = url.startAccessingSecurityScopedResource()
@@ -196,30 +295,11 @@ struct FilesView: View {
                     } catch is CancellationError {
                         break
                     } catch {
-                        errorMessage = error.localizedDescription
+                        failures.append("\(url.lastPathComponent): \(error.localizedDescription)")
                     }
                 }
-                await service.fetchFiles()
-            }
-        }
-    }
-
-    private func download(_ file: WorkspaceFile) {
-        Task {
-            do {
-                let (data, _) = try await service.downloadContent(id: file.id)
-                await MainActor.run {
-                    let panel = NSSavePanel()
-                    panel.title = "Save File"
-                    panel.nameFieldStringValue = file.filename ?? file.id
-                    if panel.runModal() == .OK, let url = panel.url {
-                        try? data.write(to: url)
-                        showSaved = true
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 2) { showSaved = false }
-                    }
-                }
-            } catch {
-                await MainActor.run { errorMessage = error.localizedDescription }
+                await refreshPages()
+                if !failures.isEmpty { errorMessage = failures.joined(separator: "\n") }
             }
         }
     }
@@ -230,9 +310,198 @@ struct FilesView: View {
                 // Reached only through the confirmation dialog; the service
                 // refuses an unconfirmed delete outright.
                 _ = try await service.delete(id: file.id, confirming: true)
+                remoteFiles.removeAll { $0.id == file.id }
             } catch {
                 errorMessage = error.localizedDescription
             }
+        }
+    }
+
+    private func refreshPages() async {
+        guard !isFetchingPage else { return }
+        isFetchingPage = true
+        defer { isFetchingPage = false }
+        do {
+            let page = try await service.listPage()
+            remoteFiles = page.data
+            nextCursor = page.cursor
+            hasMore = page.hasMore == true && page.cursor != nil
+            pageError = page.hasMore == true && page.cursor == nil ? "More files reported without a cursor; cannot continue safely." : nil
+        } catch is CancellationError { }
+        catch { pageError = error.localizedDescription }
+    }
+
+    private func loadMore() async {
+        guard hasMore, let cursor = nextCursor, !isFetchingPage else { return }
+        isFetchingPage = true
+        defer { isFetchingPage = false }
+        do {
+            let page = try await service.listPage(cursor: cursor)
+            let known = Set(remoteFiles.map(\.id))
+            remoteFiles += page.data.filter { !known.contains($0.id) }
+            nextCursor = page.cursor
+            hasMore = page.hasMore == true && page.cursor != nil && page.cursor != cursor
+            pageError = page.hasMore == true && !hasMore ? "Pagination returned no new cursor; stopped to avoid a loop." : nil
+        } catch is CancellationError { }
+        catch { pageError = error.localizedDescription }
+    }
+}
+
+// Local outputs are intentionally not mixed with OpenRouter's remote Files API.
+func creationExtension(_ creation: SavedCreation) -> String {
+    let mime = creation.mimeType.components(separatedBy: ";")[0].lowercased()
+    switch mime {
+    case "image/png": return "png"
+    case "image/jpeg": return "jpg"
+    case "image/webp": return "webp"
+    case "video/mp4": return "mp4"
+    case "video/webm": return "webm"
+    case "audio/wav", "audio/x-wav": return "wav"
+    case "audio/pcm", "audio/l16": return "pcm"
+    case "audio/aac": return "aac"
+    case "audio/ogg": return "ogg"
+    case "audio/mpeg", "audio/mp3": return "mp3"
+    case "application/json": return "json"
+    default: return "txt"
+    }
+}
+
+@MainActor
+private func exportCreation(_ data: Data, creation: SavedCreation) throws {
+    let panel = NSSavePanel()
+    panel.title = "Export Saved Creation"
+    panel.nameFieldStringValue = "orb-\(creation.id.uuidString).\(creationExtension(creation))"
+    if panel.runModal() == .OK, let url = panel.url {
+        try data.write(to: url, options: .atomic)
+    }
+}
+
+struct SavedCreationsLibraryView: View {
+    @ObservedObject private var store = SavedCreationsStore.shared
+    @State private var errorMessage: String?
+    @State private var selected: SavedCreation?
+    @State private var selectedData: Data?
+    @State private var isOpening = false
+
+    var body: some View {
+        ScrollView {
+            LazyVStack(alignment: .leading, spacing: 10) {
+                Text("Saved on this Mac · images, videos, audio, transcripts, and embeddings")
+                    .font(.caption).foregroundStyle(.secondary)
+                if let errorMessage {
+                    PlaygroundErrorBanner(message: errorMessage) { self.errorMessage = nil }
+                }
+                if let loadError = store.loadError {
+                    Text(loadError.localizedDescription).foregroundStyle(.red).font(.caption)
+                }
+                if store.creations.isEmpty {
+                    ContentUnavailableView("No saved creations yet", systemImage: "square.stack",
+                                           description: Text("Generate media, synthesize speech, transcribe audio, or embed text to save it here."))
+                        .frame(maxWidth: .infinity, minHeight: 240)
+                }
+                ForEach(store.creations) { creation in
+                    HStack(spacing: 12) {
+                        Image(systemName: icon(for: creation.kind))
+                            .frame(width: 28)
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text(creation.prompt.flatMap { $0.isEmpty ? nil : $0 } ?? title(for: creation.kind))
+                                .font(.subheadline).lineLimit(2)
+                            Text("\(title(for: creation.kind)) · \(creation.modelID) · \(creation.createdAt.formatted(date: .abbreviated, time: .shortened))")
+                                .font(.caption2).foregroundStyle(.secondary).lineLimit(1)
+                        }
+                        Spacer()
+                        Button("Open") { open(creation) }
+                        Button("Export…") { export(creation) }
+                    }
+                    .padding(10)
+                    .background(Color.primary.opacity(0.04))
+                    .clipShape(RoundedRectangle(cornerRadius: 8))
+                }
+                if isOpening { ProgressView("Opening…") }
+            }
+            .padding(16)
+        }
+        .sheet(item: $selected) { creation in
+            VStack(alignment: .leading, spacing: 12) {
+                HStack {
+                    Text(title(for: creation.kind)).font(.headline)
+                    Spacer()
+                    Button("Done") { selected = nil; selectedData = nil }
+                }
+                if let data = selectedData {
+                    if creation.kind == .image, let image = NSImage(data: data) {
+                        Image(nsImage: image).resizable().scaledToFit()
+                    } else if creation.kind == .transcript || creation.kind == .embedding {
+                        ScrollView {
+                            Text(String(decoding: data, as: UTF8.self))
+                                .font(.system(.body, design: .monospaced))
+                                .textSelection(.enabled)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+                    } else {
+                        ContentUnavailableView("No inline preview", systemImage: "doc",
+                                               description: Text("Export to view this media in a compatible app."))
+                    }
+                }
+                Button("Export…") { export(creation) }
+            }
+            .padding(20).frame(minWidth: 500, minHeight: 350)
+        }
+    }
+
+    private func title(for kind: SavedCreation.Kind) -> String {
+        switch kind {
+        case .image: "Image"
+        case .video: "Video"
+        case .audio: "Audio"
+        case .transcript: "Transcript"
+        case .embedding: "Embedding"
+        }
+    }
+
+    private func icon(for kind: SavedCreation.Kind) -> String {
+        switch kind {
+        case .image: "photo"
+        case .video: "film"
+        case .audio: "waveform"
+        case .transcript: "doc.text"
+        case .embedding: "chart.dots.scatter"
+        }
+    }
+
+    private func open(_ creation: SavedCreation) {
+        isOpening = true
+        Task {
+            defer { isOpening = false }
+            do {
+                let data = try await store.data(for: creation)
+                if creation.kind == .audio && creationExtension(creation) == "pcm" {
+                    throw MediaServiceError.decoding("Raw PCM has no container or sample-rate metadata for safe playback. Export the .pcm bytes instead.")
+                }
+                if creation.kind == .video || creation.kind == .audio {
+                    let directory = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
+                        .appendingPathComponent("ORB/CreationPreviews", isDirectory: true)
+                    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+                    let url = directory.appendingPathComponent(creation.id.uuidString)
+                        .appendingPathExtension(creationExtension(creation))
+                    try data.write(to: url, options: .atomic)
+                    guard NSWorkspace.shared.open(url) else {
+                        throw CocoaError(.fileReadUnknown)
+                    }
+                } else {
+                    selectedData = data
+                    selected = creation
+                }
+            } catch { errorMessage = error.localizedDescription }
+        }
+    }
+
+    private func export(_ creation: SavedCreation) {
+        Task {
+            do {
+                let data = try await store.data(for: creation)
+                try exportCreation(data, creation: creation)
+            } catch { errorMessage = error.localizedDescription }
         }
     }
 }
@@ -241,19 +510,31 @@ struct FilesView: View {
 
 struct SpeechView: View {
     @StateObject private var service = SpeechService()
+    @State private var speechModels = ModalityModelChoices()
+    @State private var transcriptionModels = ModalityModelChoices()
+    @ObservedObject private var creations = SavedCreationsStore.shared
     @State private var mode: Mode = .tts
     @State private var text = ""
     @State private var voice = ""
     @State private var speed = 1.0
+    @State private var audioFormat = "mp3"
+    @State private var language = ""
+    @State private var transcriptionFormat = "json"
+    @State private var timestampMode = "none"
+    @State private var lastTranscription: TranscriptionResponse?
+    @State private var pendingTranscript: (data: Data, mime: String, model: String, filename: String)?
     @State private var errorMessage: String?
     @State private var transcript = ""
     @State private var selectedAudioURL: URL?
+    @State private var lastAudio: SavedCreation?
+    @State private var pendingAudio: (data: Data, mimeType: String, modelID: String, prompt: String)?
+    @State private var audioPlayer: AVAudioPlayer?
+    @State private var isSaving = false
 
     enum Mode: String, CaseIterable { case tts = "Text → Speech", stt = "Speech → Text" }
 
     private let accent = Color.orange
-    /// Cheap, well-supported defaults. The user can override with any model ID.
-    @State private var modelId = "openai/gpt-4o-mini-tts"
+    @State private var modelId = ""
 
     var body: some View {
         VStack(spacing: 0) {
@@ -263,6 +544,13 @@ struct SpeechView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color(nsColor: .windowBackgroundColor))
+        .task { await discoverMode() }
+        .onChange(of: mode) { _, newMode in
+            modelId = ""
+            voice = ""
+            errorMessage = nil
+            Task { await discoverMode() }
+        }
     }
 
     private var headerBar: some View {
@@ -294,7 +582,7 @@ struct SpeechView: View {
     private var ttsBody: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 14) {
-                modelField(help: "Any TTS model, e.g. openai/gpt-4o-mini-tts.")
+                modelField(choices: speechModels)
                 VStack(alignment: .leading, spacing: 6) {
                     Text("TEXT").font(.system(size: 9, weight: .bold)).foregroundStyle(.secondary)
                     TextEditor(text: $text)
@@ -306,14 +594,26 @@ struct SpeechView: View {
                         }
                 }
                 HStack(spacing: 12) {
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text("Voice (optional)").font(.caption).foregroundStyle(.secondary)
-                        TextField("provider default", text: $voice)
-                            .textFieldStyle(.roundedBorder).frame(width: 180)
-                    }
+                    Picker("Format", selection: $audioFormat) {
+                        Text("MP3").tag("mp3")
+                        Text("PCM (raw)").tag("pcm")
+                    }.fixedSize()
+                }
+                if let model = selectedSpeechModel, let voices = model.supportedVoices, !voices.isEmpty {
+                    Picker("Voice", selection: $voice) {
+                        Text("Provider default").tag("")
+                        ForEach(voices, id: \.self) { Text($0).tag($0) }
+                    }.fixedSize()
+                } else if CatalogCapability.voice(for: selectedSpeechModel) == .unknown {
+                    Text("Voice support is unknown for this model; using provider default.")
+                        .font(.caption2).foregroundStyle(.secondary)
+                }
+                if selectedSpeechModel?.id.hasPrefix("openai/") == true {
+                    HStack(spacing: 12) {
                     VStack(alignment: .leading, spacing: 4) {
                         Text("Speed: \(speed, specifier: "%.2f")").font(.caption).foregroundStyle(.secondary)
                         Slider(value: $speed, in: 0.25...4.0, step: 0.05).frame(width: 160)
+                    }
                     }
                 }
                 if let errorMessage {
@@ -321,8 +621,8 @@ struct SpeechView: View {
                 }
                 Button(action: synthesize) {
                     HStack {
-                        if service.isWorking { ProgressView().controlSize(.small).tint(.white) }
-                        Text(service.isWorking ? "Synthesizing…" : "Synthesize & Save…")
+                        if service.isWorking || isSaving { ProgressView().controlSize(.small).tint(.white) }
+                        Text(service.isWorking ? "Synthesizing…" : isSaving ? "Saving…" : "Synthesize")
                             .fontWeight(.semibold)
                     }
                     .frame(maxWidth: 320)
@@ -333,7 +633,23 @@ struct SpeechView: View {
                 }
                 .buttonStyle(.plain)
                 .disabled(!canSynthesize)
-                Text("Returns raw audio (mp3/pcm/wav depending on the model). Billed per request.")
+                if let lastAudio {
+                    HStack {
+                        Label("Saved in app", systemImage: "checkmark.circle.fill")
+                        Button("Play") { play(lastAudio) }
+                        Button("Export…") { export(lastAudio) }
+                    }.font(.caption)
+                } else if let pendingAudio {
+                    HStack {
+                        Text("Generated audio is not yet saved").foregroundStyle(.orange)
+                        Button("Retry save") { Task { await savePendingAudio() } }
+                            .disabled(isSaving)
+                        Button("Export…") {
+                            exportPendingAudio(pendingAudio.data, mimeType: pendingAudio.mimeType)
+                        }
+                    }.font(.caption)
+                }
+                Text("Audio is saved in the local creations library first. Export is optional. Billed per request.")
                     .font(.caption2).foregroundStyle(.secondary)
             }
             .padding(20)
@@ -342,19 +658,25 @@ struct SpeechView: View {
         }
     }
 
-    private func modelField(help: String) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text("MODEL").font(.system(size: 9, weight: .bold)).foregroundStyle(.secondary)
-            TextField("model id", text: $modelId)
-                .textFieldStyle(.roundedBorder)
-                .font(.system(size: 12, design: .monospaced))
-            Text(help).font(.caption2).foregroundStyle(.secondary)
-        }
+    private func modelField(choices: ModalityModelChoices) -> some View {
+        ModalityModelField(title: "MODEL", modelID: $modelId, choices: choices)
+    }
+
+    private var selectedSpeechModel: GenerateCatalogModel? {
+        speechModels.models.first { $0.id == modelId }
+    }
+
+    private func discoverMode() async {
+        let requestedMode = mode
+        let choices = requestedMode == .tts ? speechModels : transcriptionModels
+        await choices.load(requestedMode == .tts ? "speech" : "transcription")
+        if mode == requestedMode && modelId.isEmpty { modelId = choices.preferredID(current: "") }
     }
 
     private var canSynthesize: Bool {
         !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            && !modelId.isEmpty && !service.isWorking && KeychainManager.hasAPIKey
+            && !modelId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && !service.isWorking && !isSaving && KeychainManager.hasAPIKey
     }
 
     private func synthesize() {
@@ -363,23 +685,19 @@ struct SpeechView: View {
             return
         }
         errorMessage = nil
+        lastAudio = nil
         var request = SpeechRequest(model: modelId, input: text)
         let trimmedVoice = voice.trimmingCharacters(in: .whitespacesAndNewlines)
-        request.voice = trimmedVoice.isEmpty ? nil : trimmedVoice
-        request.speed = speed == 1.0 ? nil : speed
+        request.voice = CatalogCapability.voice(for: selectedSpeechModel) == .supported && selectedSpeechModel?.supportedVoices?.contains(trimmedVoice) == true ? trimmedVoice : nil
+        request.responseFormat = audioFormat
+        request.speed = selectedSpeechModel?.id.hasPrefix("openai/") == true && speed != 1.0 ? speed : nil
         Task {
             do {
                 let (data, contentType) = try await service.synthesize(request)
-                await MainActor.run {
-                    let ext = contentType?.contains("wav") == true ? "wav"
-                        : contentType?.contains("pcm") == true ? "pcm" : "mp3"
-                    let panel = NSSavePanel()
-                    panel.title = "Save Audio"
-                    panel.nameFieldStringValue = "orb-speech.\(ext)"
-                    if panel.runModal() == .OK, let url = panel.url {
-                        try? data.write(to: url)
-                    }
-                }
+                let mime = contentType?.components(separatedBy: ";").first?.trimmingCharacters(in: .whitespacesAndNewlines)
+                    ?? (request.responseFormat == "pcm" ? "audio/pcm" : "audio/mpeg")
+                pendingAudio = (data, mime, request.model, request.input)
+                await savePendingAudio()
             } catch is CancellationError {
                 // Leave prior state alone on cancellation.
             } catch {
@@ -393,7 +711,21 @@ struct SpeechView: View {
     private var sttBody: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 14) {
-                modelField(help: "Any STT model, e.g. openai/whisper-large-v3. Max 25 MB per file.")
+                modelField(choices: transcriptionModels)
+                Text("Files above 25 MB use base64 JSON upload; smaller files use multipart.").font(.caption2).foregroundStyle(.secondary)
+                TextField("Language (ISO-639-1, optional; auto-detect if blank)", text: $language)
+                    .textFieldStyle(.roundedBorder)
+                Picker("Response", selection: $transcriptionFormat) {
+                    Text("Text JSON").tag("json")
+                    Text("Verbose JSON (OpenAI-compatible providers)").tag("verbose_json")
+                }.fixedSize()
+                if transcriptionFormat == "verbose_json" {
+                    Picker("Timestamps", selection: $timestampMode) {
+                        Text("Provider default").tag("none")
+                        Text("Segments").tag("segment")
+                        Text("Words and segments").tag("word")
+                    }.fixedSize()
+                }
                 HStack(spacing: 10) {
                     Button(action: chooseAudio) {
                         Label(selectedAudioURL?.lastPathComponent ?? "Choose Audio…", systemImage: "waveform")
@@ -413,8 +745,8 @@ struct SpeechView: View {
                 }
                 Button(action: transcribe) {
                     HStack {
-                        if service.isWorking { ProgressView().controlSize(.small).tint(.white) }
-                        Text(service.isWorking ? "Transcribing…" : "Transcribe")
+                        if service.isWorking || isSaving { ProgressView().controlSize(.small).tint(.white) }
+                        Text(service.isWorking ? "Transcribing…" : isSaving ? "Saving…" : "Transcribe")
                             .fontWeight(.semibold)
                     }
                     .frame(maxWidth: 320)
@@ -442,6 +774,34 @@ struct SpeechView: View {
                         .font(.caption)
                     }
                 }
+                if let response = lastTranscription {
+                    if let language = response.language { Text("Language: \(language)").font(.caption) }
+                    if let duration = response.duration { Text("Duration: \(duration, specifier: "%.2f")s").font(.caption) }
+                    if let cost = response.usage?.cost { Text("Cost: $\(cost, specifier: "%.5f")").font(.caption) }
+                    if let segments = response.segments, !segments.isEmpty {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("TIMESTAMPED SEGMENTS").font(.caption.bold())
+                            ForEach(Array(segments.enumerated()), id: \.offset) { _, segment in
+                                Text("\(segment.start, specifier: "%.2f")–\(segment.end, specifier: "%.2f")s  \(segment.text)")
+                                    .font(.caption).textSelection(.enabled)
+                            }
+                        }
+                    }
+                    if let words = response.words, !words.isEmpty {
+                        DisclosureGroup("\(words.count) timestamped words") {
+                            ForEach(Array(words.enumerated()), id: \.offset) { _, word in
+                                Text("\(word.start, specifier: "%.2f")–\(word.end, specifier: "%.2f")s  \(word.word)")
+                                    .font(.caption).textSelection(.enabled)
+                            }
+                        }
+                    }
+                }
+                if let pendingTranscript {
+                    HStack {
+                        Text("Transcript available; local save failed.").foregroundStyle(.orange)
+                        Button("Retry save") { Task { await saveTranscript(pendingTranscript) } }.disabled(isSaving)
+                    }.font(.caption)
+                }
             }
             .padding(20)
             .frame(maxWidth: 700)
@@ -450,7 +810,8 @@ struct SpeechView: View {
     }
 
     private var canTranscribe: Bool {
-        selectedAudioURL != nil && !modelId.isEmpty && !service.isWorking && KeychainManager.hasAPIKey
+        selectedAudioURL != nil && !modelId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && !service.isWorking && !isSaving && KeychainManager.hasAPIKey
     }
 
     private func chooseAudio() {
@@ -476,17 +837,120 @@ struct SpeechView: View {
                 let data = try Data(contentsOf: url)
                 let mime = (try? url.resourceValues(forKeys: [.contentTypeKey]).contentType?.preferredMIMEType)
                     ?? "audio/wav"
-                let request = TranscriptionRequest(
+                var request = TranscriptionRequest(
                     model: modelId, filename: url.lastPathComponent,
                     mimeType: mime, audioData: data
                 )
+                let trimmedLanguage = language.trimmingCharacters(in: .whitespacesAndNewlines)
+                request.language = trimmedLanguage.isEmpty ? nil : trimmedLanguage
+                request.responseFormat = transcriptionFormat
+                request.timestampGranularities = transcriptionFormat == "verbose_json" && timestampMode != "none"
+                    ? (timestampMode == "word" ? ["word", "segment"] : ["segment"]) : nil
                 let response = try await service.transcribe(request)
-                await MainActor.run { transcript = response.text }
+                transcript = response.text
+                lastTranscription = response
+                let structured = transcriptionFormat == "verbose_json"
+                var details: [String: Any] = ["text": response.text]
+                if let language = response.language { details["language"] = language }
+                if let duration = response.duration { details["duration"] = duration }
+                if let confidence = response.confidence { details["confidence"] = confidence }
+                if let task = response.task { details["task"] = task }
+                if let usage = response.usage {
+                    var usageDetails: [String: Any] = [:]
+                    if let cost = usage.cost { usageDetails["cost"] = cost }
+                    if let tokens = usage.inputTokens { usageDetails["input_tokens"] = tokens }
+                    if let tokens = usage.outputTokens { usageDetails["output_tokens"] = tokens }
+                    if let tokens = usage.totalTokens { usageDetails["total_tokens"] = tokens }
+                    if let seconds = usage.seconds { usageDetails["seconds"] = seconds }
+                    details["usage"] = usageDetails
+                }
+                if let segments = response.segments {
+                    details["segments"] = segments.map { segment -> [String: Any] in
+                        var value: [String: Any] = ["id": segment.id, "start": segment.start,
+                                                     "end": segment.end, "text": segment.text]
+                        if let speaker = segment.speaker { value["speaker"] = speaker }
+                        if let tokens = segment.tokens { value["tokens"] = tokens }
+                        return value
+                    }
+                }
+                if let words = response.words {
+                    details["words"] = words.map { word -> [String: Any] in
+                        var value: [String: Any] = ["start": word.start, "end": word.end, "word": word.word]
+                        if let confidence = word.confidence { value["confidence"] = confidence }
+                        if let speaker = word.speaker { value["speaker"] = speaker }
+                        return value
+                    }
+                }
+                let payload = structured ? try JSONSerialization.data(withJSONObject: details, options: [.prettyPrinted, .sortedKeys]) : Data(response.text.utf8)
+                let pending = (data: payload, mime: structured ? "application/json" : "text/plain",
+                               model: request.model, filename: url.lastPathComponent)
+                pendingTranscript = pending
+                await saveTranscript(pending)
             } catch is CancellationError {
                 // Leave prior transcript alone on cancellation.
             } catch {
                 await MainActor.run { errorMessage = error.localizedDescription }
             }
+        }
+    }
+
+    private func saveTranscript(_ pending: (data: Data, mime: String, model: String, filename: String)) async {
+        guard !isSaving else { return }
+        isSaving = true
+        defer { isSaving = false }
+        do {
+            _ = try await creations.save(pending.data, mimeType: pending.mime, kind: .transcript,
+                                         modelID: pending.model, prompt: pending.filename)
+            pendingTranscript = nil
+            errorMessage = nil
+        } catch { errorMessage = "Transcript returned, but local save failed: \(error.localizedDescription)" }
+    }
+
+    private func savePendingAudio() async {
+        guard let pendingAudio, !isSaving else { return }
+        isSaving = true
+        defer { isSaving = false }
+        do {
+            lastAudio = try await creations.save(pendingAudio.data, mimeType: pendingAudio.mimeType,
+                kind: .audio, modelID: pendingAudio.modelID, prompt: pendingAudio.prompt)
+            self.pendingAudio = nil
+            errorMessage = nil
+        } catch {
+            errorMessage = "Audio was generated but could not be saved: \(error.localizedDescription)"
+        }
+    }
+
+    private func exportPendingAudio(_ data: Data, mimeType: String) {
+        let panel = NSSavePanel()
+        panel.title = "Export Generated Audio"
+        let extensionName = creationExtension(SavedCreation(id: UUID(), kind: .audio, modelID: "",
+            prompt: nil, mimeType: mimeType, createdAt: Date(), assetPath: "", checksum: ""))
+        panel.nameFieldStringValue = "orb-speech.\(extensionName)"
+        if panel.runModal() == .OK, let url = panel.url {
+            do { try data.write(to: url, options: .atomic) }
+            catch { errorMessage = "Audio export failed: \(error.localizedDescription)" }
+        }
+    }
+
+    private func play(_ creation: SavedCreation) {
+        Task {
+            do {
+                guard creationExtension(creation) != "pcm" else {
+                    throw MediaServiceError.decoding("Raw PCM playback needs sample-rate metadata; export the bytes instead.")
+                }
+                let data = try await creations.data(for: creation)
+                audioPlayer = try AVAudioPlayer(data: data)
+                audioPlayer?.play()
+            } catch { errorMessage = error.localizedDescription }
+        }
+    }
+
+    private func export(_ creation: SavedCreation) {
+        Task {
+            do {
+                let data = try await creations.data(for: creation)
+                try exportCreation(data, creation: creation)
+            } catch { errorMessage = error.localizedDescription }
         }
     }
 }
@@ -495,13 +959,25 @@ struct SpeechView: View {
 
 struct EmbeddingsView: View {
     @StateObject private var service = EmbeddingService()
-    @State private var modelId = "openai/text-embedding-3-small"
+    @State private var embeddingModels = ModalityModelChoices()
+    @State private var rerankModels = ModalityModelChoices()
+    @ObservedObject private var creations = SavedCreationsStore.shared
+    @State private var modelId = ""
+    @State private var rerankModelId = ""
     @State private var inputText = ""
-    @State private var dimensions: [Double] = []
+    @State private var vectors: [(input: String, embedding: [Double])] = []
+    @State private var requestedDimensions = ""
+    @State private var inputType = ""
     @State private var embedUsage: ImageGenUsage?
+    @State private var pendingEmbedding: (payload: Data, model: String, prompt: String)?
     @State private var rerankQuery = ""
     @State private var rerankDocs = ""
     @State private var rerankResults: [RerankResponse.Item] = []
+    @State private var rankedDocuments: [String] = []
+    @State private var topN = ""
+    @State private var rerankUsage: RerankResponse.Usage?
+    @State private var rerankProvider: String?
+    @State private var isSaving = false
     @State private var errorMessage: String?
 
     private let accent = Color.purple
@@ -523,13 +999,19 @@ struct EmbeddingsView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color(nsColor: .windowBackgroundColor))
+        .task {
+            await embeddingModels.load("embeddings")
+            if modelId.isEmpty { modelId = embeddingModels.preferredID(current: "") }
+            await rerankModels.load("rerank")
+            if rerankModelId.isEmpty { rerankModelId = rerankModels.preferredID(current: "") }
+        }
     }
 
     private var headerBar: some View {
         HStack(spacing: 10) {
             ZStack {
                 Circle().fill(accent.opacity(0.13)).frame(width: 34, height: 34)
-                Image(systemName: "vector").foregroundStyle(accent)
+                Image(systemName: "chart.dots.scatter").foregroundStyle(accent)
             }
             VStack(alignment: .leading, spacing: 1) {
                 Text("Embeddings & Rerank").font(.system(size: 15, weight: .semibold))
@@ -542,18 +1024,27 @@ struct EmbeddingsView: View {
     private var embedSection: some View {
         VStack(alignment: .leading, spacing: 10) {
             Text("EMBEDDINGS").font(.system(size: 9, weight: .bold)).foregroundStyle(.secondary)
-            TextField("Embedding model", text: $modelId)
-                .textFieldStyle(.roundedBorder)
-                .font(.system(size: 12, design: .monospaced))
+            ModalityModelField(title: "MODEL", modelID: $modelId, choices: embeddingModels)
+            Text("Inputs to embed (one per line)").font(.caption).foregroundStyle(.secondary)
             TextEditor(text: $inputText)
                 .font(.system(size: 12))
                 .frame(minHeight: 70)
                 .overlay {
                     RoundedRectangle(cornerRadius: 6).stroke(Color.primary.opacity(0.10), lineWidth: 1)
                 }
+            HStack {
+                TextField("Dimensions (optional positive integer)", text: $requestedDimensions).textFieldStyle(.roundedBorder)
+                Picker("Input type", selection: $inputType) {
+                    Text("Provider default").tag("")
+                    Text("Query").tag("query")
+                    Text("Document").tag("document")
+                }.fixedSize()
+            }
+            Text("Float vectors requested. Dimensions and input type depend on provider support.")
+                .font(.caption2).foregroundStyle(.secondary)
             HStack(spacing: 10) {
                 Button(action: embed) {
-                    Text(service.isWorking ? "Embedding…" : "Embed")
+                    Text(service.isWorking ? "Embedding…" : isSaving ? "Saving…" : "Embed")
                         .fontWeight(.semibold)
                         .padding(.horizontal, 16).padding(.vertical, 7)
                         .background(canEmbed ? accent : Color.gray.opacity(0.45))
@@ -562,13 +1053,24 @@ struct EmbeddingsView: View {
                 }
                 .buttonStyle(.plain)
                 .disabled(!canEmbed)
-                if !dimensions.isEmpty {
-                    Text("\(dimensions.count) dims · first: \(dimensions.prefix(4).map { String(format: "%.3f", $0) }.joined(separator: ", "))…")
-                        .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
-                }
-                if let usage = embedUsage, let cost = usage.cost {
-                    Text("$\(cost, specifier: "%.5f")").font(.caption.monospacedDigit()).foregroundStyle(.secondary)
-                }
+            }
+            if let usage = embedUsage {
+                Text("Usage: \(usage.promptTokens.map { "\($0) input tokens" } ?? "input tokens unavailable") · \(usage.totalTokens.map { "\($0) total tokens" } ?? "total tokens unavailable") · \(usage.cost.map { String(format: "$%.5f", $0) } ?? "cost unavailable")")
+                    .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
+            }
+            ForEach(Array(vectors.enumerated()), id: \.offset) { index, vector in
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("#\(index + 1) · \(vector.input) · \(vector.embedding.count) dimensions").font(.caption.bold())
+                    Text(vector.embedding.map { String($0) }.joined(separator: ", "))
+                        .font(.caption.monospaced()).textSelection(.enabled)
+                        .lineLimit(3)
+                }.frame(maxWidth: .infinity, alignment: .leading)
+            }
+            if let pendingEmbedding {
+                HStack {
+                    Text("Vectors available but local save failed.").foregroundStyle(.orange)
+                    Button("Retry save") { Task { await saveEmbedding(pendingEmbedding) } }.disabled(isSaving)
+                }.font(.caption)
             }
         }
     }
@@ -576,6 +1078,7 @@ struct EmbeddingsView: View {
     private var rerankSection: some View {
         VStack(alignment: .leading, spacing: 10) {
             Text("RERANK").font(.system(size: 9, weight: .bold)).foregroundStyle(.secondary)
+            ModalityModelField(title: "MODEL", modelID: $rerankModelId, choices: rerankModels)
             TextField("Query", text: $rerankQuery)
                 .textFieldStyle(.roundedBorder)
             Text("Documents (one per line)").font(.caption).foregroundStyle(.secondary)
@@ -585,8 +1088,9 @@ struct EmbeddingsView: View {
                 .overlay {
                     RoundedRectangle(cornerRadius: 6).stroke(Color.primary.opacity(0.10), lineWidth: 1)
                 }
+            TextField("Top N (optional positive integer)", text: $topN).textFieldStyle(.roundedBorder)
             Button(action: rerank) {
-                Text(service.isWorking ? "Ranking…" : "Rerank")
+                Text(service.isWorking ? "Ranking…" : isSaving ? "Saving…" : "Rerank")
                     .fontWeight(.semibold)
                     .padding(.horizontal, 16).padding(.vertical, 7)
                     .background(canRerank ? accent : Color.gray.opacity(0.45))
@@ -595,6 +1099,11 @@ struct EmbeddingsView: View {
             }
             .buttonStyle(.plain)
             .disabled(!canRerank)
+            if let rerankUsage {
+                Text("Usage: \(rerankUsage.searchUnits.map { "\($0) search units" } ?? "search units unavailable") · \(rerankUsage.totalTokens.map { "\($0) tokens" } ?? "tokens unavailable") · \(rerankUsage.cost.map { String(format: "$%.5f", $0) } ?? "cost unavailable")")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            if let rerankProvider { Text("Provider: \(rerankProvider)").font(.caption).foregroundStyle(.secondary) }
             if !rerankResults.isEmpty {
                 VStack(alignment: .leading, spacing: 6) {
                     ForEach(rerankResults.sorted { ($0.relevanceScore ?? 0) > ($1.relevanceScore ?? 0) }, id: \.index) { item in
@@ -604,7 +1113,15 @@ struct EmbeddingsView: View {
                                 Text(String(format: "%.3f", score))
                                     .font(.caption.monospacedDigit()).foregroundStyle(accent)
                             }
-                            Spacer()
+                            if let document = item.document?.text ?? rankedDocument(index: item.index, in: rankedDocuments) {
+                                Text(document)
+                                    .font(.caption).textSelection(.enabled)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                            } else if item.document?.image != nil {
+                                Text("Image document (URL omitted)").font(.caption).foregroundStyle(.secondary)
+                            } else {
+                                Text("Document index unavailable").font(.caption).foregroundStyle(.orange)
+                            }
                         }
                         .padding(8)
                         .background(Color.primary.opacity(0.04))
@@ -617,46 +1134,78 @@ struct EmbeddingsView: View {
 
     private var canEmbed: Bool {
         !inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            && !modelId.isEmpty && !service.isWorking && KeychainManager.hasAPIKey
+            && !modelId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && (requestedDimensions.isEmpty || (Int(requestedDimensions).map { $0 > 0 } ?? false))
+            && !service.isWorking && !isSaving && KeychainManager.hasAPIKey
     }
 
     private var canRerank: Bool {
         !rerankQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             && !rerankDocs.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            && !service.isWorking && KeychainManager.hasAPIKey
+            && !rerankModelId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && (topN.isEmpty || (Int(topN).map { $0 > 0 } ?? false))
+            && !service.isWorking && !isSaving && KeychainManager.hasAPIKey
     }
 
     private func embed() {
         guard canEmbed else { return }
         errorMessage = nil
+        let model = modelId.trimmingCharacters(in: .whitespacesAndNewlines)
+        let inputs = inputText.components(separatedBy: .newlines)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
+        vectors = []
+        embedUsage = nil
+        pendingEmbedding = nil
         Task {
             do {
-                let response = try await service.embed(EmbeddingRequest(model: modelId, input: [inputText]))
-                await MainActor.run {
-                    dimensions = response.data.first?.embedding ?? []
-                    embedUsage = response.usage
-                }
-            } catch is CancellationError {
-                // Leave prior embedding alone on cancellation.
-            } catch {
-                await MainActor.run { errorMessage = error.localizedDescription }
-            }
+                var request = EmbeddingRequest(model: model, input: inputs)
+                request.dimensions = Int(requestedDimensions)
+                request.inputType = inputType.isEmpty ? nil : inputType
+                request.encodingFormat = "float"
+                let response = try await service.embed(request)
+                let ordered = try orderedEmbeddingVectors(response.data, inputCount: inputs.count)
+                vectors = zip(inputs, ordered).map { (input: $0.0, embedding: $0.1) }
+                embedUsage = response.usage
+                let records = zip(inputs, ordered).map { ["input": $0.0, "embedding": $0.1] as [String: Any] }
+                let payload = try JSONSerialization.data(withJSONObject: ["items": records], options: [.prettyPrinted, .sortedKeys])
+                let pending = (payload: payload, model: model, prompt: inputs.joined(separator: " · "))
+                pendingEmbedding = pending
+                await saveEmbedding(pending)
+            } catch is CancellationError { }
+            catch { errorMessage = error.localizedDescription }
         }
+    }
+
+    private func saveEmbedding(_ pending: (payload: Data, model: String, prompt: String)) async {
+        guard !isSaving else { return }
+        isSaving = true
+        defer { isSaving = false }
+        do {
+            _ = try await creations.save(pending.payload, mimeType: "application/json", kind: .embedding,
+                                         modelID: pending.model, prompt: pending.prompt)
+            pendingEmbedding = nil
+            errorMessage = nil
+        } catch { errorMessage = "Vectors returned, but local save failed: \(error.localizedDescription)" }
     }
 
     private func rerank() {
         guard canRerank else { return }
         errorMessage = nil
         let docs = rerankDocs.components(separatedBy: .newlines).filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty }
+        let model = rerankModelId.trimmingCharacters(in: .whitespacesAndNewlines)
+        let query = rerankQuery
+        rerankResults = []
+        rerankUsage = nil
+        rerankProvider = nil
         Task {
             do {
-                // Rerank models live in the chat catalog; reuse the embedding
-                // model field's prefix family when the user pastes one, else
-                // fall back to a documented rerank-capable default is on them.
                 let response = try await service.rerank(RerankRequest(
-                    model: modelId, query: rerankQuery, documents: docs, topN: min(docs.count, 10)
+                    model: model, query: query, documents: docs, topN: Int(topN)
                 ))
-                await MainActor.run { rerankResults = response.results }
+                rankedDocuments = docs
+                rerankResults = response.results
+                rerankUsage = response.usage
+                rerankProvider = response.provider
             } catch is CancellationError {
                 // Leave prior ranking alone on cancellation.
             } catch {
@@ -664,4 +1213,25 @@ struct EmbeddingsView: View {
             }
         }
     }
+}
+
+/// API indices refer to the exact submitted array, before any score sort.
+func orderedEmbeddingVectors(_ items: [EmbeddingResponse.Item], inputCount: Int) throws -> [[Double]] {
+    guard items.count == inputCount else {
+        throw MediaServiceError.decoding("Embedding response count does not match the inputs.")
+    }
+    var mapped: [Int: [Double]] = [:]
+    for (position, item) in items.enumerated() {
+        let index = item.index ?? position
+        guard (0..<inputCount).contains(index), mapped[index] == nil else {
+            throw MediaServiceError.decoding("Embedding response index is invalid or duplicated.")
+        }
+        mapped[index] = item.embedding
+    }
+    return (0..<inputCount).map { mapped[$0]! }
+}
+
+/// API indices refer to the exact submitted array, before any score sort.
+func rankedDocument(index: Int, in documents: [String]) -> String? {
+    documents.indices.contains(index) ? documents[index] : nil
 }

@@ -14,12 +14,16 @@ final class ChatService: ObservableObject {
     @Published var activeConversation: ChatConversation?
     @Published private(set) var runState = PlaygroundRunState()
     @Published var streamingContent = ""
-    @Published var lastError: String?
+    @Published var lastError: String? {
+        didSet { lastErrorConversationID = nil }
+    }
+    private(set) var lastErrorConversationID: UUID?
     @Published var lastUsage: ChatUsage?
     @Published var activityLabel = ""
     @Published var tokensPerSecond: Double = 0
 
     private(set) var contentPublishCount = 0
+    private var reasoningActiveRunID: UUID?
     var isStreaming: Bool { runState.isActive }
 
     // MARK: - Streaming cadence
@@ -34,20 +38,16 @@ final class ChatService: ObservableObject {
     // display rate AND fired a follow-scroll each frame; on longer answers
     // the layout work exceeded the frame budget and text visibly stuttered.
     // Why not slower: beyond ~50ms the first paint feels laggy on quick
-    // answers. 33ms with a small backstop is the sweet spot. Keep the test
-    // `contentPublishCount < 20` for 1,000 deltas green when touching these.
+    // answers. 33ms with a 512-character backstop keeps fast model bursts
+    // under a display-frame cadence without delaying the first token.
+    // The burst tests assert <60 publishes for 1,000 medium-sized deltas.
 
     /// Minimum wall-clock gap between UI publishes during streaming.
     static let streamFrameInterval: Duration = .milliseconds(33)
-    /// Safety valve for oversized bursts: if a provider hands us a very large
-    /// chunk (or many deltas inside one frame), render rather than hold it.
-    ///
-    /// Deliberately well above a typical token. A small value here would fire on
-    /// nearly every delta and defeat time-based coalescing entirely, producing
-    /// hundreds of redundant redraws per response. 120 chars is ~30 tokens —
-    /// small enough that a fast model still paints several times a second,
-    /// large enough that single-token drips coalesce into frame-rate frames.
-    static let streamFlushCharacters = 120
+    /// Safety valve for unusually large network chunks. This must stay well
+    /// above a normal token; a 120-character valve painted 126 times for just
+    /// 1,000 medium-sized deltas, bypassing the 33ms cadence.
+    static let streamFlushCharacters = 512
     /// Minimum gap between SQLite checkpoints while a run is in flight.
     static let streamCheckpointInterval: Duration = .milliseconds(750)
 
@@ -59,16 +59,27 @@ final class ChatService: ObservableObject {
         isRunning(conversationID: conversationID) && runState.context?.assistantMessageID == messageID
     }
 
+    func isReasoningMessage(_ messageID: UUID, conversationID: UUID) -> Bool {
+        isStreamingMessage(messageID, conversationID: conversationID)
+            && reasoningActiveRunID == runState.context?.runID
+    }
+
     private let client: any OpenRouterClientProtocol
     private let store: any ConversationStore
     private let apiKeyProvider: () -> String?
+    private let agentMaximumTurns: Int
     private var streamTask: Task<Void, Never>?
     private var agentHistories: [UUID: [AgentAPIMessage]] = [:]
     private var agentPendingContent = ""
+    private var agentNeedsTurnSeparator = false
     private var agentReasoningContent = ""
     private var agentReasoningDetails: [ReasoningDetail] = []
+    private(set) var agentCumulativeUsage: ChatUsage?
     private var agentContentCoalescer: StreamPublishCoalescer<String>?
     private var agentReasoningCoalescer: StreamPublishCoalescer<String>?
+    private var agentDetailCoalescer: StreamPublishCoalescer<[ReasoningDetail]>?
+    private var agentToolPreviews: [AssembledAgentToolCall] = []
+    private var agentToolPreviewCoalescer: StreamPublishCoalescer<[AssembledAgentToolCall]>?
     private var regenerationBackups: [UUID: ChatMessage] = [:]
     private var lastCheckpoint: ContinuousClock.Instant?
 
@@ -79,11 +90,13 @@ final class ChatService: ObservableObject {
     init(
         client: any OpenRouterClientProtocol,
         store: any ConversationStore,
-        apiKeyProvider: @escaping () -> String?
+        apiKeyProvider: @escaping () -> String?,
+        agentMaximumTurns: Int = 100
     ) {
         self.client = client
         self.store = store
         self.apiKeyProvider = apiKeyProvider
+        self.agentMaximumTurns = agentMaximumTurns
         loadPersistedConversations()
     }
 
@@ -282,8 +295,15 @@ final class ChatService: ObservableObject {
         ) { [weak self] reasoning in
             self?.publishReasoning(reasoning, context: context)
         }
+        let detailCoalescer = StreamPublishCoalescer<[ReasoningDetail]>(
+            interval: Self.streamFrameInterval,
+            characterBackstop: Self.streamFlushCharacters
+        ) { [weak self] details in
+            self?.publishReasoningDetails(details, context: context)
+        }
         do {
             let stream = try await client.stream(request)
+            try Task.checkCancellation()
             guard owns(context.runID) else { return }
             runState.phase = .streaming
             activityLabel = "Streaming…"
@@ -292,14 +312,18 @@ final class ChatService: ObservableObject {
                 guard owns(context.runID) else { return }
                 switch event {
                 case .contentDelta(let choice, let text) where choice == 0:
+                    if !text.isEmpty { freezeReasoningDuration(context) }
+                    reasoningCoalescer.flush()
                     fullContent += text
                     contentCoalescer.submit(fullContent, addedCharacters: text.count)
                 case .reasoningDelta(let choice, let text) where choice == 0:
+                    if !text.isEmpty { markReasoningStarted(context) }
+                    contentCoalescer.flush()
                     reasoningContent += text
                     reasoningCoalescer.submit(reasoningContent, addedCharacters: text.count)
                 case .reasoningDetails(let choice, let details) where choice == 0:
                     reasoningDetailBlocks += details
-                    _ = mutateMessage(context, mutation: { $0.reasoningDetails = reasoningDetailBlocks })
+                    detailCoalescer.submit(reasoningDetailBlocks, addedCharacters: details.count)
                 case .imageDelta(let choice, let imageURL) where choice == 0:
                     // Dedupe: some providers re-emit the same image URL.
                     if !streamedImages.contains(where: { $0.dataURL == imageURL }) {
@@ -313,6 +337,7 @@ final class ChatService: ObservableObject {
                 case .apiError(let error):
                     contentCoalescer.flush()
                     reasoningCoalescer.flush()
+                    detailCoalescer.flush()
                     if fullContent.isEmpty, restoreRegeneration(context, message: error.message) { return }
                     fail(context: context, message: error.message, status: .failed, finishReason: finishReason, usage: latestUsage)
                     return
@@ -321,6 +346,7 @@ final class ChatService: ObservableObject {
             }
             contentCoalescer.flush()
             reasoningCoalescer.flush()
+            detailCoalescer.flush()
             guard owns(context.runID) else { return }
             // Image-only turns (image-output models) are complete even with
             // no text — the images are the answer.
@@ -337,12 +363,14 @@ final class ChatService: ObservableObject {
             guard owns(context.runID) else { return }
             contentCoalescer.flush()
             reasoningCoalescer.flush()
+            detailCoalescer.flush()
             if fullContent.isEmpty, restoreRegeneration(context, message: "Regeneration was cancelled.") { return }
             finish(context: context, status: .interrupted, finishReason: "cancelled", usage: latestUsage)
         } catch {
             guard owns(context.runID) else { return }
             contentCoalescer.flush()
             reasoningCoalescer.flush()
+            detailCoalescer.flush()
             if fullContent.isEmpty, restoreRegeneration(context, message: error.localizedDescription) { return }
             fail(context: context, message: error.localizedDescription, status: .interrupted, finishReason: finishReason, usage: latestUsage)
         }
@@ -357,11 +385,36 @@ final class ChatService: ObservableObject {
     /// 750ms timer via `checkpoint(context)`, because a disk write per frame
     /// janked layout on longer answers.
     private func publish(content: String, context: PlaygroundRunContext) {
-        guard owns(context.runID), mutateMessage(context, mutation: { $0.content = content }) else { return }
+        guard owns(context.runID), mutateMessage(context, mutation: { message in
+            let delta = String(content.dropFirst(message.content.count))
+            message.recordTranscript(.text, text: delta)
+            message.content = content
+        }) else { return }
         streamingContent = content
         contentPublishCount += 1
         synchronizeActive(context.conversationID)
         checkpoint(context)
+    }
+
+    /// Track only active reasoning segments, not time spent showing an answer
+    /// or using tools between Agent turns. Each boundary publishes once, while
+    /// the many deltas inside a segment remain coalesced by the frame timer.
+    private func markReasoningStarted(_ context: PlaygroundRunContext) {
+        guard owns(context.runID), reasoningActiveRunID != context.runID else { return }
+        reasoningActiveRunID = context.runID
+        _ = mutateMessage(context) { message in
+            message.reasoningStartedAt = Date()
+        }
+    }
+
+    private func freezeReasoningDuration(_ context: PlaygroundRunContext) {
+        guard owns(context.runID), reasoningActiveRunID == context.runID else { return }
+        reasoningActiveRunID = nil
+        _ = mutateMessage(context) { message in
+            guard let start = message.reasoningStartedAt else { return }
+            message.reasoningDuration = (message.reasoningDuration ?? 0)
+                + max(0, Date().timeIntervalSince(start))
+        }
     }
 
     /// Publishes streamed chain-of-thought. Kept separate from `publish` so
@@ -369,8 +422,20 @@ final class ChatService: ObservableObject {
     /// is not worth persisting on every frame.
     private func publishReasoning(_ reasoning: String, context: PlaygroundRunContext) {
         guard owns(context.runID) else { return }
-        _ = mutateMessage(context, mutation: { $0.reasoning = reasoning })
+        _ = mutateMessage(context, mutation: { message in
+            let delta = String(reasoning.dropFirst((message.reasoning ?? "").count))
+            message.recordTranscript(.reasoning, text: delta)
+            message.reasoning = reasoning
+        })
         synchronizeActive(context.conversationID)
+    }
+
+    /// Opaque reasoning blocks are wire state, not visible text. Coalesce their
+    /// model writes alongside display reasoning so dense detail streams cannot
+    /// invalidate the full conversation once per token.
+    private func publishReasoningDetails(_ details: [ReasoningDetail], context: PlaygroundRunContext) {
+        guard owns(context.runID) else { return }
+        _ = mutateMessage(context, mutation: { $0.reasoningDetails = details })
     }
 
     private func finish(
@@ -380,6 +445,7 @@ final class ChatService: ObservableObject {
         usage: ChatUsage?
     ) {
         guard owns(context.runID) else { return }
+        freezeReasoningDuration(context)
         _ = mutateMessage(context, mutation: {
             $0.status = status
             $0.finishReason = finishReason
@@ -397,12 +463,14 @@ final class ChatService: ObservableObject {
         usage: ChatUsage?
     ) {
         guard owns(context.runID) else { return }
+        freezeReasoningDuration(context)
         _ = mutateMessage(context, mutation: {
             $0.status = status
             $0.finishReason = finishReason
             $0.errorMessage = message
         })
         lastError = message
+        lastErrorConversationID = context.conversationID
         apply(usage: usage, to: context)
         runState.phase = status == .failed ? .failed(message) : .interrupted(message)
         terminalCleanup(context)
@@ -413,6 +481,7 @@ final class ChatService: ObservableObject {
         guard let backup = regenerationBackups.removeValue(forKey: context.runID),
               mutateMessage(context, mutation: { $0 = backup }) else { return false }
         lastError = message
+        lastErrorConversationID = context.conversationID
         runState.phase = .failed(message)
         terminalCleanup(context)
         return true
@@ -439,7 +508,17 @@ final class ChatService: ObservableObject {
     }
 
     private func terminalCleanup(_ context: PlaygroundRunContext) {
+        reasoningActiveRunID = nil
         regenerationBackups[context.runID] = nil
+        agentContentCoalescer?.cancel()
+        agentReasoningCoalescer?.cancel()
+        agentDetailCoalescer?.cancel()
+        agentToolPreviewCoalescer?.cancel()
+        agentContentCoalescer = nil
+        agentReasoningCoalescer = nil
+        agentDetailCoalescer = nil
+        agentToolPreviewCoalescer = nil
+        agentToolPreviews.removeAll()
         synchronizeActive(context.conversationID)
         persist(context.conversationID)
         streamingContent = ""
@@ -512,8 +591,11 @@ final class ChatService: ObservableObject {
         tokensPerSecond = 0
         contentPublishCount = 0
         agentPendingContent = ""
+        agentNeedsTurnSeparator = false
         agentReasoningContent = ""
         agentReasoningDetails = []
+        agentCumulativeUsage = nil
+        agentToolPreviews = []
         lastCheckpoint = nil
         agentContentCoalescer = StreamPublishCoalescer<String>(
             interval: Self.streamFrameInterval,
@@ -527,6 +609,18 @@ final class ChatService: ObservableObject {
         ) { [weak self] reasoning in
             self?.publishReasoning(reasoning, context: context)
         }
+        agentDetailCoalescer = StreamPublishCoalescer<[ReasoningDetail]>(
+            interval: Self.streamFrameInterval,
+            characterBackstop: Self.streamFlushCharacters
+        ) { [weak self] details in
+            self?.publishReasoningDetails(details, context: context)
+        }
+        agentToolPreviewCoalescer = StreamPublishCoalescer<[AssembledAgentToolCall]>(
+            interval: Self.streamFrameInterval,
+            characterBackstop: Self.streamFlushCharacters
+        ) { [weak self] calls in
+            self?.publishAgentToolPreviews(calls, context: context)
+        }
         let history = agentHistories[conversationID] ?? []
         let customPrompt = conversations[index].systemPrompt
         streamTask = Task { [weak self] in
@@ -537,61 +631,102 @@ final class ChatService: ObservableObject {
                     fullComputerAccess: fullComputerAccess, history: history,
                     systemPromptOverride: customPrompt.isEmpty ? nil : customPrompt,
                     client: self.client,
+                    maximumTurns: self.agentMaximumTurns,
                     onEvent: { event in await self.receiveAgent(event, context: context) }
                 )
                 guard self.owns(context.runID) else { return }
                 self.flushAgentStreams()
                 // Note a force-summarized run so the user knows the answer was
                 // capped rather than naturally concluded.
+                // Preserve text the user already saw during earlier tool turns;
+                // replacing it with only the final turn makes prose disappear.
+                let visibleResponse = self.agentPendingContent.hasSuffix(result.response)
+                    ? self.agentPendingContent
+                    : (self.agentPendingContent.isEmpty ? result.response : self.agentPendingContent + "\n\n" + result.response)
                 let body = result.hitToolBudget
-                    ? result.response + "\n\n---\n_Note: this run reached its tool-call budget, so the summary above may be incomplete._"
-                    : result.response
-                _ = self.mutateMessage(context, mutation: { $0.content = body })
+                    ? visibleResponse + "\n\n---\n_Note: this run reached its tool-call budget, so the summary above may be incomplete._"
+                    : visibleResponse
+                _ = self.mutateMessage(context, mutation: { message in
+                    message.recordTranscript(.text, text: String(body.dropFirst(message.content.count)))
+                    message.content = body
+                })
                 self.synchronizeActive(context.conversationID)
                 self.agentHistories[conversationID] = result.history
-                self.finish(context: context, status: .complete, finishReason: "stop", usage: result.usage)
+                self.finish(
+                    context: context,
+                    status: result.finishReason == "length" ? .truncated : .complete,
+                    finishReason: result.finishReason ?? "stop",
+                    usage: result.usage
+                )
             } catch is CancellationError {
                 guard self.owns(context.runID) else { return }
                 self.flushAgentStreams()
                 self.rebuildAgentHistory(for: context.conversationID)
-                self.finish(context: context, status: .interrupted, finishReason: "cancelled", usage: nil)
+                self.finish(context: context, status: .interrupted, finishReason: "cancelled", usage: self.agentCumulativeUsage)
             } catch {
                 guard self.owns(context.runID) else { return }
                 self.flushAgentStreams()
                 self.rebuildAgentHistory(for: context.conversationID)
-                self.fail(context: context, message: error.localizedDescription, status: .failed, finishReason: nil, usage: nil)
+                self.fail(context: context, message: error.localizedDescription, status: .failed, finishReason: nil, usage: self.agentCumulativeUsage)
             }
         }
     }
 
     private func receiveAgent(_ event: NativeAgentEvent, context: PlaygroundRunContext) {
-        guard owns(context.runID) else { return }
+        guard owns(context.runID), !Task.isCancelled else { return }
         switch event {
+        case .usage(_, let cumulative):
+            agentCumulativeUsage = cumulative
+        case .modelTurnStarted:
+            flushAgentStreams()
+            freezeReasoningDuration(context)
+            agentToolPreviewCoalescer?.flush()
+            agentToolPreviews.removeAll(keepingCapacity: true)
+            agentNeedsTurnSeparator = !agentPendingContent.isEmpty
+            if runState.phase != .connecting { runState.phase = .connecting }
+            activityLabel = "Thinking…"
         case .textDelta(let text):
+            agentReasoningCoalescer?.flush()
+            agentToolPreviewCoalescer?.flush()
+            if !text.isEmpty { freezeReasoningDuration(context) }
+            var addedCharacters = text.count
+            if agentNeedsTurnSeparator && !text.isEmpty {
+                agentPendingContent += "\n\n"
+                agentNeedsTurnSeparator = false
+                addedCharacters += 2
+            }
             agentPendingContent += text
-            agentContentCoalescer?.submit(agentPendingContent, addedCharacters: text.count)
-            runState.phase = .streaming
+            agentContentCoalescer?.submit(agentPendingContent, addedCharacters: addedCharacters)
+            if !text.isEmpty, activityLabel != "Writing response…" { activityLabel = "Writing response…" }
+            if runState.phase != .streaming { runState.phase = .streaming }
         case .reasoningDelta(let text):
+            agentContentCoalescer?.flush()
+            agentToolPreviewCoalescer?.flush()
+            if !text.isEmpty { markReasoningStarted(context) }
             agentReasoningContent += text
             agentReasoningCoalescer?.submit(agentReasoningContent, addedCharacters: text.count)
+            if !text.isEmpty, activityLabel != "Thinking…" { activityLabel = "Thinking…" }
+            if runState.phase != .streaming { runState.phase = .streaming }
         case .reasoningDetails(let details):
             agentReasoningDetails += details
-            _ = mutateMessage(context, mutation: { $0.reasoningDetails = agentReasoningDetails })
+            agentDetailCoalescer?.submit(agentReasoningDetails, addedCharacters: details.count)
         case .toolCallUpdated(let call):
-            _ = mutateMessage(context, mutation: { message in
-                var calls = message.toolCalls ?? []
-                let display = ToolCallDisplay(
-                    id: call.id,
-                    name: call.name,
-                    argumentsSummary: String(call.arguments.prefix(200)),
-                    arguments: call.arguments
-                )
-                if let i = calls.firstIndex(where: { $0.id == call.id }) { calls[i] = display } else { calls.append(display) }
-                message.toolCalls = calls
-            })
-            synchronizeActive(context.conversationID)
-            activityLabel = "Calling \(call.name)…"
+            agentContentCoalescer?.flush()
+            agentReasoningCoalescer?.flush()
+            freezeReasoningDuration(context)
+            let addedCharacters: Int
+            if let index = agentToolPreviews.firstIndex(where: { $0.id == call.id }) {
+                let previous = agentToolPreviews[index]
+                addedCharacters = max(0, call.arguments.count - previous.arguments.count)
+                    + max(0, call.name.count - previous.name.count)
+                agentToolPreviews[index] = call
+            } else {
+                addedCharacters = call.arguments.count + call.name.count
+                agentToolPreviews.append(call)
+            }
+            agentToolPreviewCoalescer?.submit(agentToolPreviews, addedCharacters: addedCharacters)
         case .toolExecutionStarted(let call):
+            agentToolPreviewCoalescer?.flush()
             _ = mutateMessage(context, mutation: { message in
                 guard var calls = message.toolCalls,
                       let index = calls.firstIndex(where: { $0.id == call.id }) else { return }
@@ -602,6 +737,7 @@ final class ChatService: ObservableObject {
             runState.phase = .executingTool(call.name)
             activityLabel = "Running \(call.name)…"
         case .toolResult(let call, let result):
+            agentToolPreviewCoalescer?.flush()
             _ = mutateMessage(context, mutation: { message in
                 guard var calls = message.toolCalls,
                       let index = calls.firstIndex(where: { $0.id == call.id }) else { return }
@@ -616,16 +752,55 @@ final class ChatService: ObservableObject {
             // otherwise hit the disk once per call. The final state is always
             // flushed by terminalCleanup at completion.
             checkpoint(context)
+            activityLabel = "Tool complete · continuing…"
+        case .turnFinished:
+            flushAgentStreams()
+            freezeReasoningDuration(context)
+            agentToolPreviewCoalescer?.flush()
         case .finalizing:
-            runState.phase = .streaming
+            flushAgentStreams()
+            freezeReasoningDuration(context)
+            // This tool-free summary starts a new model turn without
+            // .modelTurnStarted; keep earlier visible prose as its own block.
+            agentNeedsTurnSeparator = !agentPendingContent.isEmpty
+            if runState.phase != .streaming { runState.phase = .streaming }
             activityLabel = "Wrapping up — summarizing results…"
         default: break
         }
     }
 
+    private func publishAgentToolPreviews(_ previews: [AssembledAgentToolCall], context: PlaygroundRunContext) {
+        guard owns(context.runID), !previews.isEmpty else { return }
+        _ = mutateMessage(context) { message in
+            var cards = message.toolCalls ?? []
+            for call in previews {
+                message.recordTranscriptTool(call.id)
+                if let index = cards.firstIndex(where: { $0.id == call.id }) {
+                    // Updating arguments must not erase execution/result state.
+                    cards[index].name = call.name
+                    cards[index].arguments = call.arguments
+                    cards[index].argumentsSummary = String(call.arguments.prefix(200))
+                } else {
+                    cards.append(.init(
+                        id: call.id, name: call.name,
+                        argumentsSummary: String(call.arguments.prefix(200)),
+                        arguments: call.arguments
+                    ))
+                }
+            }
+            message.toolCalls = cards
+        }
+        synchronizeActive(context.conversationID)
+        if let last = previews.last { activityLabel = "Calling \(last.name)…" }
+    }
+
     private func publishAgentContent(_ content: String, context: PlaygroundRunContext) {
         guard owns(context.runID) else { return }
-        _ = mutateMessage(context, mutation: { $0.content = content })
+        _ = mutateMessage(context, mutation: { message in
+            let delta = String(content.dropFirst(message.content.count))
+            message.recordTranscript(.text, text: delta)
+            message.content = content
+        })
         streamingContent = content
         contentPublishCount += 1
         synchronizeActive(context.conversationID)
@@ -635,6 +810,8 @@ final class ChatService: ObservableObject {
     private func flushAgentStreams() {
         agentContentCoalescer?.flush()
         agentReasoningCoalescer?.flush()
+        agentDetailCoalescer?.flush()
+        agentToolPreviewCoalescer?.flush()
     }
 
     func exportActiveConversation() -> String? {

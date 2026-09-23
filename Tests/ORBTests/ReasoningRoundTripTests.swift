@@ -254,7 +254,9 @@ struct ReasoningDetailsDatabaseTests {
         var conversation = ChatConversation(modelId: "test/model", mode: .chat)
         conversation.messages = [
             ChatMessage(role: "user", content: "hi"),
-            ChatMessage(role: "assistant", content: "answer", reasoning: "Step one: read the file.", reasoningDetails: details),
+            ChatMessage(role: "assistant", content: "answer", reasoning: "Step one: read the file.",
+                        reasoningStartedAt: Date(timeIntervalSince1970: 1_000), reasoningDuration: 3.25,
+                        reasoningDetails: details),
         ]
         try db.saveConversationRecordChecked(conversation, agentHistoryJSON: "[]")
 
@@ -263,6 +265,9 @@ struct ReasoningDetailsDatabaseTests {
         // A message without reasoning details is unaffected.
         #expect(loaded[0].reasoningDetails == nil)
         #expect(loaded[1].reasoningDetails == details)
+        #expect(loaded[1].reasoning == "Step one: read the file.")
+        #expect(loaded[1].reasoningStartedAt == Date(timeIntervalSince1970: 1_000))
+        #expect(loaded[1].reasoningDuration == 3.25)
 
         // Canonical JSON equality: order, unknown keys, and opaque values exact.
         let original = try canonicalJSON(try JSONSerialization.jsonObject(with: Data(fixtureDetailsJSON.utf8)))

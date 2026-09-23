@@ -1,4 +1,5 @@
 import Foundation
+import Combine
 import Testing
 @testable import ORB
 
@@ -62,16 +63,70 @@ struct ChatServiceTests {
     private func service(
         scripts: [ScriptedOpenRouterClient.Script],
         store suppliedStore: MemoryConversationStore? = nil,
-        apiKey: String? = "fixture-key"
+        apiKey: String? = "fixture-key",
+        agentMaximumTurns: Int = 100
     ) -> (ChatService, ScriptedOpenRouterClient, MemoryConversationStore) {
         let store = suppliedStore ?? MemoryConversationStore()
         let client = ScriptedOpenRouterClient(scripts)
-        return (ChatService(client: client, store: store, apiKeyProvider: { apiKey }), client, store)
+        return (ChatService(client: client, store: store, apiKeyProvider: { apiKey }, agentMaximumTurns: agentMaximumTurns), client, store)
     }
 
     private func waitUntilIdle(_ service: ChatService) async throws {
         for _ in 0..<500 where service.isStreaming { try await Task.sleep(for: .milliseconds(2)) }
         #expect(!service.isStreaming)
+    }
+
+    @Test("Agent transcript preserves reasoning, commentary, tool, reasoning, answer order")
+    func inlineTranscriptOrder() async throws {
+        let (service, _, store) = service(scripts: [
+            .init(events: [
+                .reasoningDelta(choiceIndex: 0, text: "First thought"),
+                .contentDelta(choiceIndex: 0, text: "Checking now."),
+                .toolCallFragment(choiceIndex: 0, toolIndex: 0, id: "inline-tool", type: "function", name: "unknown_tool", arguments: "{}"),
+                .finishReason(choiceIndex: 0, reason: "tool_calls"), .done
+            ]),
+            .init(events: [.reasoningDelta(choiceIndex: 0, text: "Second thought"), .contentDelta(choiceIndex: 0, text: "Final answer."), .done])
+        ])
+        await service.sendAgentMessage("hello", modelId: "test/model", workspace: FileManager.default.temporaryDirectory.path, fullComputerAccess: false)
+        try await waitUntilIdle(service)
+        let message = try #require(service.activeConversation?.messages.last)
+        let json = try #require(JSONSerialization.jsonObject(with: JSONEncoder().encode(message)) as? [String: Any])
+        let segments = json["transcript"] as? [[String: Any]] ?? []
+        #expect(segments.compactMap { $0["kind"] as? String } == ["reasoning", "text", "tool", "reasoning", "text"])
+        #expect(segments.compactMap { $0["text"] as? String }.filter { !$0.isEmpty } == ["First thought", "Checking now.", "Second thought", "\n\nFinal answer."])
+        #expect(store.records.values.first?.conversation.messages.last == message)
+    }
+
+    @Test("Agent activity switches from thinking to writing with answer text")
+    func inlineActivityMatchesPhase() async throws {
+        let (service, _, _) = service(scripts: [.init(events: [
+            .reasoningDelta(choiceIndex: 0, text: "Thinking"),
+            .contentDelta(choiceIndex: 0, text: "Answer"), .done
+        ], delay: .milliseconds(100))])
+        await service.sendAgentMessage("hello", modelId: "test/model", workspace: FileManager.default.temporaryDirectory.path, fullComputerAccess: false)
+        for _ in 0..<200 {
+            if service.activeConversation?.messages.last?.content == "Answer" { break }
+            try await Task.sleep(for: .milliseconds(2))
+        }
+        #expect(service.isStreaming)
+        #expect(service.activityLabel == "Writing response…")
+        try await waitUntilIdle(service)
+    }
+
+    @Test("Chat transcript keeps alternating channels and exact whitespace")
+    func directTranscriptOrder() async throws {
+        let (service, _, _) = service(scripts: [.init(events: [
+            .reasoningDelta(choiceIndex: 0, text: "First"),
+            .contentDelta(choiceIndex: 0, text: "One\n"),
+            .contentDelta(choiceIndex: 0, text: "\nTwo"),
+            .reasoningDelta(choiceIndex: 0, text: "Next"),
+            .contentDelta(choiceIndex: 0, text: "Three"), .done
+        ])])
+        service.sendMessage("hello", modelId: "test/model")
+        try await waitUntilIdle(service)
+        let message = try #require(service.activeConversation?.messages.last)
+        #expect(message.displayTranscript.map(\.kind) == [.reasoning, .text, .reasoning, .text])
+        #expect(message.displayTranscript.filter { $0.kind == .text }.map(\.text).joined() == message.content)
     }
 
     @Test("first Chat send creates a Chat conversation")
@@ -283,9 +338,9 @@ struct ChatServiceTests {
         #expect(service.tokensPerSecond > 0)
     }
 
-    @Test("hundreds of deltas are lossless and coalesced")
+    @Test("fast bursts of medium deltas stay lossless and below display cadence")
     func coalescedDeltas() async throws {
-        let pieces = (0..<1_000).map { "\($0)," }
+        let pieces = (0..<1_000).map { "segment-\($0)-body," }
         let events = pieces.map { OpenRouterStreamEvent.contentDelta(choiceIndex: 0, text: $0) } + [.done]
         let (service, _, _) = service(scripts: [.init(events: events)])
         await service.sendMessage("hello", modelId: "test/model")
@@ -317,11 +372,14 @@ struct ChatServiceTests {
         try await waitUntilIdle(service)
     }
 
-    @Test("agent deltas are lossless and coalesced")
+    @Test("agent fast bursts stay lossless and below display cadence")
     func coalescedAgentDeltas() async throws {
-        let pieces = (0..<1_000).map { "\($0)," }
+        let pieces = (0..<1_000).map { "segment-\($0)-body," }
         let events = pieces.map { OpenRouterStreamEvent.contentDelta(choiceIndex: 0, text: $0) } + [.done]
         let (service, _, _) = service(scripts: [.init(events: events)])
+        var phasePublishes = 0
+        let subscription = service.$runState.sink { _ in phasePublishes += 1 }
+        defer { subscription.cancel() }
 
         await service.sendAgentMessage(
             "hello",
@@ -333,6 +391,68 @@ struct ChatServiceTests {
 
         #expect(service.activeConversation?.messages.last?.content == pieces.joined())
         #expect(service.contentPublishCount < 60)
+        #expect(phasePublishes < 20, "An unchanged phase must not invalidate the view per token")
+    }
+
+    @Test("Agent preserves visible prose from earlier tool turns")
+    func agentKeepsEarlierProse() async throws {
+        let (service, _, _) = service(scripts: [
+            .init(events: [
+                .contentDelta(choiceIndex: 0, text: "I will check."),
+                .toolCallFragment(choiceIndex: 0, toolIndex: 0, id: "call-1", type: "function", name: "unknown_tool", arguments: "{}"),
+                .finishReason(choiceIndex: 0, reason: "tool_calls"), .done
+            ]),
+            .init(events: [.contentDelta(choiceIndex: 0, text: "Done."), .done])
+        ])
+        await service.sendAgentMessage("hello", modelId: "test/model", workspace: FileManager.default.temporaryDirectory.path, fullComputerAccess: false)
+        try await waitUntilIdle(service)
+        #expect(service.activeConversation?.messages.last?.content == "I will check.\n\nDone.")
+    }
+
+    @Test("budget summary remains separate from earlier tool-turn prose")
+    func agentBudgetSummaryKeepsParagraphBoundary() async throws {
+        let (service, _, _) = service(scripts: [
+            .init(events: [
+                .contentDelta(choiceIndex: 0, text: "Need to check."),
+                .toolCallFragment(choiceIndex: 0, toolIndex: 0, id: "call-1", type: "function", name: "unknown_tool", arguments: "{}"),
+                .finishReason(choiceIndex: 0, reason: "tool_calls"), .done
+            ]),
+            .init(events: [.contentDelta(choiceIndex: 0, text: "Summary."), .done])
+        ], agentMaximumTurns: 1)
+        await service.sendAgentMessage("hello", modelId: "test/model", workspace: FileManager.default.temporaryDirectory.path, fullComputerAccess: false)
+        try await waitUntilIdle(service)
+        let body = try #require(service.activeConversation?.messages.last?.content)
+        #expect(body.hasPrefix("Need to check.\n\nSummary.\n\n---"))
+        #expect(body.contains("tool-call budget"))
+    }
+
+    @Test("tool argument fragments are lossless without publishing every fragment")
+    func coalescedToolPreviews() async throws {
+        let start = OpenRouterStreamEvent.toolCallFragment(
+            choiceIndex: 0, toolIndex: 0, id: "call-1", type: "function",
+            name: "unknown_tool", arguments: "{\"value\":\""
+        )
+        let fragment = OpenRouterStreamEvent.toolCallFragment(
+            choiceIndex: 0, toolIndex: 0, id: nil, type: nil, name: nil, arguments: "a"
+        )
+        let end = OpenRouterStreamEvent.toolCallFragment(
+            choiceIndex: 0, toolIndex: 0, id: nil, type: nil, name: nil, arguments: "\"}"
+        )
+        let events = [start] + Array(repeating: fragment, count: 1_000) + [
+            end, .finishReason(choiceIndex: 0, reason: "tool_calls"), .done
+        ]
+        let (service, _, _) = service(scripts: [
+            .init(events: events),
+            .init(events: [.contentDelta(choiceIndex: 0, text: "done"), .done])
+        ])
+        var conversationPublishes = 0
+        let subscription = service.$activeConversation.sink { _ in conversationPublishes += 1 }
+        defer { subscription.cancel() }
+        await service.sendAgentMessage("hello", modelId: "test/model", workspace: FileManager.default.temporaryDirectory.path, fullComputerAccess: false)
+        try await waitUntilIdle(service)
+        let call = try #require(service.activeConversation?.messages.last?.toolCalls?.first)
+        #expect(call.arguments == "{\"value\":\"\(String(repeating: "a", count: 1_000))\"}")
+        #expect(conversationPublishes < 80, "Tool previews should follow the frame cadence")
     }
 
     @Test("Agent flushes the trailing reasoning delta before completion")
@@ -353,6 +473,166 @@ struct ChatServiceTests {
         try await waitUntilIdle(service)
 
         #expect(service.activeConversation?.messages.last?.reasoning == "first second")
+    }
+
+    @Test("cancelled Agent preserves usage from completed turns exactly once")
+    func cancelledAgentKeepsUsage() async throws {
+        let usage = ChatUsage(promptTokens: 7, completionTokens: 5, totalTokens: 12, cost: 0.02)
+        let (service, _, _) = service(scripts: [
+            .init(events: [
+                .reasoningDelta(choiceIndex: 0, text: "considering"),
+                .usage(usage), .finishReason(choiceIndex: 0, reason: "stop")
+            ]),
+            .init(events: [.contentDelta(choiceIndex: 0, text: "late"), .done], delay: .seconds(5))
+        ])
+        await service.sendAgentMessage("hello", modelId: "test/model", workspace: FileManager.default.temporaryDirectory.path, fullComputerAccess: false)
+        for _ in 0..<200 where service.agentCumulativeUsage == nil {
+            try await Task.sleep(for: .milliseconds(2))
+        }
+        #expect(service.agentCumulativeUsage == usage)
+        service.stopStreaming()
+        try await waitUntilIdle(service)
+        #expect(service.lastUsage == usage)
+        #expect(service.activeConversation?.totalTokens == 12)
+        #expect(service.activeConversation?.totalCost == 0.02)
+    }
+
+    @Test("reasoning bursts do not publish the conversation for every token", arguments: [PlaygroundMode.chat, .agent])
+    func coalescedReasoningObservations(mode: PlaygroundMode) async throws {
+        let events: [OpenRouterStreamEvent] = (0..<1_000).map { _ in .reasoningDelta(choiceIndex: 0, text: "step,") }
+            + [.contentDelta(choiceIndex: 0, text: "done"), .done]
+        let (service, _, _) = service(scripts: [.init(events: events)])
+        var publishes = 0
+        let subscription = service.$conversations.sink { _ in publishes += 1 }
+        defer { subscription.cancel() }
+        if mode == .chat {
+            await service.sendMessage("hello", modelId: "test/model")
+        } else {
+            await service.sendAgentMessage("hello", modelId: "test/model", workspace: FileManager.default.temporaryDirectory.path, fullComputerAccess: false)
+        }
+        try await waitUntilIdle(service)
+        #expect(service.activeConversation?.messages.last?.reasoning == String(repeating: "step,", count: 1_000))
+        #expect(publishes < 60, "reasoning should be coalesced before observable mutations")
+    }
+
+    @Test("opaque reasoning details are lossless without per-token conversation publishes", arguments: [PlaygroundMode.chat, .agent])
+    func coalescedStructuredReasoning(mode: PlaygroundMode) async throws {
+        let blocks = (0..<500).map { ReasoningDetail(type: "reasoning.text", text: "part-\($0)") }
+        let events: [OpenRouterStreamEvent] = blocks.flatMap { block in
+            [.reasoningDelta(choiceIndex: 0, text: "step,"),
+             .reasoningDetails(choiceIndex: 0, details: [block])]
+        } + [.contentDelta(choiceIndex: 0, text: "answer"), .done]
+        let (service, _, _) = service(scripts: [.init(events: events)])
+        var publishes = 0
+        let subscription = service.$conversations.sink { _ in publishes += 1 }
+        defer { subscription.cancel() }
+        if mode == .chat {
+            service.sendMessage("hello", modelId: "test/model")
+        } else {
+            await service.sendAgentMessage("hello", modelId: "test/model", workspace: FileManager.default.temporaryDirectory.path, fullComputerAccess: false)
+        }
+        try await waitUntilIdle(service)
+        let assistant = try #require(service.activeConversation?.messages.last)
+        #expect(assistant.reasoning == String(repeating: "step,", count: 500))
+        #expect(assistant.reasoningDetails == blocks)
+        #expect(publishes < 80, "opaque detail fragments must share the frame cadence")
+    }
+
+    @Test("Agent marks a text answer cut off by the model as truncated")
+    func agentTruncatedText() async throws {
+        let (service, _, _) = service(scripts: [.init(events: [
+            .contentDelta(choiceIndex: 0, text: "partial answer"),
+            .finishReason(choiceIndex: 0, reason: "length"), .done
+        ])])
+        await service.sendAgentMessage("hello", modelId: "test/model", workspace: FileManager.default.temporaryDirectory.path, fullComputerAccess: false)
+        try await waitUntilIdle(service)
+        #expect(service.activeConversation?.messages.last?.content == "partial answer")
+        #expect(service.activeConversation?.messages.last?.status == .truncated)
+        #expect(service.activeConversation?.messages.last?.finishReason == "length")
+    }
+
+    @Test("a mixed SSE delta finishes thinking before the answer remains visible", arguments: [PlaygroundMode.chat, .agent])
+    func mixedReasoningAndAnswerFrame(mode: PlaygroundMode) async throws {
+        var decoder = ServerSentEventDecoder()
+        let frame = Data("data: {\"choices\":[{\"index\":0,\"delta\":{\"reasoning\":\"thinking\",\"content\":\"answer\"}}]}\n\n".utf8)
+        let events = try decoder.consume(frame) + [.done]
+        let (service, _, _) = service(scripts: [.init(events: events, delay: .milliseconds(80))])
+        if mode == .chat {
+            service.sendMessage("hello", modelId: "test/model")
+        } else {
+            await service.sendAgentMessage("hello", modelId: "test/model", workspace: FileManager.default.temporaryDirectory.path, fullComputerAccess: false)
+        }
+        let conversationID = try #require(service.activeConversation?.id)
+        let assistantID = try #require(service.activeConversation?.messages.last?.id)
+        for _ in 0..<150 where service.isStreaming {
+            let message = service.activeConversation?.messages.last
+            if message?.reasoning == "thinking", message?.content == "answer" { break }
+            try await Task.sleep(for: .milliseconds(2))
+        }
+        let visible = try #require(service.activeConversation?.messages.last)
+        #expect(visible.reasoning == "thinking")
+        #expect(visible.content == "answer")
+        #expect(service.isStreaming)
+        #expect(!service.isReasoningMessage(assistantID, conversationID: conversationID))
+        #expect((visible.reasoningDuration ?? 0) >= 0.06)
+        try await waitUntilIdle(service)
+    }
+
+    @Test("reasoning duration measures the stream, survives completion and storage in both modes")
+    func reasoningDurationTracksEvents() async throws {
+        let script = ScriptedOpenRouterClient.Script(events: [
+            .reasoningDelta(choiceIndex: 0, text: "considering"),
+            .contentDelta(choiceIndex: 0, text: "answer"),
+            .done
+        ], delay: .milliseconds(45))
+        let (chat, _, chatStore) = service(scripts: [script])
+        chat.sendMessage("hello", modelId: "test/model")
+        try await waitUntilIdle(chat)
+        let chatMessage = try #require(chat.activeConversation?.messages.last)
+        #expect(chatMessage.reasoningStartedAt != nil)
+        #expect((chatMessage.reasoningDuration ?? 0) >= 0.03)
+        #expect(chatStore.records[chat.activeConversation!.id]?.conversation.messages.last?.reasoningDuration == chatMessage.reasoningDuration)
+
+        let (agent, _, _) = service(scripts: [script])
+        await agent.sendAgentMessage("hello", modelId: "test/model", workspace: FileManager.default.temporaryDirectory.path, fullComputerAccess: false)
+        try await waitUntilIdle(agent)
+        let agentMessage = try #require(agent.activeConversation?.messages.last)
+        #expect(agentMessage.reasoningStartedAt != nil)
+        #expect((agentMessage.reasoningDuration ?? 0) >= 0.03)
+    }
+
+    @Test("Agent counts thinking in later tool turns without counting tool execution")
+    func agentReasoningAcrossTurns() async throws {
+        let first = ScriptedOpenRouterClient.Script(events: [
+            .reasoningDelta(choiceIndex: 0, text: "first thought"),
+            .contentDelta(choiceIndex: 0, text: "Need to check."),
+            .toolCallFragment(choiceIndex: 0, toolIndex: 0, id: "call-1", type: "function", name: "unknown_tool", arguments: "{}"),
+            .finishReason(choiceIndex: 0, reason: "tool_calls"), .done
+        ], delay: .milliseconds(50))
+        let second = ScriptedOpenRouterClient.Script(events: [
+            .reasoningDelta(choiceIndex: 0, text: "second thought"),
+            .contentDelta(choiceIndex: 0, text: "Done."), .done
+        ], delay: .milliseconds(50))
+        let (service, _, _) = service(scripts: [first, second])
+        await service.sendAgentMessage("hello", modelId: "test/model", workspace: FileManager.default.temporaryDirectory.path, fullComputerAccess: false)
+        let conversationID = try #require(service.activeConversation?.id)
+        let assistantID = try #require(service.activeConversation?.messages.last?.id)
+        var laterThinkingWasVisible = false
+        for _ in 0..<400 where service.isStreaming {
+            if service.isReasoningMessage(assistantID, conversationID: conversationID),
+               service.activeConversation?.messages.last?.content.contains("Need to check.") == true {
+                laterThinkingWasVisible = true
+                break
+            }
+            try await Task.sleep(for: .milliseconds(2))
+        }
+        #expect(laterThinkingWasVisible)
+        try await waitUntilIdle(service)
+        let message = try #require(service.activeConversation?.messages.last)
+        #expect(message.reasoning == "first thoughtsecond thought")
+        #expect(message.content == "Need to check.\n\nDone.")
+        #expect((message.reasoningDuration ?? 0) >= 0.085)
+        #expect((message.reasoningDuration ?? 0) < 0.25, "do not count the time spent using tools or awaiting a new turn")
     }
 
     @Test("agent recovers when a turn streams only reasoning")
@@ -490,6 +770,21 @@ struct ChatServiceTests {
         #expect(service.lastError?.contains("cannot be deleted") == true)
         service.stopStreaming()
         try await waitUntilIdle(service)
+    }
+
+    @Test("background stream failures retain the run owner for banner scoping")
+    func errorOwnerFollowsRun() async throws {
+        let error = OpenRouterAPIError(code: 500, message: "A failed", errorType: "provider_error", providerName: nil)
+        let (service, _, _) = service(scripts: [.init(events: [.apiError(error)], delay: .milliseconds(25))])
+        let owner = service.newConversation(modelId: "test/model", mode: .chat)
+        await service.sendMessage("hello", modelId: "test/model")
+        let other = service.newConversation(modelId: "other/model", mode: .chat)
+        try await waitUntilIdle(service)
+        #expect(service.activeConversation?.id == other.id)
+        #expect(service.lastError == "A failed")
+        #expect(service.lastErrorConversationID == owner.id)
+        service.lastError = "This view's local error"
+        #expect(service.lastErrorConversationID == nil)
     }
 
     @Test("partial provider errors are retained and marked failed")

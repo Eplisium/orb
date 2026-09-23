@@ -304,6 +304,12 @@ final class DatabaseManager {
             // separately from the display `reasoning` summary so opaque
             // signature/encrypted payloads survive restarts byte-exact.
             try addColumnIfMissing(table: "messages", column: "reasoning_details_json", definition: "TEXT")
+            // Displayable reasoning is independent of opaque wire details. Keep
+            // it when reopening a conversation instead of losing the disclosure.
+            try addColumnIfMissing(table: "messages", column: "reasoning", definition: "TEXT")
+            try addColumnIfMissing(table: "messages", column: "reasoning_started_at", definition: "REAL")
+            try addColumnIfMissing(table: "messages", column: "reasoning_duration_seconds", definition: "REAL")
+            try addColumnIfMissing(table: "messages", column: "transcript_json", definition: "TEXT")
             // W06: durable media jobs and assets. Additive migrations only —
             // existing tables are never altered or dropped and legacy rows
             // keep loading.
@@ -626,8 +632,8 @@ final class DatabaseManager {
     func saveMessageChecked(_ message: ChatMessage, conversationId: UUID, sortOrder: Int) throws {
         let sql = """
         INSERT OR REPLACE INTO messages
-        (id, conversation_id, role, content, tool_calls_json, tool_call_id, tool_name, sort_order, created_at, status, finish_reason, error_message, parts_json, images_json, reasoning_details_json)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+        (id, conversation_id, role, content, tool_calls_json, tool_call_id, tool_name, sort_order, created_at, status, finish_reason, error_message, parts_json, images_json, reasoning_details_json, reasoning, reasoning_started_at, reasoning_duration_seconds, transcript_json)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
         """
         guard let stmt = prepare(sql) else { throw DatabaseManagerError.operationFailed(currentError()) }
         defer { sqlite3_finalize(stmt) }
@@ -683,6 +689,27 @@ final class DatabaseManager {
         } else {
             sqlite3_bind_null(stmt, 15)
         }
+        if let reasoning = message.reasoning {
+            sqlite3_bind_text(stmt, 16, reasoning, -1, t)
+        } else {
+            sqlite3_bind_null(stmt, 16)
+        }
+        if let startedAt = message.reasoningStartedAt {
+            sqlite3_bind_double(stmt, 17, startedAt.timeIntervalSince1970)
+        } else {
+            sqlite3_bind_null(stmt, 17)
+        }
+        if let duration = message.reasoningDuration {
+            sqlite3_bind_double(stmt, 18, duration)
+        } else {
+            sqlite3_bind_null(stmt, 18)
+        }
+        if let transcript = message.transcript {
+            let data = try JSONEncoder().encode(transcript)
+            sqlite3_bind_text(stmt, 19, String(decoding: data, as: UTF8.self), -1, t)
+        } else {
+            sqlite3_bind_null(stmt, 19)
+        }
         try requireDone(stmt)
     }
 
@@ -707,6 +734,9 @@ final class DatabaseManager {
             // Resolved by name: legacy databases gain the column via ALTER
             // TABLE, so its position depends on the schema vintage.
             let reasoningDetailsJSON = columnTextOrNil(stmt, columnIndex(stmt, "reasoning_details_json"))
+            let reasoning = columnTextOrNil(stmt, columnIndex(stmt, "reasoning"))
+            let startedAtValue = columnDoubleOrNil(stmt, columnIndex(stmt, "reasoning_started_at"))
+            let reasoningDuration = columnDoubleOrNil(stmt, columnIndex(stmt, "reasoning_duration_seconds"))
 
             var toolCalls: [ToolCallDisplay]? = nil
             if let json = toolCallsJSON, let data = json.data(using: .utf8) {
@@ -731,7 +761,12 @@ final class DatabaseManager {
                 toolCalls: toolCalls,
                 toolCallId: toolCallId, toolName: toolName, status: status,
                 finishReason: finishReason, errorMessage: errorMessage,
-                reasoningDetails: reasoningDetails
+                reasoning: reasoning,
+                reasoningStartedAt: startedAtValue.map(Date.init(timeIntervalSince1970:)),
+                reasoningDuration: reasoningDuration,
+                reasoningDetails: reasoningDetails,
+                transcript: columnTextOrNil(stmt, columnIndex(stmt, "transcript_json"))
+                    .flatMap { try? JSONDecoder().decode([MessageTranscriptSegment].self, from: Data($0.utf8)) }
             )
             messages.append(msg)
         }
@@ -1239,6 +1274,11 @@ final class DatabaseManager {
         if sqlite3_column_type(stmt, index) == SQLITE_NULL { return nil }
         guard let cStr = sqlite3_column_text(stmt, index) else { return nil }
         return String(cString: cStr)
+    }
+
+    private func columnDoubleOrNil(_ stmt: OpaquePointer, _ index: Int32) -> Double? {
+        guard index >= 0, sqlite3_column_type(stmt, index) != SQLITE_NULL else { return nil }
+        return sqlite3_column_double(stmt, index)
     }
 
     /// Zero-based position of a result column by name, or -1 when absent.

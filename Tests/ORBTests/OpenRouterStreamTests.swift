@@ -25,6 +25,52 @@ struct OpenRouterStreamTests {
         #expect(try decoder.finish().isEmpty)
     }
 
+    @Test("mixed reasoning and answer fields begin thinking before showing the answer")
+    func mixedReasoningContentOrder() throws {
+        var decoder = ServerSentEventDecoder()
+        let frame = Data("data: {\"choices\":[{\"index\":0,\"delta\":{\"reasoning\":\"thinking\",\"content\":\"answer\"}}]}\n\n".utf8)
+        #expect(try decoder.consume(frame) == [
+            .reasoningDelta(choiceIndex: 0, text: "thinking"),
+            .contentDelta(choiceIndex: 0, text: "answer")
+        ])
+    }
+
+    @Test("bare CR delimiters work even across fragment boundaries")
+    func bareCR() throws {
+        let bytes = Data("data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\r\r".utf8)
+        for split in 0...bytes.count {
+            var decoder = ServerSentEventDecoder()
+            let events = try decoder.consume(bytes.prefix(split)) + decoder.consume(bytes.dropFirst(split))
+            #expect(events == [.contentDelta(choiceIndex: 0, text: "ok")])
+            #expect(try decoder.finish().isEmpty)
+        }
+    }
+
+    @Test("many small events packed into one chunk respect per-event limits")
+    func packedEvents() throws {
+        var decoder = ServerSentEventDecoder(maxEventBytes: 64)
+        let packed = String(repeating: "data: {\"choices\":[{\"delta\":{\"content\":\"x\"}}]}\n\n", count: 50)
+        #expect(try decoder.consume(Data(packed.utf8)).count == 50)
+    }
+
+    @Test("an oversized comment is bounded even when no data is emitted")
+    func oversizedComment() throws {
+        var decoder = ServerSentEventDecoder(maxEventBytes: 32)
+        #expect(throws: OpenRouterStreamError.self) {
+            _ = try decoder.consume(Data(":\(String(repeating: "x", count: 40))\n".utf8))
+        }
+    }
+
+    @Test("separate comment-only events do not share a size budget")
+    func repeatedKeepalives() throws {
+        var decoder = ServerSentEventDecoder(maxEventBytes: 32)
+        let keepalive = Data(": keepalive\n\n".utf8)
+        for _ in 0..<100 {
+            #expect(try decoder.consume(keepalive).isEmpty)
+        }
+        #expect(try decoder.finish().isEmpty)
+    }
+
     @Test("multiple data lines are joined according to SSE")
     func multipleDataLines() throws {
         var decoder = ServerSentEventDecoder()

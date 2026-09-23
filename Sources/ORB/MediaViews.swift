@@ -1,6 +1,97 @@
 import AppKit
+import ImageIO
 import SwiftUI
 import UniformTypeIdentifiers
+
+/// Unpinned requests can be routed to any endpoint. A slug pin is shown only
+/// when it names exactly one advertised endpoint; otherwise its capabilities
+/// and price would not describe a uniquely selected route.
+struct ImageStudioCapabilities {
+    let endpoints: [ImageModelEndpoint]
+    let pinnedSlug: String?
+
+    init(endpoints: [ImageModelEndpoint], pinnedSlug: String?) {
+        self.endpoints = endpoints
+        if let pinnedSlug, endpoints.filter({ $0.providerSlug == pinnedSlug }).count == 1 {
+            self.pinnedSlug = pinnedSlug
+        } else {
+            self.pinnedSlug = nil
+        }
+    }
+
+    var applicable: [ImageModelEndpoint] {
+        guard let pinnedSlug else { return endpoints }
+        return endpoints.filter { $0.providerSlug == pinnedSlug }
+    }
+
+    func supports(_ parameter: String) -> Bool {
+        !applicable.isEmpty && applicable.allSatisfy { $0.supportedParameters[parameter] != nil }
+    }
+
+    func options(_ parameter: String) -> [String] {
+        guard let first = applicable.first,
+              case .enumValues(let values) = first.supportedParameters[parameter] else { return ["auto"] }
+        let common = values.filter { value in
+            applicable.allSatisfy {
+                if case .enumValues(let accepted) = $0.supportedParameters[parameter] { return accepted.contains(value) }
+                return false
+            }
+        }
+        return ["auto"] + common.filter { $0 != "auto" }
+    }
+
+    var maximumCount: Int {
+        guard supports("n") else { return 1 }
+        let limits = applicable.compactMap { endpoint -> Int? in
+            if case .range(_, let maximum) = endpoint.supportedParameters["n"] { return Int(maximum) }
+            return nil
+        }
+        return max(1, min(10, limits.min() ?? 1))
+    }
+
+    var referenceLimit: Int? {
+        guard !applicable.isEmpty else { return nil }
+        let limits = applicable.map { endpoint -> Int in
+            if case .range(_, let maximum) = endpoint.supportedParameters["input_references"] {
+                return max(0, min(16, Int(maximum)))
+            }
+            return 0 // The endpoint's definitive parameter set does not list references.
+        }
+        return limits.min()
+    }
+
+    func referenceError(count: Int) -> String? {
+        let limit = referenceLimit ?? 16
+        return count > limit ? "Selected \(count) references; this route allows at most \(limit). Remove images or change provider before generating." : nil
+    }
+}
+
+enum MediaStudioImageFile {
+    enum Failure: LocalizedError {
+        case invalid(String)
+        var errorDescription: String? {
+            if case .invalid(let message) = self { return message }
+            return nil
+        }
+    }
+
+    static func dataURL(for url: URL) throws -> String {
+        let scoped = url.startAccessingSecurityScopedResource()
+        defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+        let size = try url.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0
+        guard size > 0 && size <= 20_000_000 else {
+            throw Failure.invalid("Image \(url.lastPathComponent) must be nonempty and at most 20 MB.")
+        }
+        let data = try Data(contentsOf: url)
+        guard let source = CGImageSourceCreateWithData(data as CFData, nil),
+              let type = CGImageSourceGetType(source) as String?,
+              let mime = UTType(type)?.preferredMIMEType,
+              ["image/png", "image/jpeg", "image/gif", "image/heic", "image/webp"].contains(mime) else {
+            throw Failure.invalid("\(url.lastPathComponent) is not a supported image (PNG, JPEG, GIF, HEIC, or WebP).")
+        }
+        return "data:\(mime);base64,\(data.base64EncodedString())"
+    }
+}
 
 // MARK: - Images studio
 //
@@ -9,6 +100,7 @@ import UniformTypeIdentifiers
 
 struct ImagesView: View {
     @StateObject private var service = ImageGenService()
+    @StateObject private var saved = SavedCreationsStore.shared
     @State private var prompt = ""
     @State private var selectedModelId = ""
     @State private var imageCount = 1
@@ -17,8 +109,11 @@ struct ImagesView: View {
     @State private var quality = "auto"
     @State private var seedText = ""
     @State private var referenceURLs: [URL] = []
+    @State private var selectedProviderSlug = ""
     @State private var errorMessage: String?
     @State private var results: [GeneratedImage] = []
+    @State private var endpoints: [ImageModelEndpoint] = []
+    @State private var endpointError: String?
     @State private var totalCost = 0.0
     @FocusState private var inputFocused: Bool
 
@@ -29,6 +124,8 @@ struct ImagesView: View {
         let attachment: ChatImageAttachment
         let modelId: String
         let createdAt = Date()
+        var savedID: UUID?
+        var saveError: String?
     }
 
     var body: some View {
@@ -41,21 +138,57 @@ struct ImagesView: View {
             await service.fetchModels()
             if selectedModelId.isEmpty { selectedModelId = service.models.first?.id ?? "" }
         }
+        .task(id: selectedModelId) {
+            endpoints = []
+            endpointError = nil
+            aspectRatio = "auto"
+            resolution = "auto"
+            quality = "auto"
+            imageCount = 1
+            selectedProviderSlug = ""
+            guard !selectedModelId.isEmpty else { return }
+            do { endpoints = try await service.fetchImageModelEndpoints(modelID: selectedModelId) }
+            catch { endpointError = error.localizedDescription }
+        }
+        .task { await loadGallery() }
+        .onChange(of: selectedProviderSlug) { _, _ in
+            if imageCount > maximumCount { imageCount = maximumCount }
+            aspectRatio = "auto"
+            resolution = "auto"
+            quality = "auto"
+        }
     }
 
     // MARK: Controls
 
     private var controlsColumn: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            header(title: "Images", subtitle: "Text-to-image generation", icon: "photo.fill")
+        ScrollView {
+            VStack(alignment: .leading, spacing: 14) {
+                header(title: "Images", subtitle: "Text-to-image generation", icon: "photo.fill")
 
             modelPicker
+            if !endpoints.isEmpty {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("PROVIDER ROUTING").font(.system(size: 9, weight: .bold)).foregroundStyle(.secondary)
+                    Picker("Provider", selection: $selectedProviderSlug) {
+                        Text("Automatic routing").tag("")
+                        ForEach(pinOptions, id: \.providerSlug) { endpoint in
+                            Text(endpoint.providerName).tag(endpoint.providerSlug)
+                        }
+                    }.labelsHidden()
+                    Text(selectedEndpoint == nil
+                         ? "Auto routing: settings require support from every listed endpoint. Prices are estimates, not a selected route."
+                         : "Pinned to \(selectedEndpoint!.providerName); fallback to other providers disabled.")
+                        .font(.caption2).foregroundStyle(.secondary)
+                }
+            }
 
             VStack(alignment: .leading, spacing: 6) {
                 Text("PROMPT").font(.system(size: 9, weight: .bold)).foregroundStyle(.secondary)
                 TextEditor(text: $prompt)
+                    .accessibilityLabel("Image prompt")
                     .font(.system(size: 12))
-                    .frame(minHeight: 90)
+                    .frame(height: 112)
                     .overlay {
                         RoundedRectangle(cornerRadius: 6)
                             .stroke(Color.primary.opacity(0.10), lineWidth: 1)
@@ -65,20 +198,21 @@ struct ImagesView: View {
             HStack(spacing: 12) {
                 VStack(alignment: .leading, spacing: 4) {
                     Text("Count").font(.caption).foregroundStyle(.secondary)
-                    Stepper("\(imageCount)", value: $imageCount, in: 1...4)
+                    Stepper("Image count: \(imageCount)", value: $imageCount, in: 1...maximumCount)
                         .fixedSize()
+                        .disabled(maximumCount == 1)
                 }
                 VStack(alignment: .leading, spacing: 4) {
                     Text("Aspect").font(.caption).foregroundStyle(.secondary)
                     Picker("Aspect", selection: $aspectRatio) {
-                        ForEach(["auto", "1:1", "16:9", "9:16", "3:2", "2:3", "4:3", "3:4"], id: \.self) { Text($0).tag($0) }
+                        ForEach(options("aspect_ratio"), id: \.self) { Text($0).tag($0) }
                     }
                     .labelsHidden().fixedSize()
                 }
                 VStack(alignment: .leading, spacing: 4) {
                     Text("Quality").font(.caption).foregroundStyle(.secondary)
                     Picker("Quality", selection: $quality) {
-                        ForEach(["auto", "low", "medium", "high"], id: \.self) { Text($0).tag($0) }
+                        ForEach(options("quality"), id: \.self) { Text($0).tag($0) }
                     }
                     .labelsHidden().fixedSize()
                 }
@@ -88,7 +222,7 @@ struct ImagesView: View {
                 VStack(alignment: .leading, spacing: 4) {
                     Text("Resolution").font(.caption).foregroundStyle(.secondary)
                     Picker("Resolution", selection: $resolution) {
-                        ForEach(["auto", "512", "1K", "2K", "4K"], id: \.self) { Text($0).tag($0) }
+                        ForEach(options("resolution"), id: \.self) { Text($0).tag($0) }
                     }
                     .labelsHidden().fixedSize()
                 }
@@ -97,10 +231,33 @@ struct ImagesView: View {
                     TextField("random", text: $seedText)
                         .textFieldStyle(.roundedBorder)
                         .frame(width: 110)
+                        .disabled(!supports("seed"))
                 }
             }
 
             referenceRow
+            if !referenceURLs.isEmpty && selectedImageModel?.architecture?.takesReferenceImages != true {
+                Text("This model does not accept reference images. Remove them before generating.")
+                    .font(.caption).foregroundStyle(.orange)
+            }
+            if let warning = capabilities.referenceError(count: referenceURLs.count) {
+                Text(warning).font(.caption).foregroundStyle(.orange)
+            }
+            if let endpointError {
+                Text("Endpoint capabilities and prices unavailable: \(endpointError). Only default settings are available.")
+                    .font(.caption2).foregroundStyle(.orange)
+            }
+            if let endpoint = selectedEndpoint, !endpoint.pricing.isEmpty {
+                Text("\(endpoint.providerName) advertised rates (actual charge may vary): " + endpoint.pricing.map { "\($0.billable): $\(String(format: "%.4f", $0.costUSD))/\($0.unit)\($0.variant.map { " (\($0))" } ?? "")" }.joined(separator: " · "))
+                    .font(.caption2).foregroundStyle(.secondary)
+            } else if !endpoints.isEmpty {
+                Text("Provider rates differ; pin a provider to inspect its advertised pricing. Actual charge is reported after generation.")
+                    .font(.caption2).foregroundStyle(.secondary)
+            }
+            if !KeychainManager.hasAPIKey {
+                Text("Add an inference API key in Account to generate images.")
+                    .font(.caption).foregroundStyle(.orange)
+            }
 
             if let errorMessage {
                 PlaygroundErrorBanner(message: errorMessage) { self.errorMessage = nil }
@@ -125,12 +282,13 @@ struct ImagesView: View {
             .keyboardShortcut(.return, modifiers: .command)
 
             if totalCost > 0 {
-                Text("Session spend: $\(totalCost, specifier: "%.4f")")
+                Text("Reported spend (known charges): $\(totalCost, specifier: "%.4f")")
                     .font(.caption.monospacedDigit())
                     .foregroundStyle(.secondary)
             }
+            }
+            .padding(18)
         }
-        .padding(18)
         .frame(width: 340)
         .background(.ultraThinMaterial.opacity(0.72))
     }
@@ -174,6 +332,7 @@ struct ImagesView: View {
                         .clipShape(Capsule())
                 }
                 .buttonStyle(.plain)
+                .disabled(service.models.first(where: { $0.id == selectedModelId })?.architecture?.takesReferenceImages != true || capabilities.referenceLimit == 0)
                 Text(referenceURLs.isEmpty ? "Guide image-to-image runs" : "\(referenceURLs.count) selected")
                     .font(.caption).foregroundStyle(.secondary)
             }
@@ -194,6 +353,10 @@ struct ImagesView: View {
                         }
                     }
                 }
+            }
+            if service.models.first(where: { $0.id == selectedModelId })?.architecture?.takesReferenceImages == true {
+                Text("Up to \(capabilities.referenceLimit ?? 16) references, 20 MB each. Endpoint support may vary.")
+                    .font(.caption2).foregroundStyle(.secondary)
             }
         }
     }
@@ -226,9 +389,9 @@ struct ImagesView: View {
                 Image(systemName: "photo.on.rectangle.angled")
                     .font(.system(size: 32)).foregroundStyle(accent)
             }
-            Text("Generate images")
+            Text("Your image gallery")
                 .font(.system(size: 24, weight: .semibold, design: .rounded))
-            Text("Pick a model, describe the picture, and generate. Results land here with save buttons.")
+            Text("Pick a model and describe your image. ORB saves generated images here for later; failed saves can be retried or exported.")
                 .font(.system(size: 13)).foregroundStyle(.secondary)
                 .multilineTextAlignment(.center).frame(maxWidth: 460)
         }
@@ -241,6 +404,16 @@ struct ImagesView: View {
             Text(result.modelId)
                 .font(.caption.monospacedDigit()).foregroundStyle(.tertiary)
                 .lineLimit(1)
+            HStack {
+                if result.savedID != nil {
+                    Label("Saved in ORB", systemImage: "checkmark.circle.fill").foregroundStyle(.green)
+                } else {
+                    Button("Retry save") { Task { await persist(result.id) } }
+                    Text(result.saveError ?? "Not saved").foregroundStyle(.orange).lineLimit(2)
+                }
+                Spacer()
+                Button("Export…") { exportImage(result) }
+            }.font(.caption)
         }
         .padding(12)
         .background(Color.primary.opacity(0.03))
@@ -265,8 +438,30 @@ struct ImagesView: View {
     private var canGenerate: Bool {
         !prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             && !selectedModelId.isEmpty && !service.isGenerating
-            && KeychainManager.hasAPIKey
+            && KeychainManager.hasAPIKey && capabilities.referenceError(count: referenceURLs.count) == nil
+            && (referenceURLs.isEmpty || selectedImageModel?.architecture?.takesReferenceImages == true)
     }
+
+    private var selectedImageModel: ImageGenModel? {
+        service.models.first { $0.id == selectedModelId }
+    }
+
+    private var pinOptions: [ImageModelEndpoint] {
+        endpoints.filter { candidate in endpoints.filter { $0.providerSlug == candidate.providerSlug }.count == 1 }
+    }
+
+    private var capabilities: ImageStudioCapabilities {
+        ImageStudioCapabilities(endpoints: endpoints, pinnedSlug: selectedProviderSlug.isEmpty ? nil : selectedProviderSlug)
+    }
+
+    private var selectedEndpoint: ImageModelEndpoint? {
+        guard let slug = capabilities.pinnedSlug else { return nil }
+        return endpoints.first { $0.providerSlug == slug }
+    }
+
+    private func supports(_ parameter: String) -> Bool { capabilities.supports(parameter) }
+    private var maximumCount: Int { capabilities.maximumCount }
+    private func options(_ parameter: String) -> [String] { capabilities.options(parameter) }
 
     private func chooseReferences() {
         let panel = NSOpenPanel()
@@ -275,17 +470,15 @@ struct ImagesView: View {
         panel.canChooseFiles = true
         panel.canChooseDirectories = false
         panel.allowedContentTypes = [.png, .jpeg, .gif, .heic]
-        if panel.runModal() == .OK { referenceURLs.append(contentsOf: panel.urls) }
+        if panel.runModal() == .OK { referenceURLs.append(contentsOf: panel.urls.filter { !referenceURLs.contains($0) }) }
     }
 
     private func referenceDataURLs() throws -> [String]? {
         guard !referenceURLs.isEmpty else { return nil }
-        return try referenceURLs.prefix(8).map { url in
-            let scoped = url.startAccessingSecurityScopedResource()
-            defer { if scoped { url.stopAccessingSecurityScopedResource() } }
-            let data = try Data(contentsOf: url)
-            return "data:image/\(url.pathExtension.lowercased());base64,\(data.base64EncodedString())"
+        if let warning = capabilities.referenceError(count: referenceURLs.count) {
+            throw MediaStudioImageFile.Failure.invalid(warning)
         }
+        return try referenceURLs.map(MediaStudioImageFile.dataURL(for:))
     }
 
     private func generate() {
@@ -298,18 +491,28 @@ struct ImagesView: View {
         let promptText = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
         Task {
             do {
-                let references = try referenceDataURLs()
+                let takesReferences = service.models.first(where: { $0.id == modelId })?.architecture?.takesReferenceImages == true
+                let references = takesReferences ? try referenceDataURLs() : nil
                 var request = ImageGenRequest(model: modelId, prompt: promptText)
                 request.n = imageCount > 1 ? imageCount : nil
-                request.aspectRatio = aspectRatio == "auto" ? nil : aspectRatio
-                request.resolution = resolution == "auto" ? nil : resolution
-                request.quality = quality == "auto" ? nil : quality
-                request.outputFormat = "png"
-                if let seed = Int(seedText.trimmingCharacters(in: .whitespaces)) { request.seed = seed }
+                request.aspectRatio = options("aspect_ratio").contains(aspectRatio) && aspectRatio != "auto" ? aspectRatio : nil
+                request.resolution = options("resolution").contains(resolution) && resolution != "auto" ? resolution : nil
+                request.quality = options("quality").contains(quality) && quality != "auto" ? quality : nil
+                if supports("seed"), !seedText.trimmingCharacters(in: .whitespaces).isEmpty {
+                    guard let seed = Int(seedText.trimmingCharacters(in: .whitespaces)) else {
+                        throw MediaStudioImageFile.Failure.invalid("Seed must be a whole number.")
+                    }
+                    request.seed = seed
+                }
+                if let slug = capabilities.pinnedSlug {
+                    request.provider = ImageGenerationProviderPreferences(only: [slug], allowFallbacks: false)
+                }
                 request.inputReferences = references
                 let attachments = try await service.generate(request)
                 for attachment in attachments {
-                    results.insert(GeneratedImage(attachment: attachment, modelId: modelId), at: 0)
+                    let result = GeneratedImage(attachment: attachment, modelId: modelId)
+                    results.insert(result, at: 0)
+                    await persist(result.id)
                 }
                 totalCost += service.lastUsage?.cost ?? 0
             } catch is CancellationError {
@@ -319,21 +522,75 @@ struct ImagesView: View {
             }
         }
     }
+
+    private func loadGallery() async {
+        for creation in saved.creations where creation.kind == .image {
+            guard !results.contains(where: { $0.savedID == creation.id }) else { continue }
+            do {
+                let data = try await saved.data(for: creation)
+                let attachment = ChatImageAttachment(dataURL: "data:\(creation.mimeType);base64,\(data.base64EncodedString())", prompt: creation.prompt)
+                results.append(GeneratedImage(attachment: attachment, modelId: creation.modelID, savedID: creation.id))
+            } catch { errorMessage = "Could not load a saved image: \(error.localizedDescription)" }
+        }
+    }
+
+    private func persist(_ id: UUID) async {
+        guard let index = results.firstIndex(where: { $0.id == id }), results[index].savedID == nil else { return }
+        let result = results[index]
+        guard let data = result.attachment.inlineData else {
+            results[index].saveError = "Response did not contain decodable image bytes."
+            return
+        }
+        do {
+            let creation = try await saved.save(data, mimeType: result.attachment.mimeType,
+                kind: .image, modelID: result.modelId, prompt: result.attachment.prompt)
+            if let current = results.firstIndex(where: { $0.id == id }) {
+                results[current].savedID = creation.id
+                results[current].saveError = nil
+            }
+        } catch {
+            if let current = results.firstIndex(where: { $0.id == id }) { results[current].saveError = error.localizedDescription }
+        }
+    }
+
+    private func exportImage(_ result: GeneratedImage) {
+        guard let data = result.attachment.inlineData else { errorMessage = "Image bytes are unavailable."; return }
+        let panel = NSSavePanel()
+        panel.nameFieldStringValue = "orb-image.\(result.attachment.fileExtension)"
+        if panel.runModal() == .OK, let url = panel.url {
+            Task {
+                do { try await Task.detached { try data.write(to: url, options: .atomic) }.value }
+                catch { errorMessage = "Export failed: \(error.localizedDescription)" }
+            }
+        }
+    }
+
 }
 
 // MARK: - Video studio
 
 struct VideoView: View {
     @StateObject private var service = VideoGenService()
+    @StateObject private var saved = SavedCreationsStore.shared
     @State private var prompt = ""
     @State private var selectedModelId = ""
     @State private var aspectRatio = "auto"
     @State private var resolution = "auto"
     @State private var durationText = ""
+    @State private var size = "auto"
+    @State private var seedText = ""
+    @State private var firstFrameURL: URL?
+    @State private var lastFrameURL: URL?
     @State private var generateAudio = false
     @State private var errorMessage: String?
     @State private var jobs: [VideoJobRecord] = []
     @State private var totalCost = 0.0
+    @State private var videoBytes: [String: Data] = [:]
+    @State private var videoMIMEs: [String: String] = [:]
+    @State private var savedVideos: [String: SavedCreation] = [:]
+    @State private var downloadErrors: [String: String] = [:]
+    @State private var downloading: Set<String> = []
+    @State private var isSubmitting = false
     // Durable jobs that can be resumed (W09 step 3). Refreshed on appear and
     // whenever the service's active job changes (poll ticks, terminal states).
     @State private var resumableRecords: [JobRecord] = []
@@ -363,6 +620,16 @@ struct VideoView: View {
         .onChange(of: service.activeJob) { _, _ in
             refreshResumableRecords()
         }
+        .onChange(of: selectedModelId) { _, _ in
+            aspectRatio = "auto"
+            resolution = "auto"
+            durationText = ""
+            size = "auto"
+            seedText = ""
+            firstFrameURL = nil
+            lastFrameURL = nil
+            generateAudio = false
+        }
     }
 
     private func refreshResumableRecords() {
@@ -370,8 +637,9 @@ struct VideoView: View {
     }
 
     private var controlsColumn: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            header(title: "Video", subtitle: "Text-to-video generation", icon: "video.fill")
+        ScrollView {
+            VStack(alignment: .leading, spacing: 14) {
+                header(title: "Video", subtitle: "Text-to-video generation", icon: "video.fill")
 
             VStack(alignment: .leading, spacing: 6) {
                 Text("MODEL").font(.system(size: 9, weight: .bold)).foregroundStyle(.secondary)
@@ -399,7 +667,8 @@ struct VideoView: View {
                 Text("PROMPT").font(.system(size: 9, weight: .bold)).foregroundStyle(.secondary)
                 TextEditor(text: $prompt)
                     .font(.system(size: 12))
-                    .frame(minHeight: 80)
+                    .frame(height: 112)
+                    .accessibilityLabel("Video prompt")
                     .overlay {
                         RoundedRectangle(cornerRadius: 6)
                             .stroke(Color.primary.opacity(0.10), lineWidth: 1)
@@ -413,7 +682,7 @@ struct VideoView: View {
                         Text("auto").tag("auto")
                         ForEach(supportedAspects(), id: \.self) { Text($0).tag($0) }
                     }
-                    .labelsHidden().fixedSize()
+                    .fixedSize()
                 }
                 VStack(alignment: .leading, spacing: 4) {
                     Text("Resolution").font(.caption).foregroundStyle(.secondary)
@@ -421,38 +690,76 @@ struct VideoView: View {
                         Text("auto").tag("auto")
                         ForEach(supportedResolutions(), id: \.self) { Text($0).tag($0) }
                     }
-                    .labelsHidden().fixedSize()
+                    .fixedSize()
                 }
             }
 
             HStack(spacing: 12) {
                 VStack(alignment: .leading, spacing: 4) {
                     Text("Duration (s, optional)").font(.caption).foregroundStyle(.secondary)
-                    TextField("model default", text: $durationText)
-                        .textFieldStyle(.roundedBorder).frame(width: 110)
+                    if let durations = selectedVideoModel?.supportedDurations, !durations.isEmpty {
+                        Picker("Duration", selection: $durationText) {
+                            Text("Model default").tag("")
+                            ForEach(durations, id: \.self) { Text("\($0) s").tag(String($0)) }
+                        }.fixedSize()
+                    } else {
+                        Text("Model default").font(.caption).foregroundStyle(.secondary)
+                    }
                 }
                 Toggle("Audio", isOn: $generateAudio)
-                    .help("Generate audio alongside the video when the model supports it.")
+                    .disabled(selectedVideoModel?.generateAudio != true)
+                    .help("Audio may change the per-job price. When off, send generate_audio: false explicitly.")
+            }
+            HStack(spacing: 12) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Size").font(.caption).foregroundStyle(.secondary)
+                    Picker("Size", selection: $size) {
+                        Text("auto").tag("auto")
+                        ForEach(selectedVideoModel?.supportedSizes ?? [], id: \.self) { Text($0).tag($0) }
+                    }.fixedSize().disabled(selectedVideoModel?.supportedSizes?.isEmpty != false)
+                }
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Seed (optional)").font(.caption).foregroundStyle(.secondary)
+                    TextField("random", text: $seedText)
+                        .textFieldStyle(.roundedBorder).frame(width: 105)
+                        .disabled(selectedVideoModel?.seed != true)
+                }
+            }
+            if size != "auto" {
+                Text("Exact size overrides aspect and resolution.").font(.caption2).foregroundStyle(.secondary)
+            }
+            HStack(spacing: 10) {
+                frameSelector("First frame", kind: "first_frame", selection: $firstFrameURL)
+                frameSelector("Last frame", kind: "last_frame", selection: $lastFrameURL)
             }
 
+            if !KeychainManager.hasAPIKey {
+                Text("Add an inference API key in Account to generate or resume video.")
+                    .font(.caption).foregroundStyle(.orange)
+            }
             if let errorMessage {
                 PlaygroundErrorBanner(message: errorMessage) { self.errorMessage = nil }
             }
 
             Spacer()
 
-            if let job = service.activeJob, !job.isTerminal {
+            if let job = service.activeJob, !job.isTerminal,
+               resumableRecords.contains(where: { $0.remoteID == job.id && service.isRunInFlight(for: $0) }) {
                 HStack(spacing: 8) {
                     ProgressView().controlSize(.small)
                     Text("Job \(job.status)… polling every 5s")
                         .font(.caption).foregroundStyle(.secondary)
+                    Button("Stop polling") {
+                        service.stopPolling()
+                        refreshResumableRecords()
+                    }.font(.caption)
                 }
             }
 
             Button(action: submit) {
                 HStack {
-                    if service.activeJob?.isTerminal == false { ProgressView().controlSize(.small).tint(.white) }
-                    Text(service.activeJob?.isTerminal == false ? "Generating…" : "Generate Video")
+                    if isSubmitting { ProgressView().controlSize(.small).tint(.white) }
+                    Text(isSubmitting ? "Generating…" : "Generate Video")
                         .fontWeight(.semibold)
                 }
                 .frame(maxWidth: .infinity)
@@ -468,11 +775,12 @@ struct VideoView: View {
             Text("Video bills per job — check the model's price before submitting.")
                 .font(.caption2).foregroundStyle(.secondary)
             if totalCost > 0 {
-                Text("Session spend: $\(totalCost, specifier: "%.4f")")
+                Text("Reported spend (known charges): $\(totalCost, specifier: "%.4f")")
                     .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
             }
+            }
+            .padding(18)
         }
-        .padding(18)
         .frame(width: 340)
         .background(.ultraThinMaterial.opacity(0.72))
     }
@@ -483,10 +791,18 @@ struct VideoView: View {
                 Text("Durations: \(durations.map(String.init).joined(separator: ", "))s")
                     .font(.caption).foregroundStyle(.secondary)
             }
+            if let skus = model.pricingSkus, !skus.isEmpty {
+                Text("Pricing SKUs: " + skus.sorted { $0.key < $1.key }.map { "\($0.key): \($0.value)" }.joined(separator: " · "))
+                    .font(.caption).foregroundStyle(.secondary)
+            }
             if model.generateAudio == true {
                 Text("Supports audio generation").font(.caption).foregroundStyle(.secondary)
             }
         }
+    }
+
+    private var selectedVideoModel: VideoGenModel? {
+        service.models.first(where: { $0.id == selectedModelId })
     }
 
     private func supportedAspects() -> [String] {
@@ -497,9 +813,32 @@ struct VideoView: View {
         service.models.first(where: { $0.id == selectedModelId })?.supportedResolutions ?? []
     }
 
+    private func frameSelector(_ title: String, kind: String, selection: Binding<URL?>) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(title).font(.caption).foregroundStyle(.secondary)
+            HStack(spacing: 4) {
+                Button(selection.wrappedValue == nil ? "Choose…" : "Replace…") {
+                    let panel = NSOpenPanel()
+                    panel.allowedContentTypes = [.png, .jpeg, .gif, .heic]
+                    panel.canChooseDirectories = false
+                    if panel.runModal() == .OK { selection.wrappedValue = panel.url }
+                }
+                .disabled(selectedVideoModel?.supportedFrameImages?.contains(kind) != true)
+                if selection.wrappedValue != nil {
+                    Button { selection.wrappedValue = nil } label: { Image(systemName: "xmark.circle") }
+                        .accessibilityLabel("Remove \(title.lowercased())")
+                }
+            }.font(.caption)
+            if let url = selection.wrappedValue {
+                Text(url.lastPathComponent).font(.caption2).lineLimit(1)
+            }
+        }.frame(maxWidth: .infinity, alignment: .leading)
+    }
+
     private var jobsColumn: some View {
         Group {
-            if jobs.isEmpty {
+            if jobs.isEmpty && resumableRecords.isEmpty && saved.creations.allSatisfy({ $0.kind != .video })
+                && service.durablePersistenceError == nil {
                 VStack(spacing: 14) {
                     ZStack {
                         Circle().fill(accent.opacity(0.10)).frame(width: 96, height: 96)
@@ -516,6 +855,19 @@ struct VideoView: View {
                 ScrollView {
                     LazyVStack(spacing: 12) {
                         durableJobsSection
+                        if saved.creations.contains(where: { $0.kind == .video }) {
+                            Text("SAVED VIDEOS").font(.caption.bold()).frame(maxWidth: .infinity, alignment: .leading)
+                            ForEach(saved.creations.filter { $0.kind == .video }) { creation in
+                                HStack {
+                                    VStack(alignment: .leading) {
+                                        Text(creation.modelID).font(.caption.monospacedDigit())
+                                        if let prompt = creation.prompt { Text(prompt).font(.caption).lineLimit(2) }
+                                    }
+                                    Spacer()
+                                    Button("Export…") { exportSaved(creation) }
+                                }.padding(12).background(Color.primary.opacity(0.03))
+                            }
+                        }
                         ForEach(jobs) { record in
                             jobCard(record)
                         }
@@ -574,7 +926,7 @@ struct VideoView: View {
             .controlSize(.small)
             // Double-resume guard: disabled while this service's poll loop is
             // already running for this record's remote job.
-            .disabled(service.isRunInFlight(for: record))
+            .disabled(service.isRunInFlight(for: record) || !KeychainManager.hasAPIKey)
             .help(service.isRunInFlight(for: record)
                 ? "Already polling this job"
                 : "Resume polling without submitting a new job")
@@ -612,8 +964,11 @@ struct VideoView: View {
                     }
                 }
                 totalCost += finished.cost ?? 0
+                if let index = jobs.firstIndex(where: { $0.id == rowID }) { jobs[index].job = finished }
+                await keepVideo(rowID)
             } catch is CancellationError {
                 // Local stop or navigation: the record stays resumable.
+                jobs.removeAll { $0.id == rowID }
             } catch {
                 errorMessage = error.localizedDescription
             }
@@ -634,13 +989,20 @@ struct VideoView: View {
             }
             if record.job.isSuccess {
                 HStack(spacing: 8) {
-                    if let urlString = record.job.urls.first, let url = URL(string: urlString) {
-                        Link("Open video URL", destination: url).font(.caption)
-                    }
+                    if downloading.contains(record.id) { ProgressView().controlSize(.small); Text("Saving in ORB…") }
+                    else if savedVideos[record.id] != nil { Label("Saved in ORB", systemImage: "checkmark.circle.fill").foregroundStyle(.green) }
+                    else { Button(videoBytes[record.id] == nil ? "Download & save" : "Retry save") { Task { await keepVideo(record.id) } } }
                     Spacer()
-                    Button("Save Video…") { saveVideo(record) }
-                        .font(.caption)
+                    if videoBytes[record.id] != nil || savedVideos[record.id] != nil {
+                        Button("Export…") { exportVideo(record.id) }
+                    }
                 }
+                if let failure = downloadErrors[record.id] {
+                    Text("Not saved: \(failure)").font(.caption).foregroundStyle(.orange)
+                }
+            } else if record.job.status == "submission uncertain" {
+                Text("Submission outcome unknown. Check recoverable jobs before attempting another paid run.")
+                    .font(.caption).foregroundStyle(.orange)
             } else if !record.job.isTerminal {
                 HStack(spacing: 8) {
                     ProgressView().controlSize(.small)
@@ -681,8 +1043,9 @@ struct VideoView: View {
 
     private var canSubmit: Bool {
         !selectedModelId.isEmpty && !service.isLoadingModels
+            && !prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             && KeychainManager.hasAPIKey
-            && (service.activeJob?.isTerminal ?? true)
+            && !isSubmitting && !resumableRecords.contains(where: { service.isRunInFlight(for: $0) })
     }
 
     private func submit() {
@@ -695,12 +1058,30 @@ struct VideoView: View {
         let promptText = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
         var request = VideoGenRequest(model: modelId)
         request.prompt = promptText.isEmpty ? nil : promptText
-        request.aspectRatio = aspectRatio == "auto" ? nil : aspectRatio
-        request.resolution = resolution == "auto" ? nil : resolution
-        if let seconds = Int(durationText.trimmingCharacters(in: .whitespaces)), seconds > 0 {
+        request.size = size == "auto" || selectedVideoModel?.supportedSizes?.contains(size) != true ? nil : size
+        request.aspectRatio = request.size == nil && supportedAspects().contains(aspectRatio) ? aspectRatio : nil
+        request.resolution = request.size == nil && supportedResolutions().contains(resolution) ? resolution : nil
+        if let seconds = Int(durationText), selectedVideoModel?.supportedDurations?.contains(seconds) == true {
             request.duration = seconds
         }
-        request.generateAudio = generateAudio ? true : nil
+        request.generateAudio = selectedVideoModel?.generateAudio == true ? generateAudio : nil
+        do {
+            if let firstFrameURL, selectedVideoModel?.supportedFrameImages?.contains("first_frame") == true {
+                request.firstFrameImage = try MediaStudioImageFile.dataURL(for: firstFrameURL)
+            }
+            if let lastFrameURL, selectedVideoModel?.supportedFrameImages?.contains("last_frame") == true {
+                request.lastFrameImage = try MediaStudioImageFile.dataURL(for: lastFrameURL)
+            }
+            if selectedVideoModel?.seed == true, !seedText.trimmingCharacters(in: .whitespaces).isEmpty {
+                guard let seed = Int(seedText.trimmingCharacters(in: .whitespaces)) else {
+                    throw MediaStudioImageFile.Failure.invalid("Seed must be a whole number.")
+                }
+                request.seed = seed
+            }
+        } catch {
+            errorMessage = error.localizedDescription
+            return
+        }
         let recordId = UUID().uuidString
         jobs.insert(VideoJobRecord(
             id: recordId,
@@ -708,7 +1089,9 @@ struct VideoView: View {
             prompt: promptText.isEmpty ? "(no prompt)" : promptText,
             modelId: modelId
         ), at: 0)
+        isSubmitting = true
         Task {
+            defer { isSubmitting = false }
             do {
                 let finished = try await service.submitAndPoll(request) { update in
                     Task { @MainActor in
@@ -718,36 +1101,87 @@ struct VideoView: View {
                     }
                 }
                 totalCost += finished.cost ?? 0
+                if let index = jobs.firstIndex(where: { $0.id == recordId }) { jobs[index].job = finished }
+                await keepVideo(recordId)
             } catch is CancellationError {
-                if let index = jobs.firstIndex(where: { $0.id == recordId }) {
-                    jobs[index].job = VideoJob(id: recordId, status: "cancelled", pollingURL: nil, generationId: nil, unsignedURLs: nil, error: "Cancelled.", cost: nil)
-                }
+                // Stopping local polling does not cancel the remote paid job.
+                // Keep the durable resumable record instead of a fake cancelled state.
+                jobs.removeAll { $0.id == recordId }
             } catch {
                 errorMessage = error.localizedDescription
-                if let index = jobs.firstIndex(where: { $0.id == recordId }) {
-                    jobs[index].job = VideoJob(id: recordId, status: "failed", pollingURL: nil, generationId: nil, unsignedURLs: nil, error: error.localizedDescription, cost: nil)
+                // Poll/network failure does not mean the paid remote job failed.
+                // Keep its last known status and durable resume affordance.
+                if let index = jobs.firstIndex(where: { $0.id == recordId }),
+                   jobs[index].job.id == recordId {
+                    jobs[index].job = VideoJob(id: recordId, status: "submission uncertain", pollingURL: nil,
+                        generationId: nil, unsignedURLs: nil, error: error.localizedDescription, cost: nil)
                 }
+                refreshResumableRecords()
             }
         }
     }
 
-    private func saveVideo(_ record: VideoJobRecord) {
+    private func keepVideo(_ id: String) async {
+        guard savedVideos[id] == nil, !downloading.contains(id),
+              let record = jobs.first(where: { $0.id == id }), record.job.isSuccess else { return }
+        downloading.insert(id)
+        defer { downloading.remove(id) }
+        do {
+            if videoBytes[id] == nil {
+                let (data, contentType) = try await service.download(record.job)
+                let mime = contentType?.components(separatedBy: ";").first?
+                    .trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ?? "video/mp4"
+                guard mime == "video/mp4" || mime == "video/webm" || mime == "video/quicktime" else {
+                    throw MediaServiceError.decoding("The download was not a supported video (\(mime)).")
+                }
+                videoBytes[id] = data
+                videoMIMEs[id] = mime
+            }
+            guard let data = videoBytes[id] else { return }
+            let creation = try await saved.save(data, mimeType: videoMIMEs[id] ?? "video/mp4", kind: .video,
+                modelID: record.modelId,
+                prompt: record.prompt == "(resumed from a previous session)" ? nil : record.prompt)
+            savedVideos[id] = creation
+            downloadErrors[id] = nil
+        } catch { downloadErrors[id] = error.localizedDescription }
+    }
+
+    private func exportVideo(_ id: String) {
+        guard let data = videoBytes[id] else {
+            if let creation = savedVideos[id] { exportSaved(creation) }
+            return
+        }
+        export(data, filename: "orb-video.\(videoExtension(videoMIMEs[id] ?? "video/mp4"))")
+    }
+
+    private func exportSaved(_ creation: SavedCreation) {
         Task {
             do {
-                let (data, _) = try await service.download(record.job)
-                await MainActor.run {
-                    let panel = NSSavePanel()
-                    panel.title = "Save Video"
-                    panel.nameFieldStringValue = "orb-video.mp4"
-                    if panel.runModal() == .OK, let url = panel.url {
-                        try? data.write(to: url)
-                    }
-                }
-            } catch {
-                await MainActor.run { errorMessage = error.localizedDescription }
-            }
+                let data = try await saved.data(for: creation)
+                export(data, filename: "orb-video.\(videoExtension(creation.mimeType))")
+            } catch { errorMessage = "Cannot load saved video: \(error.localizedDescription)" }
         }
     }
+
+    private func videoExtension(_ mime: String) -> String {
+        switch mime {
+        case "video/webm": return "webm"
+        case "video/quicktime": return "mov"
+        default: return "mp4"
+        }
+    }
+
+    private func export(_ data: Data, filename: String) {
+        let panel = NSSavePanel()
+        panel.title = "Export Video"
+        panel.nameFieldStringValue = filename
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        Task {
+            do { try await Task.detached { try data.write(to: url, options: .atomic) }.value }
+            catch { errorMessage = "Export failed: \(error.localizedDescription)" }
+        }
+    }
+
 }
 
 private extension VideoJob {

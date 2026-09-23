@@ -50,6 +50,7 @@ ORB is designed for people who want to:
 - Configure temperature, maximum tokens, reasoning, routing, provider preferences, response formats, service tiers, and other generation parameters.
 - Attach multimodal content where supported.
 - Display Markdown, reasoning content, streamed images, tool-related metadata, cost, token counts, and tokens per second.
+- Read Chat and Agent as one inline transcript: reasoning disclosures, assistant commentary, tool activity, and answers stay in arrival order. New transcript chronology persists across relaunches; older sessions retain their content using a grouped fallback because their original interleaving was not recorded.
 - Regenerate the last response, cancel an active run, delete messages, delete sessions, or export a conversation as Markdown.
 - Recover interrupted streaming records after relaunch.
 

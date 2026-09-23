@@ -187,7 +187,8 @@ enum NativeAgentRunner {
                     await onEvent(.runCompleted)
                     return .init(
                         response: text, history: messages, usage: aggregateUsage,
-                        toolNames: usedTools, toolCallDisplays: displays, toolMessages: toolMessages
+                        toolNames: usedTools, toolCallDisplays: displays, toolMessages: toolMessages,
+                        finishReason: finishReason
                     )
                 }
 
@@ -287,6 +288,7 @@ enum NativeAgentRunner {
         )
         var finalText = ""
         var finalUsage: ChatUsage?
+        var finalFinishReason: String?
         for try await event in try await client.stream(finalRequest) {
             try Task.checkCancellation()
             switch event {
@@ -296,6 +298,7 @@ enum NativeAgentRunner {
             case .reasoningDelta(let choice, let delta) where choice == 0:
                 await onEvent(.reasoningDelta(delta))
             case .usage(let usage): finalUsage = usage
+            case .finishReason(let choice, let reason) where choice == 0: finalFinishReason = reason
             case .apiError(let error): throw NativeAgentError.api(error.message)
             default: break
             }
@@ -309,7 +312,7 @@ enum NativeAgentRunner {
         return .init(
             response: finalText, history: messages, usage: aggregateUsage,
             toolNames: usedTools, toolCallDisplays: displays, toolMessages: toolMessages,
-            hitToolBudget: true
+            hitToolBudget: true, finishReason: finalFinishReason
         )
     }
 

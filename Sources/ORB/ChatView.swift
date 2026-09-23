@@ -24,6 +24,8 @@ struct ChatView: View {
     /// Latest sentinel maxY in the scroll coordinate space. Updated by
     /// onPreferenceChange; read by the scroll decision in onChange.
     @State private var bottomOffset: CGFloat = .infinity
+    @State private var scrollIntent = MessageScrollIntent()
+    @State private var pendingFollowScroll: Task<Void, Never>?
     /// Throttle gate: last time we issued a programmatic scroll. Prevents
     /// stacking scroll requests faster than ~30fps.
     @State private var lastScrollRequest: ContinuousClock.Instant?
@@ -58,6 +60,7 @@ struct ChatView: View {
             viewModel.loadFavorites()
             inputFocused = true
         }
+        .onChange(of: chatService.activeConversation?.id) { _, _ in resetFollowState() }
     }
 
     // MARK: - Layout
@@ -68,7 +71,8 @@ struct ChatView: View {
             Rectangle()
                 .fill(Color.primary.opacity(0.07))
                 .frame(height: 1)
-            if let error = chatService.lastError {
+            if let error = chatService.lastError,
+               chatService.lastErrorConversationID == nil || chatService.lastErrorConversationID == chatService.activeConversation?.id {
                 PlaygroundErrorBanner(message: error) { chatService.lastError = nil }
             }
             messageArea
@@ -142,7 +146,7 @@ struct ChatView: View {
                 statusText: agentStatusText,
                 conversation: chatService.activeConversation,
                 formattedCost: chatService.formattedCost,
-                tokensPerSecond: chatService.tokensPerSecond
+                tokensPerSecond: chatService.runState.context?.conversationID == chatService.activeConversation?.id ? chatService.tokensPerSecond : 0
             )
         }
         .frame(width: 224)
@@ -395,13 +399,14 @@ struct ChatView: View {
                 ScrollViewReader { proxy in
                     ZStack(alignment: .bottomTrailing) {
                         ScrollView {
-                            LazyVStack(spacing: 16) {
+                            LazyVStack(spacing: 28) {
                                 ForEach(conversation.messages) { message in
                                     PlaygroundMessageView(
                                         message: message,
                                         isStreaming: chatService.isStreamingMessage(message.id, conversationID: conversation.id),
                                         assistantName: "Assistant",
                                         accent: accent,
+                                        isReasoning: chatService.isReasoningMessage(message.id, conversationID: conversation.id),
                                         onDelete: conversationIsRunning
                                             ? nil
                                             : { chatService.deleteMessage(message.id, from: conversation) }
@@ -414,7 +419,7 @@ struct ChatView: View {
                                 // maxHeight: nil when running (natural height),
                                 // 0 when idle (collapsed) — avoids unbounded
                                 // growth that destabilizes scroll calculations.
-                                activityRow
+                                activityRow(isActive: conversationIsRunning)
                                     .opacity(conversationIsRunning ? 1 : 0)
                                     .frame(maxHeight: conversationIsRunning ? nil : 0)
                                     .clipped()
@@ -436,8 +441,31 @@ struct ChatView: View {
                             .padding(.horizontal, 28)
                             .padding(.vertical, 28)
                             .frame(maxWidth: .infinity)
+                            .background {
+                                GeometryReader { content in
+                                    Color.clear.preference(
+                                        key: MessageTopOffsetKey.self,
+                                        value: MessageTopGeometry(
+                                            top: content.frame(in: .named("chat-message-scroll")).minY,
+                                            height: content.size.height
+                                        )
+                                    )
+                                }
+                            }
                         }
                         .coordinateSpace(name: "chat-message-scroll")
+                        .onPreferenceChange(MessageTopOffsetKey.self) { geometry in
+                            if scrollIntent.observe(
+                                top: geometry.top,
+                                contentHeight: geometry.height,
+                                viewportHeight: viewport.size.height,
+                                threshold: Self.unfollowThreshold
+                            ) {
+                                followsLatest = false
+                                pendingFollowScroll?.cancel()
+                                pendingFollowScroll = nil
+                            }
+                        }
                         .onPreferenceChange(MessageBottomOffsetKey.self) { bottomY in
                             bottomOffset = bottomY
                             updateFollowsLatest(viewportHeight: viewport.size.height)
@@ -445,6 +473,7 @@ struct ChatView: View {
 
                         if conversationIsRunning && !followsLatest {
                             Button {
+                                scrollIntent.reset()
                                 followsLatest = true
                                 withAnimation(.easeOut(duration: 0.2)) {
                                     proxy.scrollTo("chat-message-bottom", anchor: .bottom)
@@ -464,13 +493,7 @@ struct ChatView: View {
                         guard followsLatest else { return }
                         requestFollowScroll(proxy)
                     }
-                    // Reset follow state when switching conversations so a new
-                    // session always starts pinned to the bottom.
-                    .onChange(of: conversation.id) { _, _ in
-                        followsLatest = true
-                        bottomOffset = .infinity
-                        lastScrollRequest = nil
-                    }
+                    .onDisappear { pendingFollowScroll?.cancel(); pendingFollowScroll = nil }
                 }
             }
         } else {
@@ -534,9 +557,11 @@ struct ChatView: View {
         }
     }
 
-    private var activityRow: some View {
+    private func activityRow(isActive: Bool) -> some View {
         HStack(spacing: 10) {
-            ActivityPulseOrb(accent: accent)
+            ActivityPulseOrb(accent: accent, isActive: isActive)
+                .scaleEffect(0.5)
+                .frame(width: 16, height: 16)
             Text(chatService.activityLabel)
                 .font(.system(size: 11, weight: .medium))
                 .foregroundStyle(.secondary)
@@ -544,7 +569,7 @@ struct ChatView: View {
             Spacer(minLength: 0)
         }
         .padding(.vertical, 4)
-        .frame(maxWidth: 650, alignment: .leading)
+        .frame(maxWidth: 780, alignment: .leading)
     }
 
     // MARK: - Composer
@@ -605,16 +630,17 @@ struct ChatView: View {
                         .foregroundStyle(.tertiary)
 
                     Button(action: sendOrStop) {
-                        Image(systemName: chatService.isStreaming ? "stop.fill" : "arrow.up")
+                        Image(systemName: currentSessionRunning ? "stop.fill" : "arrow.up")
                             .font(.system(size: 11, weight: .bold))
                             .foregroundStyle(.white)
                             .frame(width: 28, height: 28)
-                            .background(canSend || chatService.isStreaming ? accent : Color.gray.opacity(0.45))
+                            .background(canSend || currentSessionRunning ? accent : Color.gray.opacity(0.45))
                             .clipShape(Circle())
                             .shadow(color: accent.opacity(canSend ? 0.32 : 0), radius: 5, y: 2)
                     }
                     .buttonStyle(.plain)
-                    .disabled(!canSend && !chatService.isStreaming)
+                    .disabled(!canSend && !currentSessionRunning)
+                    .accessibilityLabel(currentSessionRunning ? "Stop Chat response" : "Send Chat message")
                 }
                 .padding(.horizontal, 10)
                 .padding(.bottom, 9)
@@ -651,6 +677,11 @@ struct ChatView: View {
 
     private var currentModelId: String {
         selectedModelId.isEmpty ? preferredModelId : selectedModelId
+    }
+
+    private var currentSessionRunning: Bool {
+        guard let id = chatService.activeConversation?.id else { return false }
+        return chatService.isRunning(conversationID: id)
     }
 
     private var canSend: Bool {
@@ -700,7 +731,7 @@ struct ChatView: View {
     }
 
     private func sendOrStop() {
-        if chatService.isStreaming { chatService.stopStreaming() } else { sendMessage() }
+        if currentSessionRunning { chatService.stopStreaming() } else { sendMessage() }
     }
 
     private func sendMessage() {
@@ -800,21 +831,22 @@ struct ChatView: View {
     /// layout pressure prevents frame drops on longer responses.
     private static let scrollThrottle: Duration = .milliseconds(33)
 
-    /// Updates `followsLatest` using hysteresis: once following, stay
-    /// following until the user scrolls well past the follow threshold.
+    /// Content growth can move the bottom sentinel by hundreds of points with
+    /// no user input; only the top-origin observer disengages auto-follow.
     private func updateFollowsLatest(viewportHeight: CGFloat) {
-        let distance = bottomOffset - viewportHeight
-        if followsLatest {
-            // Already following — only unfollow if user scrolled well past.
-            if distance > Self.unfollowThreshold {
-                followsLatest = false
-            }
-        } else {
-            // Not following — refollow if we're near the bottom.
-            if distance <= Self.followThreshold {
-                followsLatest = true
-            }
+        if !followsLatest && bottomOffset - viewportHeight <= Self.followThreshold {
+            followsLatest = true
+            scrollIntent.reset()
         }
+    }
+
+    private func resetFollowState() {
+        pendingFollowScroll?.cancel()
+        pendingFollowScroll = nil
+        followsLatest = true
+        scrollIntent.reset()
+        bottomOffset = .infinity
+        lastScrollRequest = nil
     }
 
     /// Issues a throttled, animation-free scroll-to-bottom. Animation is
@@ -829,6 +861,15 @@ struct ChatView: View {
     private func requestFollowScroll(_ proxy: ScrollViewProxy) {
         let now = ContinuousClock.now
         if let last = lastScrollRequest, now - last < Self.scrollThrottle {
+            guard pendingFollowScroll == nil else { return }
+            let remaining = Self.scrollThrottle - (now - last)
+            pendingFollowScroll = Task { @MainActor in
+                do { try await Task.sleep(for: remaining) } catch { return }
+                pendingFollowScroll = nil
+                guard followsLatest else { return }
+                lastScrollRequest = .now
+                proxy.scrollTo("chat-message-bottom", anchor: .bottom)
+            }
             return
         }
         lastScrollRequest = now

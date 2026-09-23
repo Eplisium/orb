@@ -143,13 +143,36 @@ final class URLSessionStreamingTransport: NSObject, HTTPStreamingTransport, URLS
 
         // Await the response head so a non-2xx status can be surfaced before
         // any body is consumed.
-        let response: URLResponse = try await withCheckedThrowingContinuation { continuation in
-            lock.lock()
-            responders[identifier] = continuation
-            lock.unlock()
-            task.resume()
+        // A Task cancelled while waiting for response headers has no body
+        // consumer yet, so body.onTermination cannot be its cancellation path.
+        // Both the delegate and the cancellation handler remove the responder
+        // under one lock; exactly one of them may resume the continuation.
+        let response: URLResponse = try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                lock.lock()
+                responders[identifier] = continuation
+                lock.unlock()
+                if Task.isCancelled {
+                    cancelWaitingForResponse(identifier, task: task)
+                } else {
+                    task.resume()
+                }
+            }
+        } onCancel: {
+            self.cancelWaitingForResponse(identifier, task: task)
         }
+        try Task.checkCancellation()
         return .init(response: response, body: body)
+    }
+
+    private func cancelWaitingForResponse(_ identifier: Int, task: URLSessionDataTask) {
+        task.cancel()
+        lock.lock()
+        let responder = responders.removeValue(forKey: identifier)
+        let body = continuations.removeValue(forKey: identifier)
+        lock.unlock()
+        responder?.resume(throwing: CancellationError())
+        body?.finish(throwing: CancellationError())
     }
 
     private func clear(_ identifier: Int) {

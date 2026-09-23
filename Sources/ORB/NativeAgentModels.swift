@@ -381,6 +381,8 @@ struct NativeAgentRunResult: Sendable {
     /// True when the run exhausted its turn budget and was force-summarized,
     /// so the UI can say the answer may be incomplete.
     let hitToolBudget: Bool
+    /// Raw primary finish reason of the final model turn (e.g. "length").
+    let finishReason: String?
 
     init(
         response: String,
@@ -389,7 +391,8 @@ struct NativeAgentRunResult: Sendable {
         toolNames: [String],
         toolCallDisplays: [ToolCallDisplay],
         toolMessages: [ChatMessage],
-        hitToolBudget: Bool = false
+        hitToolBudget: Bool = false,
+        finishReason: String? = nil
     ) {
         self.response = response
         self.history = history
@@ -398,6 +401,7 @@ struct NativeAgentRunResult: Sendable {
         self.toolCallDisplays = toolCallDisplays
         self.toolMessages = toolMessages
         self.hitToolBudget = hitToolBudget
+        self.finishReason = finishReason
     }
 }
 
