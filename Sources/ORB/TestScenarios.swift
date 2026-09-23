@@ -16,12 +16,20 @@ struct TestScenario: Identifiable, Hashable {
     let systemPrompt: String
     let userPrompt: String
     let evaluationCriteria: [String]
+    /// Version tag of this scenario definition; recorded on every experiment
+    /// run so results can be compared within a version.
+    var version: Int = 1
+    /// Relative paths (within the run's project directory) the scenario
+    /// declares as required artifacts. Web scenarios additionally require a
+    /// non-trivial index.html via the artifact checker. Empty for scenarios
+    /// whose deliverable is whatever files the agent produces.
+    var expectedArtifacts: [String] = []
 
     static func == (lhs: TestScenario, rhs: TestScenario) -> Bool { lhs.id == rhs.id }
     func hash(into hasher: inout Hasher) { hasher.combine(id) }
 }
 
-enum TestCategory: String, CaseIterable, Identifiable {
+enum TestCategory: String, CaseIterable, Identifiable, Codable {
     case webDevelopment = "Web Development"
     case gameDevelopment = "Game Development"
     case appDevelopment = "App Development"
@@ -295,7 +303,8 @@ enum TestCatalog {
                 "AABB collision detection with platforms",
                 "Smooth camera follow",
                 "Playable with keyboard controls",
-            ]
+            ],
+            expectedArtifacts: ["index.html"]
         ),
         TestScenario(
             id: "game-procedural-generation",
@@ -331,7 +340,8 @@ enum TestCatalog {
                 "Multi-octave layering",
                 "Animated time uniforms",
                 "Runnable HTML file with WebGL setup",
-            ]
+            ],
+            expectedArtifacts: ["index.html"]
         ),
 
         // MARK: App Development
@@ -541,7 +551,8 @@ enum TestCatalog {
                 "Animated bar chart transitions",
                 "Dark theme with purposeful palette",
                 "Real-time KPI sparklines",
-            ]
+            ],
+            expectedArtifacts: ["index.html"]
         ),
         TestScenario(
             id: "viz-accessible-charts",

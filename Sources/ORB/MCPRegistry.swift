@@ -35,6 +35,21 @@ struct MCPProbeReport: Sendable {
     }
 }
 
+/// Result of a consent-driven secret migration for one MCP server (F01
+/// step 5). Reported to the settings UI; carries variable NAMES only.
+struct MCPSecretMigrationOutcome: Sendable, Equatable {
+    let serverName: String
+    /// Variables moved into the store by this call.
+    let migratedVariables: [String]
+    /// Variables that were already keychain references and were left alone.
+    let alreadyMigratedVariables: [String]
+    /// nil on success; otherwise a diagnostic. On failure the submitted
+    /// configs are returned unchanged.
+    let error: String?
+
+    var didSucceed: Bool { error == nil }
+}
+
 actor MCPRegistry {
     static let shared = MCPRegistry()
 
@@ -86,6 +101,110 @@ actor MCPRegistry {
                 env: env
             )
         }
+    }
+
+    // MARK: - Secret migration (F01 step 5)
+
+    /// Moves the consented env variables of one server from plaintext config
+    /// into `store`, returning the rewritten config list.
+    ///
+    /// Consent-driven by contract: nothing runs unless the caller (the
+    /// settings UI) passes explicit variable names — nothing migrates
+    /// automatically, and a server without an explicit migration keeps working
+    /// exactly as before. All-or-nothing per server: every requested variable
+    /// is validated first, then saved; if any save fails, the returned configs
+    /// are the input unchanged (the store may already hold earlier saves —
+    /// harmless, since a retry overwrites the same deterministic references).
+    /// Idempotent: variables already carrying a reference are reported back
+    /// and never re-saved, because their plaintext value no longer exists.
+    /// Configs carry references only — no secret value is ever written into a
+    /// config, a log, or UserDefaults.
+    nonisolated static func migrateSecretsToKeychain(
+        configs: [MCPServerConfig],
+        serverNamed name: String,
+        variables: [String],
+        store: CredentialSecretStore
+    ) -> (configs: [MCPServerConfig], outcome: MCPSecretMigrationOutcome) {
+        guard let index = configs.firstIndex(where: { $0.name == name }) else {
+            return (
+                configs,
+                MCPSecretMigrationOutcome(
+                    serverName: name, migratedVariables: [],
+                    alreadyMigratedVariables: [],
+                    error: "Server \"\(name)\" is no longer configured."
+                )
+            )
+        }
+        var config = configs[index]
+        var migrated: [String] = []
+        var alreadyMigrated: [String] = []
+
+        // Phase 1 — validate every requested variable before touching the
+        // store, so an unknown name cannot leave partial writes behind.
+        for variable in variables.sorted() {
+            if config.secretEnv?[variable] != nil {
+                alreadyMigrated.append(variable)
+            } else if config.env[variable] == nil {
+                return (
+                    configs,
+                    MCPSecretMigrationOutcome(
+                        serverName: name, migratedVariables: [],
+                        alreadyMigratedVariables: [],
+                        error: "Env variable \(variable) is not configured for \"\(name)\"."
+                    )
+                )
+            }
+        }
+
+        // Phase 2 — save all plaintext values, aborting on the first failure.
+        for variable in variables.sorted() where config.secretEnv?[variable] == nil {
+            let reference = MCPServerConfig.secretReference(serverName: name, variable: variable)
+            if let error = store.saveSecret(config.env[variable]!, forReference: reference) {
+                return (
+                    configs,
+                    MCPSecretMigrationOutcome(
+                        serverName: name, migratedVariables: [],
+                        alreadyMigratedVariables: [],
+                        error: "Could not store \(variable): \(error)"
+                    )
+                )
+            }
+            migrated.append(variable)
+        }
+
+        // Phase 3 — rewrite the config only after every save succeeded.
+        var secretEnv = config.secretEnv ?? [:]
+        for variable in migrated {
+            secretEnv[variable] = MCPServerConfig.secretReference(serverName: name, variable: variable)
+            config.env[variable] = nil
+        }
+        config.secretEnv = secretEnv.isEmpty ? nil : secretEnv
+        var updated = configs
+        updated[index] = config
+        return (
+            updated,
+            MCPSecretMigrationOutcome(
+                serverName: name, migratedVariables: migrated,
+                alreadyMigratedVariables: alreadyMigrated, error: nil
+            )
+        )
+    }
+
+    /// UserDefaults-backed variant for callers that do not hold the config
+    /// list. The settings view migrates its own in-memory list instead, so a
+    /// user's concurrent edits are never overwritten. Loads the persisted
+    /// configs, migrates one server, and saves only on success.
+    nonisolated static func migrateSecretsToKeychain(
+        serverNamed name: String,
+        variables: [String],
+        store: CredentialSecretStore = KeychainCredentialStore()
+    ) -> MCPSecretMigrationOutcome {
+        let configs = loadConfigs()
+        let (updated, outcome) = migrateSecretsToKeychain(
+            configs: configs, serverNamed: name, variables: variables, store: store
+        )
+        if outcome.didSucceed { saveConfigs(updated) }
+        return outcome
     }
 
     // MARK: - Lifecycle

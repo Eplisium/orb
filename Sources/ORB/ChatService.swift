@@ -66,6 +66,7 @@ final class ChatService: ObservableObject {
     private var agentHistories: [UUID: [AgentAPIMessage]] = [:]
     private var agentPendingContent = ""
     private var agentReasoningContent = ""
+    private var agentReasoningDetails: [ReasoningDetail] = []
     private var agentContentCoalescer: StreamPublishCoalescer<String>?
     private var agentReasoningCoalescer: StreamPublishCoalescer<String>?
     private var regenerationBackups: [UUID: ChatMessage] = [:]
@@ -262,6 +263,9 @@ final class ChatService: ObservableObject {
     private func consumeDirect(request: OpenRouterRequest, context: PlaygroundRunContext) async {
         var fullContent = ""
         var reasoningContent = ""
+        // Structured reasoning blocks (F07): kept separately from the visible
+        // `reasoning` summary so opaque payloads persist for wire fidelity.
+        var reasoningDetailBlocks: [ReasoningDetail] = []
         var streamedImages: [ChatImageAttachment] = []
         var latestUsage: ChatUsage?
         var finishReason: String?
@@ -292,6 +296,9 @@ final class ChatService: ObservableObject {
                 case .reasoningDelta(let choice, let text) where choice == 0:
                     reasoningContent += text
                     reasoningCoalescer.submit(reasoningContent, addedCharacters: text.count)
+                case .reasoningDetails(let choice, let details) where choice == 0:
+                    reasoningDetailBlocks += details
+                    _ = mutateMessage(context, mutation: { $0.reasoningDetails = reasoningDetailBlocks })
                 case .imageDelta(let choice, let imageURL) where choice == 0:
                     // Dedupe: some providers re-emit the same image URL.
                     if !streamedImages.contains(where: { $0.dataURL == imageURL }) {
@@ -504,6 +511,7 @@ final class ChatService: ObservableObject {
         contentPublishCount = 0
         agentPendingContent = ""
         agentReasoningContent = ""
+        agentReasoningDetails = []
         lastCheckpoint = nil
         agentContentCoalescer = StreamPublishCoalescer<String>(
             interval: Self.streamFrameInterval,
@@ -564,6 +572,9 @@ final class ChatService: ObservableObject {
         case .reasoningDelta(let text):
             agentReasoningContent += text
             agentReasoningCoalescer?.submit(agentReasoningContent, addedCharacters: text.count)
+        case .reasoningDetails(let details):
+            agentReasoningDetails += details
+            _ = mutateMessage(context, mutation: { $0.reasoningDetails = agentReasoningDetails })
         case .toolCallUpdated(let call):
             _ = mutateMessage(context, mutation: { message in
                 var calls = message.toolCalls ?? []
@@ -673,14 +684,23 @@ final class ChatService: ObservableObject {
                         function: .init(name: call.name, arguments: call.arguments ?? call.argumentsSummary)
                     )
                 }
-                history.append(.init(role: "assistant", content: nil, toolCalls: apiCalls))
+                history.append(.init(
+                    role: "assistant",
+                    content: nil,
+                    toolCalls: apiCalls,
+                    reasoningDetails: message.reasoningDetails
+                ))
                 for call in pairedCalls {
                     guard let result = toolResults[call.id] else { continue }
                     history.append(.init(role: "tool", content: result.content, toolCallId: call.id, name: call.name))
                 }
             }
             if !message.content.isEmpty {
-                history.append(.init(role: "assistant", content: message.content))
+                history.append(.init(
+                    role: "assistant",
+                    content: message.content,
+                    reasoningDetails: message.reasoningDetails
+                ))
             }
         }
         agentHistories[conversationID] = history
@@ -712,6 +732,8 @@ final class ChatService: ObservableObject {
             all += parts
             return .init(role: message.role, parts: all)
         }
-        return .init(role: message.role, content: message.content)
+        // Reasoning details ride along so chat continuation keeps the same
+        // wire state the agent loop does (F07).
+        return .init(role: message.role, content: message.content, reasoningDetails: message.reasoningDetails)
     }
 }

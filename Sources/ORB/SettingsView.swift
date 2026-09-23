@@ -11,6 +11,11 @@ struct SettingsView: View {
     @State private var showRemoveKeyConfirmation = false
     @State private var keyActionError: String?
     @State private var selectedTab: SettingsTab = .apiKey
+    // Management key section (F03/W04). The draft lives in a small panel
+    // struct so the save/remove rules are unit-testable; the configured state
+    // itself is always read from `account.hasManagementKey`.
+    @State private var management = ManagementKeyPanel()
+    @State private var showRemoveManagementKeyConfirmation = false
 
     enum SettingsTab: String, CaseIterable {
         case apiKey = "API Key"
@@ -39,7 +44,12 @@ struct SettingsView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 20) {
                     switch selectedTab {
-                    case .apiKey: apiKeySection
+                    case .apiKey:
+                        VStack(alignment: .leading, spacing: 24) {
+                            apiKeySection
+                            Divider()
+                            managementKeySection
+                        }
                     case .credits: creditsSection
                     case .activity: activitySection
                     case .keyInfo: keyInfoSection
@@ -78,6 +88,18 @@ struct SettingsView: View {
             Button("Cancel", role: .cancel) {}
         } message: {
             Text("Chat, Agent, credits, and activity will be unavailable until another key is saved.")
+        }
+        .confirmationDialog(
+            ManagementKeyPanel.removeTitle,
+            isPresented: $showRemoveManagementKeyConfirmation,
+            titleVisibility: .visible
+        ) {
+            Button(ManagementKeyPanel.removeButtonLabel, role: .destructive) {
+                management.removeKey(into: account)
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text(ManagementKeyPanel.removeMessage)
         }
     }
 
@@ -196,6 +218,85 @@ struct SettingsView: View {
                     .font(.callout)
                 Spacer()
             }
+        }
+    }
+
+    // MARK: - Management Key (role-aware credentials, F03/W04)
+
+    private var managementKeySection: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Label("Management Key", systemImage: "lock.shield")
+                .font(.title2.weight(.semibold))
+
+            Text(ManagementKeyPanel.explanation)
+                .font(.callout)
+                .foregroundStyle(.secondary)
+
+            // Current configured state, read from the service.
+            HStack {
+                Circle()
+                    .fill(account.hasManagementKey ? Color.green : Color.orange)
+                    .frame(width: 10, height: 10)
+                Text(account.hasManagementKey
+                    ? "Management key configured"
+                    : "No management key set")
+                    .font(.subheadline.weight(.medium))
+                Spacer()
+            }
+            .padding(12)
+            .background(.quaternary.opacity(0.3))
+            .clipShape(RoundedRectangle(cornerRadius: 8))
+
+            VStack(alignment: .leading, spacing: 8) {
+                Text(account.hasManagementKey ? "Replace Management Key" : "Enter Management Key")
+                    .font(.subheadline.weight(.medium))
+
+                // Write-only by design: a SecureField with no reveal affordance.
+                // The value is never displayed back, echoed, or logged.
+                SecureField("sk-or-...", text: $management.draftKey)
+                    .textFieldStyle(.roundedBorder)
+                    .font(.system(size: 13, design: .monospaced))
+
+                HStack {
+                    Button(account.hasManagementKey ? "Replace Key" : "Save Key") {
+                        management.saveDraft(into: account)
+                        // A newly-authorized role can now load the locked panels.
+                        if management.showSaved {
+                            Task { await refreshAccount() }
+                        }
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(!management.canSave)
+
+                    if management.showSaved {
+                        Label("Saved!", systemImage: "checkmark.circle.fill")
+                            .foregroundStyle(.green)
+                            .font(.subheadline)
+                            .transition(.opacity)
+                    }
+
+                    Spacer()
+
+                    if account.hasManagementKey {
+                        Button("Remove Key") {
+                            showRemoveManagementKeyConfirmation = true
+                        }
+                        .foregroundStyle(.red)
+                    }
+                }
+
+                if let error = management.actionError {
+                    Label(error, systemImage: "exclamationmark.triangle.fill")
+                        .font(.caption)
+                        .foregroundStyle(.red)
+                }
+            }
+
+            Link(
+                "Create a management key on openrouter.ai →",
+                destination: URL(string: "https://openrouter.ai/settings/keys")!
+            )
+            .font(.callout)
         }
     }
 
@@ -497,6 +598,58 @@ struct SettingsView: View {
 }
 
 // MARK: - Supporting views
+
+/// Draft + presentation rules for the Settings management-key section.
+/// Extracted from the view so the save/remove semantics and the
+/// confirmation/explanation copy are unit-testable without hosting SwiftUI;
+/// the view only renders this state (configured-state display always reads
+/// `AccountService.hasManagementKey` directly).
+struct ManagementKeyPanel {
+    var draftKey = ""
+    var actionError: String?
+    var showSaved = false
+
+    // MARK: Copy (section 7.7 — confirmations name the exact target and effect)
+
+    static let explanation = "A management key unlocks account-wide credits, usage activity, and administration on OpenRouter. Chat and media generation keep working with your inference key — they never use this one."
+
+    static let removeTitle = "Remove the management key?"
+
+    static let removeMessage = "Credits, activity, and administration will be unavailable until another management key is saved. Chat keeps working with your inference key."
+
+    static let removeButtonLabel = "Remove Management Key"
+
+    var canSave: Bool { !normalizedDraft.isEmpty }
+    private var normalizedDraft: String {
+        draftKey.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// Saves the draft through the service. On failure the service keeps the
+    /// previous key intact and the error is surfaced; on success the draft is
+    /// cleared and never retained (write-only, never displayed or logged).
+    @MainActor
+    mutating func saveDraft(into service: AccountService) {
+        guard canSave else { return }
+        if let error = service.setManagementKey(normalizedDraft) {
+            actionError = error
+            showSaved = false
+        } else {
+            actionError = nil
+            draftKey = ""
+            showSaved = true
+        }
+    }
+
+    /// Removes the key through the service, which also clears published
+    /// credits/activity so nothing from the removed credential stays on screen.
+    @MainActor
+    mutating func removeKey(into service: AccountService) {
+        service.removeManagementKey()
+        actionError = nil
+        showSaved = false
+        draftKey = ""
+    }
+}
 
 struct CreditCard: View {
     let title: String

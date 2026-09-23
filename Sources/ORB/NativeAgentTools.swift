@@ -176,7 +176,8 @@ enum NativeAgentTools {
         name: String,
         argumentsJSON: String,
         workspace: String,
-        fullComputerAccess: Bool
+        fullComputerAccess: Bool,
+        constrainPathsToWorkspace: Bool = false
     ) async throws -> NativeAgentToolResult {
         if name != "fetch_url", !fullComputerAccess {
             return .init(content: "Computer Access is off. Enable it before using \(name).", isError: true)
@@ -192,13 +193,13 @@ enum NativeAgentTools {
             case "fetch_url":
                 return try await fetchURL(arguments)
             case "read_file":
-                return try readFile(arguments, workspace: workspace)
+                return try readFile(arguments, workspace: workspace, constrained: constrainPathsToWorkspace)
             case "list_directory":
-                return try listDirectory(arguments, workspace: workspace)
+                return try listDirectory(arguments, workspace: workspace, constrained: constrainPathsToWorkspace)
             case "search_files":
-                return try searchFiles(arguments, workspace: workspace)
+                return try searchFiles(arguments, workspace: workspace, constrained: constrainPathsToWorkspace)
             case "write_file":
-                return try writeFile(arguments, workspace: workspace)
+                return try writeFile(arguments, workspace: workspace, constrained: constrainPathsToWorkspace)
             case "run_command":
                 return try await runCommand(arguments, workspace: workspace)
             case "run_applescript":
@@ -258,12 +259,15 @@ enum NativeAgentTools {
 
     private static func readFile(
         _ arguments: [String: Any],
-        workspace: String
+        workspace: String,
+        constrained: Bool = false
     ) throws -> NativeAgentToolResult {
         guard let rawPath = arguments["path"] as? String else {
             throw ToolError.missing("path")
         }
-        let url = resolvedPath(rawPath, workspace: workspace)
+        let url = constrained
+            ? try WorkspacePathGuard.containedURL(forRawPath: rawPath, workspace: workspace)
+            : resolvedPath(rawPath, workspace: workspace)
         let text = try String(contentsOf: url, encoding: .utf8)
         let lines = text.components(separatedBy: .newlines)
         let offset = max((arguments["offset"] as? Int ?? 1) - 1, 0)
@@ -283,12 +287,15 @@ enum NativeAgentTools {
 
     private static func listDirectory(
         _ arguments: [String: Any],
-        workspace: String
+        workspace: String,
+        constrained: Bool = false
     ) throws -> NativeAgentToolResult {
         guard let rawPath = arguments["path"] as? String else {
             throw ToolError.missing("path")
         }
-        let url = resolvedPath(rawPath, workspace: workspace)
+        let url = constrained
+            ? try WorkspacePathGuard.containedURL(forRawPath: rawPath, workspace: workspace)
+            : resolvedPath(rawPath, workspace: workspace)
         let keys: Set<URLResourceKey> = [.isDirectoryKey, .fileSizeKey]
         let entries = try FileManager.default.contentsOfDirectory(
             at: url,
@@ -306,11 +313,14 @@ enum NativeAgentTools {
 
     private static func searchFiles(
         _ arguments: [String: Any],
-        workspace: String
+        workspace: String,
+        constrained: Bool = false
     ) throws -> NativeAgentToolResult {
         guard let rawPath = arguments["path"] as? String else { throw ToolError.missing("path") }
         guard let query = arguments["query"] as? String, !query.isEmpty else { throw ToolError.missing("query") }
-        let root = resolvedPath(rawPath, workspace: workspace)
+        let root = constrained
+            ? try WorkspacePathGuard.containedURL(forRawPath: rawPath, workspace: workspace)
+            : resolvedPath(rawPath, workspace: workspace)
         guard let enumerator = FileManager.default.enumerator(
             at: root,
             includingPropertiesForKeys: [.isRegularFileKey, .fileSizeKey],
@@ -354,11 +364,14 @@ enum NativeAgentTools {
 
     private static func writeFile(
         _ arguments: [String: Any],
-        workspace: String
+        workspace: String,
+        constrained: Bool = false
     ) throws -> NativeAgentToolResult {
         guard let rawPath = arguments["path"] as? String else { throw ToolError.missing("path") }
         guard let content = arguments["content"] as? String else { throw ToolError.missing("content") }
-        let url = resolvedPath(rawPath, workspace: workspace)
+        let url = constrained
+            ? try WorkspacePathGuard.containedURL(forRawPath: rawPath, workspace: workspace)
+            : resolvedPath(rawPath, workspace: workspace)
         try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
         try content.write(to: url, atomically: true, encoding: .utf8)
         return .init(content: "Wrote \(content.utf8.count) bytes to \(url.path)", isError: false)

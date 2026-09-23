@@ -1,6 +1,11 @@
 import Foundation
 
-/// Service for authenticated OpenRouter API calls: credits, activity, generation stats.
+/// Service for authenticated OpenRouter API calls: credits and activity.
+///
+/// Credential roles are explicit: credits and activity are management-key
+/// operations per OpenRouter's current contract, and inference keys are
+/// prohibited from them. When no management key is configured the panels lock
+/// with an actionable message and inference (chat) is unaffected.
 @MainActor
 final class AccountService: ObservableObject {
     @Published var credits: CreditsData?
@@ -9,17 +14,44 @@ final class AccountService: ObservableObject {
     @Published var isLoadingActivity = false
     @Published var creditsError: String?
     @Published var activityError: String?
+    @Published var hasManagementKey = false
+
+    typealias DataLoader = (URLRequest) async throws -> (Data, URLResponse)
 
     private let baseURL = "https://openrouter.ai/api/v1"
+    private let profile: CredentialProfile
+    private let secretStore: CredentialSecretStore
+    private let dataLoader: DataLoader
 
-    /// Build an authenticated URLRequest.
-    private func authenticatedRequest(url: URL, method: String = "GET") -> URLRequest? {
-        guard let key = KeychainManager.getAPIKey() else { return nil }
+    init(
+        profile: CredentialProfile = CredentialProfile(
+            managementKeyReference: CredentialRole.management.keychainAccount
+        ),
+        secretStore: CredentialSecretStore = KeychainCredentialStore(),
+        dataLoader: @escaping DataLoader = { try await URLSession.shared.data(for: $0) }
+    ) {
+        self.profile = profile
+        self.secretStore = secretStore
+        self.dataLoader = dataLoader
+        self.hasManagementKey = profile.managementKeyReference.map {
+            secretStore.hasSecret(forReference: $0)
+        } ?? false
+    }
+
+    // MARK: - Role-routed requests
+
+    /// Builds a request authorized for the given role's secret. Returns nil
+    /// when the role has no key configured — callers must surface an
+    /// actionable message instead of falling back to another role's key.
+    private func authenticatedRequest(url: URL, method: String = "GET", role: CredentialRole) -> URLRequest? {
+        guard let key = CredentialRouter.secret(for: role, profile: profile, store: secretStore) else {
+            return nil
+        }
         var request = URLRequest(url: url)
         request.httpMethod = method
         request.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.setValue("ORB", forHTTPHeaderField: "HTTP-Referer")
+        // F12: no HTTP-Referer until an owner-approved URL exists.
         request.setValue("ORB", forHTTPHeaderField: "X-OpenRouter-Title")
         return request
     }
@@ -28,8 +60,9 @@ final class AccountService: ObservableObject {
 
     func fetchCredits() async {
         guard let url = URL(string: "\(baseURL)/credits"),
-              let request = authenticatedRequest(url: url) else {
-            creditsError = "No API key configured"
+              let request = authenticatedRequest(url: url, role: .management) else {
+            credits = nil
+            creditsError = "Management key required. Account-wide credits need a management key — add one in Account. Your inference key still works for chat."
             return
         }
 
@@ -37,7 +70,7 @@ final class AccountService: ObservableObject {
         creditsError = nil
 
         do {
-            let (data, response) = try await URLSession.shared.data(for: request)
+            let (data, response) = try await dataLoader(request)
             guard let http = response as? HTTPURLResponse else {
                 creditsError = "Invalid response"
                 isLoadingCredits = false
@@ -45,7 +78,7 @@ final class AccountService: ObservableObject {
             }
 
             if http.statusCode == 401 {
-                creditsError = "Invalid API key"
+                creditsError = "Management key rejected. Check it in Account."
                 isLoadingCredits = false
                 return
             }
@@ -69,8 +102,9 @@ final class AccountService: ObservableObject {
 
     func fetchActivity() async {
         guard let url = URL(string: "\(baseURL)/activity"),
-              let request = authenticatedRequest(url: url) else {
-            activityError = "No API key configured"
+              let request = authenticatedRequest(url: url, role: .management) else {
+            activity = []
+            activityError = "Management key required. Usage history needs a management key — add one in Account. Your inference key still works for chat."
             return
         }
 
@@ -78,7 +112,7 @@ final class AccountService: ObservableObject {
         activityError = nil
 
         do {
-            let (data, response) = try await URLSession.shared.data(for: request)
+            let (data, response) = try await dataLoader(request)
             guard let http = response as? HTTPURLResponse else {
                 activityError = "Invalid response"
                 isLoadingActivity = false
@@ -86,7 +120,7 @@ final class AccountService: ObservableObject {
             }
 
             if http.statusCode == 401 {
-                activityError = "Invalid API key"
+                activityError = "Management key rejected. Check it in Account."
                 isLoadingActivity = false
                 return
             }
@@ -104,6 +138,29 @@ final class AccountService: ObservableObject {
         }
 
         isLoadingActivity = false
+    }
+
+    // MARK: - Management key lifecycle
+
+    /// Saves a management key. A failed save leaves the previous key intact.
+    @discardableResult
+    func setManagementKey(_ key: String) -> String? {
+        let reference = profile.managementKeyReference ?? CredentialRole.management.keychainAccount
+        let error = secretStore.saveSecret(key, forReference: reference)
+        hasManagementKey = (error == nil)
+        return error
+    }
+
+    /// Removes the management key and immediately clears published account
+    /// data so nothing from the removed credential flashes on screen.
+    func removeManagementKey() {
+        let reference = profile.managementKeyReference ?? CredentialRole.management.keychainAccount
+        _ = secretStore.deleteSecret(forReference: reference)
+        hasManagementKey = false
+        credits = nil
+        activity = []
+        creditsError = nil
+        activityError = nil
     }
 
     // MARK: - Computed summaries

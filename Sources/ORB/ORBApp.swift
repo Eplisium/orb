@@ -4,11 +4,16 @@ import SwiftUI
 struct ORBApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
     @StateObject private var focusManager = FocusManager()
+    // Application-owned dependencies (W07): one container for the app's
+    // lifetime, handed to the view tree so features can stop creating
+    // per-view controller instances.
+    @StateObject private var environment = AppEnvironment()
 
     var body: some Scene {
         WindowGroup {
             ContentView()
                 .environmentObject(focusManager)
+                .environmentObject(environment)
                 .frame(minWidth: 1100, minHeight: 700)
                 .task {
                     // Bring MCP servers up in the background so their tools are

@@ -100,9 +100,10 @@ final class TestRunner: ObservableObject {
                 modelId: modelId,
                 apiKey: apiKey,
                 workspace: projectDir.path,
-                fullComputerAccess: true,
+                fullComputerAccess: false,
                 history: [],
                 systemPromptOverride: agentSystemPrompt,
+                policy: .projectBuild,
                 onActivity: { [weak self] label in
                     guard let self else { return }
                     self.activityLabel = label
@@ -123,12 +124,31 @@ final class TestRunner: ObservableObject {
                 totalTokens: result.usage?.totalTokens ?? 0,
                 cost: result.usage?.cost ?? 0,
                 latencyMs: elapsed,
-                success: !result.response.isEmpty,
-                errorMessage: result.response.isEmpty ? "Agent returned empty response" : nil,
+                success: !result.response.isEmpty && !ResponseAssertions.isRefusal(result.response),
+                errorMessage: result.response.isEmpty
+                    ? "Agent returned empty response"
+                    : (ResponseAssertions.isRefusal(result.response) ? "Agent response was a refusal" : nil),
                 outputPath: projectDir.path
             )
             results.insert(testResult, at: 0)
             DatabaseManager.shared.saveTestResult(testResult)
+
+            // W12/F10: durable experiment record. Evaluation (artifacts +
+            // assertions + verdict) is separate from the transport-level
+            // `success` flag above; the verdict lives only on the record.
+            let experimentRecord = ExperimentEvaluation.record(
+                scenario: scenario,
+                modelID: modelId,
+                policy: .projectBuild,
+                projectDirectory: projectDir,
+                response: result.response,
+                usage: result.usage,
+                completionStatus: result.hitToolBudget ? .exhausted : .completed,
+                startedAt: startTime,
+                finishedAt: Date(),
+                errorMessage: testResult.errorMessage
+            )
+            DatabaseManager.shared.saveExperimentRunRecord(experimentRecord)
 
             // Log tool usage
             for toolName in result.toolNames {
@@ -154,6 +174,23 @@ final class TestRunner: ObservableObject {
             )
             results.insert(testResult, at: 0)
             DatabaseManager.shared.saveTestResult(testResult)
+
+            // W12: cancelled runs keep their evidence (partial artifacts,
+            // cancellation reason). No usage block survives cancellation, so
+            // spend is labelled unknown rather than zero.
+            let cancelledRecord = ExperimentEvaluation.record(
+                scenario: scenario,
+                modelID: modelId,
+                policy: .projectBuild,
+                projectDirectory: projectDir,
+                response: "",
+                usage: nil,
+                completionStatus: .cancelled,
+                startedAt: startTime,
+                finishedAt: Date(),
+                errorMessage: "Cancelled by user"
+            )
+            DatabaseManager.shared.saveExperimentRunRecord(cancelledRecord)
         } catch {
             let elapsed = Int(Date().timeIntervalSince(startTime) * 1000)
             let testResult = TestRunResult(
@@ -173,6 +210,21 @@ final class TestRunner: ObservableObject {
             )
             results.insert(testResult, at: 0)
             DatabaseManager.shared.saveTestResult(testResult)
+
+            // W12: failed runs keep their evidence too; spend is unknown.
+            let failedRecord = ExperimentEvaluation.record(
+                scenario: scenario,
+                modelID: modelId,
+                policy: .projectBuild,
+                projectDirectory: projectDir,
+                response: "",
+                usage: nil,
+                completionStatus: .failed,
+                startedAt: startTime,
+                finishedAt: Date(),
+                errorMessage: error.localizedDescription
+            )
+            DatabaseManager.shared.saveExperimentRunRecord(failedRecord)
         }
 
         isRunning = false

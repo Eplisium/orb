@@ -11,9 +11,47 @@ struct MCPServerConfig: Codable, Sendable, Identifiable, Equatable {
     var args: [String] = []
     var env: [String: String] = [:]
     var isEnabled: Bool = true
+    /// Env variables whose values live in the credential secret store instead
+    /// of this config: variable name → store reference (F01 step 5). Optional
+    /// so every config persisted before references decodes unchanged, and a
+    /// config without migrated secrets re-encodes without the key. The values
+    /// are REFERENCES — never secret bytes.
+    var secretEnv: [String: String]? = nil
 
     enum CodingKeys: String, CodingKey {
-        case id, name, command, args, env, isEnabled
+        case id, name, command, args, env, isEnabled, secretEnv
+    }
+
+    /// Deterministic store reference for one server env variable, namespaced
+    /// per server+variable so two servers never overwrite each other's secret.
+    /// Sanitized to the same character class as tool-name slugs.
+    static func secretReference(serverName: String, variable: String) -> String {
+        "orb-mcp-\(MCPToolNaming.sanitize(serverName))-\(MCPToolNaming.sanitize(variable))"
+    }
+
+    /// Name-based guess that an env variable usually holds a secret. Used ONLY
+    /// to preselect the migration consent checkboxes — the user always decides
+    /// which variables move.
+    static func looksLikeSecret(_ variable: String) -> Bool {
+        let upper = variable.uppercased()
+        let markers = ["KEY", "TOKEN", "SECRET", "PASSWORD", "PASSWD", "CREDENTIAL", "AUTH"]
+        return markers.contains { upper.contains($0) }
+    }
+}
+
+/// A keychain-referenced secret could not be resolved while building the
+/// subprocess environment. Failing closed beats launching the server without
+/// its credential — or worse, with the raw reference string as the value.
+enum MCPEnvironmentError: LocalizedError, Equatable {
+    case missingSecret(server: String, variable: String, reference: String)
+
+    var errorDescription: String? {
+        switch self {
+        case .missingSecret(let server, let variable, let reference):
+            return "MCP server \"\(server)\" could not read the secret for env variable "
+                + "\(variable) (reference \(reference)) from the Keychain. "
+                + "Re-save the secret or remove the reference in MCP settings."
+        }
     }
 }
 
@@ -122,6 +160,9 @@ enum MCPToolNaming {
 /// pending-request table plus the write handle must not race.
 actor MCPConnection {
     private let config: MCPServerConfig
+    /// Injected secret store used to resolve `secretEnv` references at launch.
+    /// Production uses the Keychain-backed store; tests inject fakes.
+    private let secretStore: CredentialSecretStore
     private var process: Process?
     private var stdinHandle: FileHandle?
     private var pending: [Int: CheckedContinuation<JSONValue, Error>] = [:]
@@ -139,12 +180,38 @@ actor MCPConnection {
     /// unbounded wait would hang the whole agent run.
     private let requestTimeout: Duration = .seconds(120)
 
-    init(config: MCPServerConfig) {
+    init(config: MCPServerConfig, secretStore: CredentialSecretStore = KeychainCredentialStore()) {
         self.config = config
+        self.secretStore = secretStore
     }
 
     var name: String { config.name }
     var isRunning: Bool { process?.isRunning ?? false }
+
+    // MARK: Environment resolution
+
+    /// Builds the subprocess environment. Plaintext env is applied first, then
+    /// every `secretEnv` reference is resolved through `store`, so a resolved
+    /// secret wins over a stale plaintext copy of the same variable. A missing
+    /// or empty secret throws instead of launching: the raw reference string
+    /// must never reach the process environment.
+    static func resolvedEnvironment(
+        base: [String: String],
+        config: MCPServerConfig,
+        store: CredentialSecretStore
+    ) throws -> [String: String] {
+        var environment = base
+        config.env.forEach { environment[$0.key] = $0.value }
+        for (variable, reference) in (config.secretEnv ?? [:]).sorted(by: { $0.key < $1.key }) {
+            guard let secret = store.secret(forReference: reference), !secret.isEmpty else {
+                throw MCPEnvironmentError.missingSecret(
+                    server: config.name, variable: variable, reference: reference
+                )
+            }
+            environment[variable] = secret
+        }
+        return environment
+    }
 
     // MARK: Lifecycle
 
@@ -160,8 +227,16 @@ actor MCPConnection {
             .joined(separator: " ")
         task.arguments = ["-lc", "exec \(argv)"]
 
-        var environment = ProcessInfo.processInfo.environment
-        config.env.forEach { environment[$0.key] = $0.value }
+        let environment: [String: String]
+        do {
+            environment = try Self.resolvedEnvironment(
+                base: ProcessInfo.processInfo.environment,
+                config: config,
+                store: secretStore
+            )
+        } catch let error as MCPEnvironmentError {
+            throw MCPError.launchFailed(error.localizedDescription)
+        }
         task.environment = environment
 
         let stdinPipe = Pipe()

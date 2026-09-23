@@ -11,6 +11,10 @@ struct FilesView: View {
     @StateObject private var service = FileService()
     @State private var errorMessage: String?
     @State private var showSaved = false
+    /// The file awaiting delete confirmation. The service layer refuses an
+    /// unconfirmed delete, so the confirmation dialog is the only way the
+    /// destructive call is ever issued.
+    @State private var pendingDelete: WorkspaceFile?
 
     private let accent = Color.teal
 
@@ -29,6 +33,22 @@ struct FilesView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color(nsColor: .windowBackgroundColor))
         .task { await service.fetchFiles() }
+        .confirmationDialog(
+            "Delete “\(pendingDelete?.filename ?? pendingDelete?.id ?? "")”? This cannot be undone.",
+            isPresented: Binding(
+                get: { pendingDelete != nil },
+                set: { if !$0 { pendingDelete = nil } }
+            ),
+            titleVisibility: .visible
+        ) {
+            Button("Delete File", role: .destructive) {
+                if let file = pendingDelete { delete(file) }
+                pendingDelete = nil
+            }
+            Button("Cancel", role: .cancel) { pendingDelete = nil }
+        } message: {
+            Text("The file is removed from the workspace and its storage quota is freed. Chat references to it stop working.")
+        }
     }
 
     private var headerBar: some View {
@@ -134,7 +154,7 @@ struct FilesView: View {
             }
             .buttonStyle(.plain)
             .help("Copy file ID")
-            Button(role: .destructive) { delete(file) } label: {
+            Button(role: .destructive) { pendingDelete = file } label: {
                 Image(systemName: "trash").font(.caption)
             }
             .buttonStyle(.plain)
@@ -167,12 +187,11 @@ struct FilesView: View {
                         let scoped = url.startAccessingSecurityScopedResource()
                         defer { if scoped { url.stopAccessingSecurityScopedResource() } }
                         let data = try Data(contentsOf: url)
-                        guard data.count <= 100_000_000 else {
-                            errorMessage = "\(url.lastPathComponent) exceeds the 100 MB upload limit."
-                            continue
-                        }
                         let mime = (try? url.resourceValues(forKeys: [.contentTypeKey]).contentType?.preferredMIMEType)
                             ?? "application/octet-stream"
+                        // Empty/oversized uploads are validated (and rejected
+                        // with a clear message) by FileService before any
+                        // request is sent.
                         _ = try await service.upload(filename: url.lastPathComponent, mimeType: mime, data: data)
                     } catch is CancellationError {
                         break
@@ -208,7 +227,9 @@ struct FilesView: View {
     private func delete(_ file: WorkspaceFile) {
         Task {
             do {
-                try await service.delete(id: file.id)
+                // Reached only through the confirmation dialog; the service
+                // refuses an unconfirmed delete outright.
+                _ = try await service.delete(id: file.id, confirming: true)
             } catch {
                 errorMessage = error.localizedDescription
             }

@@ -4,8 +4,13 @@ import SwiftUI
 
 @MainActor
 final class BrowserViewModel: ObservableObject {
-    let api = APIService()
-    let db = DatabaseManager.shared
+    let api: APIService
+    let db: DatabaseManager
+
+    init(api: APIService? = nil, db: DatabaseManager = DatabaseManager.shared) {
+        self.api = api ?? APIService()
+        self.db = db
+    }
 
     @Published var searchText = ""
     @Published var sortField: SortField = .created
@@ -23,6 +28,13 @@ final class BrowserViewModel: ObservableObject {
     // Per-provider endpoints for the selected model
     @Published var endpoints: [ModelEndpoint] = []
     @Published var isLoadingEndpoints = false
+
+    /// ID of the selection the current endpoint fetch belongs to. The List
+    /// binding writes `selectedModel` directly before `selectModel` runs, so
+    /// this internal value — not the binding-mutated property — is the
+    /// authoritative transition identity.
+    private var selectedModelId: String?
+    private var endpointTask: Task<Void, Never>?
 
     var providerOptions: [String] {
         var set = Set<String>()
@@ -128,29 +140,47 @@ final class BrowserViewModel: ObservableObject {
 
     func selectModel(_ model: ModelInfo?) {
         guard let model else {
-            selectedModel = nil
-            endpoints = []
+            deselect()
             return
         }
-        // Avoid double-fetch if already selected
-        guard selectedModel?.id != model.id else { return }
-        selectedModel = model
-        fetchEndpointsForSelected()
+        // Single owned transition: equality is checked against the ID this
+        // view model last transitioned to, so re-selecting the current model
+        // never duplicates a fetch.
+        guard model.id != selectedModelId else { return }
+        beginEndpointTransition(model)
     }
 
     /// Force-refresh endpoints for the currently selected model (e.g. retry after error).
     func refetchEndpoints() {
-        guard selectedModel != nil else { return }
-        fetchEndpointsForSelected()
+        guard let model = selectedModel else { return }
+        beginEndpointTransition(model)
     }
 
-    private func fetchEndpointsForSelected() {
-        guard let model = selectedModel else { return }
-        Task {
-            isLoadingEndpoints = true
+    private func deselect() {
+        selectedModelId = nil
+        endpointTask?.cancel()
+        endpointTask = nil
+        selectedModel = nil
+        endpoints = []
+        isLoadingEndpoints = false
+    }
+
+    /// One owned fetch per selection transition, cancellable and keyed to the
+    /// selected model ID. Results are applied only if the selection still
+    /// matches the model the request was started for, so a slow response for
+    /// A can never populate B's detail view.
+    private func beginEndpointTransition(_ model: ModelInfo) {
+        endpointTask?.cancel()
+        selectedModelId = model.id
+        selectedModel = model
+        endpoints = []
+        isLoadingEndpoints = true
+        endpointTask = Task { [weak self] in
+            guard let api = self?.api else { return }
             let eps = await api.fetchEndpoints(for: model.id)
-            endpoints = eps
-            isLoadingEndpoints = false
+            guard let self, !Task.isCancelled, self.selectedModelId == model.id else { return }
+            self.endpoints = eps
+            self.isLoadingEndpoints = false
         }
     }
 
@@ -158,8 +188,10 @@ final class BrowserViewModel: ObservableObject {
         await api.fetchModels()
         loadFavorites()
         newThisWeekCount = api.models.filter { isNewThisWeek($0) }.count
+        // Refetch the selected model's endpoints explicitly; routing through
+        // selectModel would be suppressed by the same-model equality guard.
         if let m = selectedModel {
-            selectModel(m)
+            beginEndpointTransition(m)
         }
     }
 
@@ -226,6 +258,10 @@ struct ContentView: View {
     @State private var selectedSection: SidebarSection = .allModels
     @State private var databaseFailure: DatabaseLaunchFailure?
     @EnvironmentObject private var focusManager: FocusManager
+    // Application-owned dependencies (W07). Declared now so the injection
+    // path is live; consumers keep their current initializers until the
+    // supervised shell session migrates them additively.
+    @EnvironmentObject private var environment: AppEnvironment
     @FocusState private var searchFocused: Bool
 
     var body: some View {
@@ -321,8 +357,9 @@ struct ContentView: View {
         .listStyle(.sidebar)
         .navigationSplitViewColumnWidth(min: 160, ideal: 180, max: 220)
         .onChange(of: selectedSection) { _, newValue in
-            vm.showFavoritesOnly = (newValue == .favorites)
-            vm.showNewThisWeek = (newValue == .newThisWeek)
+            let effects = AppRouter.filterEffects(for: newValue)
+            vm.showFavoritesOnly = effects.showFavoritesOnly
+            vm.showNewThisWeek = effects.showNewThisWeek
         }
     }
 
@@ -332,8 +369,9 @@ struct ContentView: View {
         let isSelected = (selectedSection == section)
         Button {
             selectedSection = section
-            vm.showFavoritesOnly = (section == .favorites)
-            vm.showNewThisWeek = (section == .newThisWeek)
+            let effects = AppRouter.filterEffects(for: section)
+            vm.showFavoritesOnly = effects.showFavoritesOnly
+            vm.showNewThisWeek = effects.showNewThisWeek
         } label: {
             HStack(spacing: 6) {
                 Image(systemName: section.icon)

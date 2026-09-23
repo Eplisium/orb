@@ -99,6 +99,11 @@ struct AgentAPIMessage: Codable, Sendable {
     let name: String?
     /// Generated images attached to an assistant message (`images: [...]`).
     let images: [AssistantImagePart]?
+    /// Structured reasoning blocks the API returned for this assistant
+    /// message. OpenRouter requires the consecutive sequence to be passed
+    /// back unmodified on the following tool turn, so this is encoded to the
+    /// wire verbatim (F07).
+    let reasoningDetails: [ReasoningDetail]?
 
     init(
         role: String,
@@ -107,7 +112,8 @@ struct AgentAPIMessage: Codable, Sendable {
         toolCalls: [AgentToolCall]? = nil,
         toolCallId: String? = nil,
         name: String? = nil,
-        images: [AssistantImagePart]? = nil
+        images: [AssistantImagePart]? = nil,
+        reasoningDetails: [ReasoningDetail]? = nil
     ) {
         self.role = role
         self.content = content
@@ -116,6 +122,7 @@ struct AgentAPIMessage: Codable, Sendable {
         self.toolCallId = toolCallId
         self.name = name
         self.images = images
+        self.reasoningDetails = reasoningDetails
     }
 
     /// Convenience for a multimodal user turn: text plus attachment parts.
@@ -131,6 +138,7 @@ struct AgentAPIMessage: Codable, Sendable {
         case role, content, name, images
         case toolCalls = "tool_calls"
         case toolCallId = "tool_call_id"
+        case reasoningDetails = "reasoning_details"
     }
 
     init(from decoder: Decoder) throws {
@@ -155,6 +163,7 @@ struct AgentAPIMessage: Codable, Sendable {
         toolCallId = try container.decodeIfPresent(String.self, forKey: .toolCallId)
         name = try container.decodeIfPresent(String.self, forKey: .name)
         images = try container.decodeIfPresent([AssistantImagePart].self, forKey: .images)
+        reasoningDetails = try container.decodeIfPresent([ReasoningDetail].self, forKey: .reasoningDetails)
     }
 
     func encode(to encoder: Encoder) throws {
@@ -169,6 +178,9 @@ struct AgentAPIMessage: Codable, Sendable {
         try container.encodeIfPresent(toolCallId, forKey: .toolCallId)
         try container.encodeIfPresent(name, forKey: .name)
         try container.encodeIfPresent(images, forKey: .images)
+        // Omitted when absent so messages without reasoning details keep the
+        // exact wire shape they always had.
+        try container.encodeIfPresent(reasoningDetails, forKey: .reasoningDetails)
     }
 }
 
@@ -258,6 +270,10 @@ enum NativeAgentEvent: Sendable, Equatable {
     case modelTurnStarted(Int)
     case textDelta(String)
     case reasoningDelta(String)
+    /// Structured reasoning blocks streamed for the current turn, forwarded
+    /// so the UI/persistence layer can store the same wire state the agent
+    /// keeps in its history (pitfall 28: both streaming paths stay in sync).
+    case reasoningDetails([ReasoningDetail])
     case toolCallUpdated(AssembledAgentToolCall)
     case toolExecutionStarted(AssembledAgentToolCall)
     case toolResult(AssembledAgentToolCall, NativeAgentToolResult)

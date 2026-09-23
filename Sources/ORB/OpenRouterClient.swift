@@ -236,7 +236,7 @@ final class OpenRouterClient: OpenRouterClientProtocol, @unchecked Sendable {
         urlRequest.setValue("Bearer \(request.apiKey)", forHTTPHeaderField: "Authorization")
         urlRequest.setValue("application/json", forHTTPHeaderField: "Content-Type")
         urlRequest.setValue("text/event-stream", forHTTPHeaderField: "Accept")
-        urlRequest.setValue("ORB", forHTTPHeaderField: "HTTP-Referer")
+        // F12: no HTTP-Referer until an owner-approved URL exists.
         urlRequest.setValue("ORB", forHTTPHeaderField: "X-OpenRouter-Title")
         do {
             urlRequest.httpBody = try OpenRouterRequestEncoder.encodeBody(request, stream: true)
@@ -502,7 +502,10 @@ private struct RequestBody: Encodable {
     }
 
     func encode(to encoder: Encoder) throws {
-        let settings = request.settings.validated()
+        // Strict validation: a malformed required constraint (e.g. a broken
+        // JSON Schema) must abort the request, never silently drop the user's
+        // structured-output requirement and send an unconstrained paid call.
+        let settings = try request.settings.validatedStrict()
         var container = encoder.container(keyedBy: CodingKeys.self)
 
         try container.encode(request.model, forKey: .model)

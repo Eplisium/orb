@@ -493,6 +493,11 @@ struct ChatMessage: Codable, Identifiable, Equatable, Sendable {
     /// Chain-of-thought emitted by reasoning models, shown in a collapsible
     /// section so it never crowds out the answer.
     var reasoning: String?
+    /// Structured reasoning blocks the API returned (`reasoning_details`).
+    /// Wire state kept separately from the visible `reasoning` summary so
+    /// opaque signature/encrypted payloads survive round trips without ever
+    /// being rendered (F07).
+    var reasoningDetails: [ReasoningDetail]?
 
     init(
         id: UUID = UUID(),
@@ -506,7 +511,8 @@ struct ChatMessage: Codable, Identifiable, Equatable, Sendable {
         status: ChatMessageStatus = .complete,
         finishReason: String? = nil,
         errorMessage: String? = nil,
-        reasoning: String? = nil
+        reasoning: String? = nil,
+        reasoningDetails: [ReasoningDetail]? = nil
     ) {
         self.id = id
         self.role = role
@@ -520,10 +526,12 @@ struct ChatMessage: Codable, Identifiable, Equatable, Sendable {
         self.finishReason = finishReason
         self.errorMessage = errorMessage
         self.reasoning = reasoning
+        self.reasoningDetails = reasoningDetails
     }
 
     enum CodingKeys: String, CodingKey {
         case role, content, reasoning, parts, images
+        case reasoningDetails = "reasoning_details"
         case toolCalls = "tool_calls_display"
         case toolCallId = "tool_call_id"
         case toolName = "tool_name"
@@ -546,6 +554,7 @@ struct ChatMessage: Codable, Identifiable, Equatable, Sendable {
         finishReason = try c.decodeIfPresent(String.self, forKey: .finishReason)
         errorMessage = try c.decodeIfPresent(String.self, forKey: .errorMessage)
         reasoning = try c.decodeIfPresent(String.self, forKey: .reasoning)
+        reasoningDetails = try c.decodeIfPresent([ReasoningDetail].self, forKey: .reasoningDetails)
     }
 
     /// Compares the fields that actually drive rendering. The previous version
@@ -563,6 +572,7 @@ struct ChatMessage: Codable, Identifiable, Equatable, Sendable {
             && lhs.toolCalls == rhs.toolCalls
             && lhs.parts == rhs.parts
             && lhs.images == rhs.images
+            && lhs.reasoningDetails == rhs.reasoningDetails
     }
 }
 

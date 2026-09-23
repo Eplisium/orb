@@ -15,6 +15,13 @@ struct MCPSettingsView: View {
     @State private var importText = ""
     @State private var showImport = false
     @State private var importError: String?
+    // Consent-driven secret migration (F01 step 5): per-server checkbox
+    // selection (keyed by config id), in-flight markers, and the reported
+    // outcome. Only variable NAMES are ever held or displayed — values are
+    // resolved through the injected store, never shown or logged.
+    @State private var secretSelection: [UUID: Set<String>] = [:]
+    @State private var migrating: Set<UUID> = []
+    @State private var migrationOutcomes: [UUID: MCPSecretMigrationOutcome] = [:]
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -122,6 +129,8 @@ struct MCPSettingsView: View {
             .textFieldStyle(.roundedBorder)
             .font(.system(size: 11, design: .monospaced))
 
+            secretConsentSection(config.wrappedValue)
+
             if let message = status[config.wrappedValue.name] {
                 Text(message)
                     .font(.system(size: 10))
@@ -202,6 +211,130 @@ struct MCPSettingsView: View {
         }
         .padding(16)
         .frame(width: 460)
+    }
+
+    // MARK: - Secret migration consent (F01 step 5)
+
+    /// Lists this server's env variable NAMES and lets the user consent to
+    /// moving selected values into the macOS Keychain. Nothing migrates
+    /// automatically: the button is the only trigger, the migrated values are
+    /// never displayed, and the reported outcome comes straight from the
+    /// migration call.
+    @ViewBuilder
+    private func secretConsentSection(_ config: MCPServerConfig) -> some View {
+        let stored = (config.secretEnv ?? [:]).keys.sorted()
+        let candidates = config.env.keys.sorted()
+
+        if !stored.isEmpty {
+            HStack(spacing: 5) {
+                Image(systemName: "lock.fill")
+                    .font(.system(size: 9))
+                    .foregroundStyle(.green)
+                Text("In the Keychain: \(stored.joined(separator: ", "))")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
+            }
+        }
+
+        if !candidates.isEmpty {
+            VStack(alignment: .leading, spacing: 6) {
+                Text("ENV VALUES")
+                    .font(.system(size: 9, weight: .bold))
+                    .foregroundStyle(.secondary)
+                Text("Selected values move into the macOS Keychain; the settings file keeps only a reference. Values are never shown.")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
+                ForEach(candidates, id: \.self) { variable in
+                    Toggle(isOn: secretSelectionBinding(config, variable)) {
+                        Text(variable)
+                            .font(.system(size: 10, design: .monospaced))
+                    }
+                    .toggleStyle(.checkbox)
+                }
+                HStack(spacing: 6) {
+                    Button {
+                        migrateSecrets(config)
+                    } label: {
+                        Text(migrateButtonLabel(config))
+                    }
+                    .controlSize(.small)
+                    .disabled(effectiveSelection(config).isEmpty || migrating.contains(config.id))
+
+                    if migrating.contains(config.id) {
+                        ProgressView().controlSize(.mini)
+                    }
+                }
+                if let outcome = migrationOutcomes[config.id] {
+                    Text(migrationMessage(outcome))
+                        .font(.system(size: 10))
+                        .foregroundStyle(outcome.didSucceed ? .green : .red)
+                }
+            }
+        }
+    }
+
+    private func migrateButtonLabel(_ config: MCPServerConfig) -> String {
+        let count = effectiveSelection(config).count
+        return count == 1 ? "Move 1 value to Keychain" : "Move \(count) values to Keychain"
+    }
+
+    /// The variables the migration would move right now: the user's explicit
+    /// selection, defaulting to the name-heuristic guesses.
+    private func effectiveSelection(_ config: MCPServerConfig) -> Set<String> {
+        if let chosen = secretSelection[config.id] { return chosen }
+        return Set(config.env.keys.filter { MCPServerConfig.looksLikeSecret($0) })
+    }
+
+    private func secretSelectionBinding(
+        _ config: MCPServerConfig, _ variable: String
+    ) -> Binding<Bool> {
+        Binding<Bool>(
+            get: { effectiveSelection(config).contains(variable) },
+            set: { on in
+                var current = secretSelection[config.id]
+                    ?? Set(config.env.keys.filter { MCPServerConfig.looksLikeSecret($0) })
+                if on { current.insert(variable) } else { current.remove(variable) }
+                secretSelection[config.id] = current
+            }
+        )
+    }
+
+    private func migrateSecrets(_ config: MCPServerConfig) {
+        let variables = effectiveSelection(config).sorted()
+        guard !variables.isEmpty, !migrating.contains(config.id) else { return }
+        migrating.insert(config.id)
+        Task {
+            // Production path: the Keychain-backed store resolves and holds
+            // the values; the rewritten configs carry references only.
+            let (updated, outcome) = MCPRegistry.migrateSecretsToKeychain(
+                configs: configs,
+                serverNamed: config.name,
+                variables: variables,
+                store: KeychainCredentialStore()
+            )
+            await MainActor.run {
+                migrating.remove(config.id)
+                migrationOutcomes[config.id] = outcome
+                if outcome.didSucceed {
+                    configs = updated
+                    persist()
+                    secretSelection[config.id] = nil
+                }
+            }
+        }
+    }
+
+    private func migrationMessage(_ outcome: MCPSecretMigrationOutcome) -> String {
+        if let error = outcome.error { return error }
+        var parts: [String] = []
+        if !outcome.migratedVariables.isEmpty {
+            parts.append("Moved \(outcome.migratedVariables.joined(separator: ", ")) into the Keychain.")
+        }
+        if !outcome.alreadyMigratedVariables.isEmpty {
+            parts.append("Already stored: \(outcome.alreadyMigratedVariables.joined(separator: ", ")).")
+        }
+        if parts.isEmpty { return "Nothing to migrate." }
+        return "✓ " + parts.joined(separator: " ") + " Reconnect the server to pick the values up."
     }
 
     private func persist() {

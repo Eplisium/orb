@@ -21,8 +21,11 @@ enum NativeAgentRunner {
         /// force-summarizes instead of discarding the run.
         maximumTurns: Int = 100,
         toolExecutor: ToolExecutor? = nil,
+        policy: ToolPolicy? = nil,
+        approvals: ApprovalCoordinator? = nil,
         onEvent: @escaping @Sendable (NativeAgentEvent) async -> Void
     ) async throws -> NativeAgentRunResult {
+        let effectivePolicy = policy ?? ToolPolicy.legacy(fullComputerAccess: fullComputerAccess)
         let custom = systemPromptOverride?.trimmingCharacters(in: .whitespacesAndNewlines)
         var promptText = systemPrompt(workspace: workspace, fullComputerAccess: fullComputerAccess)
         if let custom, !custom.isEmpty {
@@ -32,10 +35,17 @@ enum NativeAgentRunner {
         messages += history.filter { $0.role != "system" }
         messages.append(.init(role: "user", content: prompt))
 
-        var definitions = NativeAgentTools.definitions(fullComputerAccess: fullComputerAccess)
+        // One deny-by-default policy gates advertisement AND execution. The
+        // full native list is generated once and filtered, so a Web Only
+        // session neither exposes nor can invoke local or MCP tools, and a
+        // policy change invalidates stale definitions immediately.
+        var definitions = NativeAgentTools.definitions(fullComputerAccess: true)
+            .filter { effectivePolicy.allowsDefinition(name: $0.function.name) }
         // Fold in tools published by connected MCP servers. Native tools win on
-        // a name collision because the MCP names are namespaced.
+        // a name collision because the MCP names are namespaced. Every MCP
+        // definition additionally requires its server to be approved.
         let mcpDefinitions = await MCPRegistry.shared.toolDefinitions()
+            .filter { effectivePolicy.allowsDefinition(name: $0.function.name) }
         let nativeNames = Set(definitions.map(\.function.name))
         definitions += mcpDefinitions.filter { !nativeNames.contains($0.function.name) }
 
@@ -52,7 +62,8 @@ enum NativeAgentRunner {
             }
             let result = try await NativeAgentTools.execute(
                 name: call.name, argumentsJSON: call.arguments,
-                workspace: workspace, fullComputerAccess: fullComputerAccess
+                workspace: workspace, fullComputerAccess: fullComputerAccess,
+                constrainPathsToWorkspace: effectivePolicy.constrainsFilesystem
             )
             try Task.checkCancellation()
             return result
@@ -78,6 +89,10 @@ enum NativeAgentRunner {
             let stream = try await client.stream(request)
             var text = ""
             var reasoning = ""
+            // Structured reasoning blocks returned this turn. Attached to the
+            // assistant wire message and passed back unmodified on the next
+            // tool turn (F07 / reasoning-tokens.md continuity rule).
+            var turnReasoningDetails: [ReasoningDetail] = []
             var finishReason: String?
             var turnUsage: ChatUsage?
             var fragments: [Int: ToolBuilder] = [:]
@@ -91,6 +106,11 @@ enum NativeAgentRunner {
                 case .reasoningDelta(let choice, let delta) where choice == 0:
                     reasoning += delta
                     await onEvent(.reasoningDelta(delta))
+                case .reasoningDetails(let choice, let details) where choice == 0:
+                    turnReasoningDetails += details
+                    // Pitfall 28: the agent path surfaces exactly what the
+                    // chat path surfaces.
+                    await onEvent(.reasoningDetails(details))
                 case .toolCallFragment(let choice, let index, let id, let type, let name, let arguments) where choice == 0:
                     var builder = fragments[index] ?? ToolBuilder(index: index)
                     if let id, builder.id.isEmpty { builder.id = id }
@@ -135,7 +155,12 @@ enum NativeAgentRunner {
             let apiCalls = (calls + rejected.map(\.call)).map {
                 AgentToolCall(id: $0.id, type: $0.type, function: .init(name: $0.name, arguments: $0.arguments))
             }
-            messages.append(.init(role: "assistant", content: text.isEmpty ? nil : text, toolCalls: apiCalls.isEmpty ? nil : apiCalls))
+            messages.append(.init(
+                role: "assistant",
+                content: text.isEmpty ? nil : text,
+                toolCalls: apiCalls.isEmpty ? nil : apiCalls,
+                reasoningDetails: turnReasoningDetails.isEmpty ? nil : turnReasoningDetails
+            ))
 
             for (call, reason) in rejected {
                 guard seenCallIDs.insert(call.id).inserted else { continue }
@@ -204,7 +229,32 @@ enum NativeAgentRunner {
                     arguments: call.arguments
                 ))
                 await onEvent(.toolExecutionStarted(call))
-                let result = try await executor(call)
+                // Fail closed immediately before execution: even a hallucinated
+                // or stale tool name cannot reach an executor.
+                let result: NativeAgentToolResult
+                if effectivePolicy.allowsExecution(name: call.name) {
+                    var approved = true
+                    if let approvals, effectivePolicy.requiresApproval(name: call.name) {
+                        approved = await approvals.requestApproval(
+                            toolName: call.name,
+                            server: MCPToolNaming.resolve(call.name)?.server,
+                            summary: String(call.arguments.prefix(300))
+                        )
+                    }
+                    if approved {
+                        result = try await executor(call)
+                    } else {
+                        result = NativeAgentToolResult(
+                            content: "Denied: the user did not approve \"\(call.name)\" for this session.",
+                            isError: true
+                        )
+                    }
+                } else {
+                    result = NativeAgentToolResult(
+                        content: "Denied: tool \"\(call.name)\" is not permitted in this session's mode.",
+                        isError: true
+                    )
+                }
                 try Task.checkCancellation()
                 await onEvent(.toolResult(call, result))
                 if let index = displays.firstIndex(where: { $0.id == call.id }) {
@@ -272,12 +322,14 @@ enum NativeAgentRunner {
         fullComputerAccess: Bool,
         history: [AgentAPIMessage],
         systemPromptOverride: String? = nil,
+        policy: ToolPolicy? = nil,
         onActivity: @escaping @MainActor (String) -> Void
     ) async throws -> NativeAgentRunResult {
         try await run(
             prompt: prompt, modelId: modelId, apiKey: apiKey, workspace: workspace,
             fullComputerAccess: fullComputerAccess, history: history,
             systemPromptOverride: systemPromptOverride,
+            policy: policy,
             onEvent: { event in
                 let label: String?
                 switch event {

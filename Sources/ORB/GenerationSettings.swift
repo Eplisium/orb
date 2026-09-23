@@ -362,3 +362,34 @@ struct GenerationSettings: Codable, Equatable, Sendable, Hashable {
         String(format: value == value.rounded() ? "%.0f" : "%.2f", value)
     }
 }
+
+/// Thrown by `GenerationSettings.validatedStrict()` when a required constraint
+/// cannot be honored. Submission must be blocked, never silently weakened.
+enum GenerationSettingsValidationError: Error, LocalizedError, Equatable {
+    case invalidResponseFormat(String)
+
+    var errorDescription: String? {
+        switch self {
+        case .invalidResponseFormat(let detail):
+            return "Structured output (JSON Schema) is invalid: \(detail). Fix it in Generation Settings before sending."
+        }
+    }
+}
+
+extension GenerationSettings {
+    /// Validates without weakening the user's constraints. Unlike `validated()`,
+    /// a malformed structured-output requirement throws instead of being
+    /// dropped, so it can never become an unconstrained paid request.
+    func validatedStrict() throws -> GenerationSettings {
+        if case .jsonSchema(let name, let schema, _) = responseFormat {
+            let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+            if trimmed.isEmpty {
+                throw GenerationSettingsValidationError.invalidResponseFormat("the schema name is blank")
+            }
+            if schema.objectValue == nil {
+                throw GenerationSettingsValidationError.invalidResponseFormat("the schema is not a JSON object")
+            }
+        }
+        return validated()
+    }
+}

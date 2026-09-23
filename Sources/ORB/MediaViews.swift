@@ -334,6 +334,9 @@ struct VideoView: View {
     @State private var errorMessage: String?
     @State private var jobs: [VideoJobRecord] = []
     @State private var totalCost = 0.0
+    // Durable jobs that can be resumed (W09 step 3). Refreshed on appear and
+    // whenever the service's active job changes (poll ticks, terminal states).
+    @State private var resumableRecords: [JobRecord] = []
 
     private let accent = Color.indigo
 
@@ -353,7 +356,17 @@ struct VideoView: View {
         .task {
             await service.fetchModels()
             if selectedModelId.isEmpty { selectedModelId = service.models.first?.id ?? "" }
+            refreshResumableRecords()
         }
+        // Poll ticks and terminal transitions flow through activeJob, so the
+        // recoverable listing stays current while a run is in flight.
+        .onChange(of: service.activeJob) { _, _ in
+            refreshResumableRecords()
+        }
+    }
+
+    private func refreshResumableRecords() {
+        resumableRecords = service.resumableRecords
     }
 
     private var controlsColumn: some View {
@@ -502,6 +515,7 @@ struct VideoView: View {
             } else {
                 ScrollView {
                     LazyVStack(spacing: 12) {
+                        durableJobsSection
                         ForEach(jobs) { record in
                             jobCard(record)
                         }
@@ -512,6 +526,98 @@ struct VideoView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color(nsColor: .windowBackgroundColor))
+    }
+
+    // MARK: Durable resume (W09 step 3)
+
+    /// Recoverable durable jobs plus the persistence-failure notice. Resuming
+    /// restarts the owned poll loop — never a new submission.
+    @ViewBuilder
+    private var durableJobsSection: some View {
+        if !resumableRecords.isEmpty || service.durablePersistenceError != nil {
+            VStack(alignment: .leading, spacing: 8) {
+                Text("RECOVERABLE JOBS")
+                    .font(.system(size: 9, weight: .bold))
+                    .foregroundStyle(.secondary)
+                ForEach(resumableRecords) { record in
+                    resumableRow(record)
+                }
+                if let persistenceError = service.durablePersistenceError {
+                    Label(persistenceError, systemImage: "externaldrive.badge.exclamationmark")
+                        .font(.caption2)
+                        .foregroundStyle(.orange)
+                }
+            }
+        }
+    }
+
+    private func resumableRow(_ record: JobRecord) -> some View {
+        HStack(spacing: 8) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(record.modelID ?? "video")
+                    .font(.caption.monospacedDigit())
+                    .lineLimit(1)
+                // The durable record's last known remote status, preserved
+                // verbatim across local stops.
+                Text("Last status: \(record.lastRemoteStatus ?? "unknown")")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+            Spacer()
+            Button {
+                resumeDurable(record)
+            } label: {
+                Label("Resume", systemImage: "arrow.clockwise")
+                    .font(.caption.weight(.medium))
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+            // Double-resume guard: disabled while this service's poll loop is
+            // already running for this record's remote job.
+            .disabled(service.isRunInFlight(for: record))
+            .help(service.isRunInFlight(for: record)
+                ? "Already polling this job"
+                : "Resume polling without submitting a new job")
+        }
+        .padding(10)
+        .background(Color.primary.opacity(0.03))
+        .clipShape(RoundedRectangle(cornerRadius: 10))
+    }
+
+    /// Resumes a durable record through the service, routing poll updates into
+    /// the same job-row update path the submit flow uses.
+    private func resumeDurable(_ record: JobRecord) {
+        guard !service.isRunInFlight(for: record) else { return }
+        errorMessage = nil
+        let rowID = record.id.uuidString
+        if !jobs.contains(where: { $0.id == rowID }) {
+            jobs.insert(VideoJobRecord(
+                id: rowID,
+                job: VideoJob(
+                    id: record.remoteID ?? "",
+                    status: record.lastRemoteStatus ?? "queued"
+                ),
+                // Durable records do not carry the original prompt.
+                prompt: "(resumed from a previous session)",
+                modelId: record.modelID ?? "video"
+            ), at: 0)
+        }
+        Task {
+            do {
+                let finished = try await service.resume(record) { update in
+                    Task { @MainActor in
+                        if let index = jobs.firstIndex(where: { $0.id == rowID }) {
+                            jobs[index].job = update
+                        }
+                    }
+                }
+                totalCost += finished.cost ?? 0
+            } catch is CancellationError {
+                // Local stop or navigation: the record stays resumable.
+            } catch {
+                errorMessage = error.localizedDescription
+            }
+        }
     }
 
     private func jobCard(_ record: VideoJobRecord) -> some View {

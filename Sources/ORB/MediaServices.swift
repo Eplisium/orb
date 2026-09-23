@@ -11,30 +11,122 @@ import Foundation
 
 // MARK: - Shared authenticated transport
 
+/// Builds `/api/v1` endpoint URLs and enforces the exact origin policy for
+/// caller-supplied polling references.
+///
+/// Path components and query items are kept strictly separate. Path segments
+/// are percent-encoded individually, and a path containing `?` or `#` is
+/// rejected instead of being silently folded into the path (which
+/// historically produced `/generation%3Fid=…`). `pollingURL(_:base:)`
+/// resolves a supplied polling reference (absolute URL, absolute path, or
+/// relative reference) and validates it before any credential may be
+/// attached.
+enum MediaEndpointURL {
+    /// Canonical API base for every authenticated media request.
+    static let apiBase = URL(string: "https://openrouter.ai/api/v1")!
+    static let allowedHost = "openrouter.ai"
+    static let allowedPathPrefix = "/api/v1/"
+
+    static func url(path: String, queryItems: [URLQueryItem] = [], base: URL = apiBase) throws -> URL {
+        guard !path.isEmpty, !path.contains("?"), !path.contains("#") else {
+            throw MediaServiceError.invalidPath(path)
+        }
+        var allowed = CharacterSet.alphanumerics
+        allowed.insert(charactersIn: "-._~!$&'()*+,;=:@")
+        let encoded = path
+            .split(separator: "/", omittingEmptySubsequences: true)
+            .map { segment -> String in
+                let raw = String(segment).removingPercentEncoding ?? String(segment)
+                return raw.addingPercentEncoding(withAllowedCharacters: allowed) ?? raw
+            }
+            .joined(separator: "/")
+        var components = URLComponents(url: base, resolvingAgainstBaseURL: false)!
+        if !encoded.isEmpty {
+            components.percentEncodedPath = components.percentEncodedPath + "/" + encoded
+        }
+        if !queryItems.isEmpty {
+            components.queryItems = queryItems
+        }
+        guard let url = components.url else {
+            throw MediaServiceError.invalidPath(path)
+        }
+        return url
+    }
+
+    /// Resolves a polling reference against the API base and validates the
+    /// exact policy before any credential is attached: HTTPS, host
+    /// `openrouter.ai`, standard port, no user info, and a path under
+    /// `/api/v1/`. Anything else throws `MediaServiceError.untrustedURL`.
+    static func pollingURL(_ reference: String, base: URL = apiBase) throws -> URL {
+        let trimmed = reference.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            throw MediaServiceError.untrustedURL(reference)
+        }
+        if let candidate = URL(string: trimmed), candidate.scheme != nil {
+            return try validate(candidate, original: reference)
+        }
+        let resolutionBase = URL(
+            string: base.absoluteString.hasSuffix("/") ? base.absoluteString : base.absoluteString + "/"
+        )!
+        guard let resolved = URL(string: trimmed, relativeTo: resolutionBase) else {
+            throw MediaServiceError.untrustedURL(reference)
+        }
+        return try validate(resolved.absoluteURL, original: reference)
+    }
+
+    /// Validates that `url` is an approved API origin. Callers must invoke
+    /// this before attaching any bearer credential to a request.
+    static func validate(_ url: URL, original: String) throws -> URL {
+        func reject() -> MediaServiceError { .untrustedURL(original) }
+        guard url.scheme?.lowercased() == "https" else { throw reject() }
+        guard url.host?.lowercased() == allowedHost else { throw reject() }
+        guard url.port == nil || url.port == 443 else { throw reject() }
+        guard url.user == nil, url.password == nil else { throw reject() }
+        guard url.path.hasPrefix(allowedPathPrefix), url.path.count > allowedPathPrefix.count else {
+            throw reject()
+        }
+        let segments = url.path.split(separator: "/")
+        guard !segments.contains(where: { $0 == "." || $0 == ".." }) else { throw reject() }
+        return url
+    }
+}
+
 /// Minimal authenticated JSON client shared by every dedicated media API.
 /// Every method throws `MediaServiceError` — never a raw URL error — so the
 /// UI can show one coherent failure shape.
-final class MediaTransport: Sendable {
+/// `open` only so tests can inject a recording double that overrides
+/// `send`; the request builders themselves stay shared with production.
+open class MediaTransport: @unchecked Sendable {
     private let session: URLSession
-    private let baseURL = URL(string: "https://openrouter.ai/api/v1")!
+    private let baseURL = MediaEndpointURL.apiBase
+    private let apiKeyProvider: @Sendable () throws -> String
 
-    init(session: URLSession = .shared) { self.session = session }
+    init(session: URLSession = .shared, apiKeyProvider: (@Sendable () throws -> String)? = nil) {
+        self.session = session
+        self.apiKeyProvider = apiKeyProvider ?? Self.defaultAPIKeyProvider
+    }
 
-    func apiKey() throws -> String {
+    private static let defaultAPIKeyProvider: @Sendable () throws -> String = {
         guard let key = KeychainManager.getAPIKey(), !key.isEmpty else {
             throw MediaServiceError.missingAPIKey
         }
         return key
     }
 
-    func request(path: String, method: String = "GET", body: Data? = nil) throws -> URLRequest {
-        var request = URLRequest(
-            url: baseURL.appendingPathComponent(path),
-            timeoutInterval: NetworkTimeouts.request
-        )
+    func apiKey() throws -> String { try apiKeyProvider() }
+
+    /// Builds a request for an already-validated absolute URL. The origin
+    /// policy is re-checked here so the bearer token can never be attached
+    /// to an unapproved origin; validation happens before the credential is
+    /// fetched and attached.
+    func request(url: URL, method: String = "GET", body: Data? = nil) throws -> URLRequest {
+        let approved = try MediaEndpointURL.validate(url, original: url.absoluteString)
+        var request = URLRequest(url: approved, timeoutInterval: NetworkTimeouts.request)
         request.httpMethod = method
         request.setValue("Bearer \(try apiKey())", forHTTPHeaderField: "Authorization")
-        request.setValue("ORB", forHTTPHeaderField: "HTTP-Referer")
+        // F12: no HTTP-Referer is sent — optional URL attribution stays
+        // omitted until there is an owner-approved URL. The documented
+        // display name is kept.
         request.setValue("ORB", forHTTPHeaderField: "X-OpenRouter-Title")
         if let body {
             request.httpBody = body
@@ -43,12 +135,23 @@ final class MediaTransport: Sendable {
         return request
     }
 
+    /// Builds a request from a canonical path plus explicit query items.
+    /// Path components and query items stay strictly separate: `path` must
+    /// not contain `?` or `#`, and query values are percent-encoded.
+    func request(path: String, queryItems: [URLQueryItem] = [], method: String = "GET", body: Data? = nil) throws -> URLRequest {
+        try request(url: MediaEndpointURL.url(path: path, queryItems: queryItems, base: baseURL), method: method, body: body)
+    }
+
     /// Sends the request and decodes a `Decodable` body, mapping HTTP
     /// failures to typed `MediaServiceError` cases.
-    func send<T: Decodable>(_ request: URLRequest, as type: T.Type = T.self) async throws -> T {
+    open func send<T: Decodable>(_ request: URLRequest, as type: T.Type = T.self) async throws -> T {
         let (data, response): (Data, URLResponse)
         do {
             (data, response) = try await session.data(for: request)
+        } catch let error as URLError where error.code == .cancelled {
+            // A locally-cancelled request must surface as CancellationError,
+            // never as a transport failure.
+            throw CancellationError()
         } catch is CancellationError {
             throw CancellationError()
         } catch {
@@ -68,10 +171,15 @@ final class MediaTransport: Sendable {
     }
 
     /// Sends the request and returns raw bytes (audio/video downloads).
-    func sendRaw(_ request: URLRequest) async throws -> (Data, String?) {
+    /// `open` so tests can capture credential-free download requests.
+    open func sendRaw(_ request: URLRequest) async throws -> (Data, String?) {
         let (data, response): (Data, URLResponse)
         do {
             (data, response) = try await session.data(for: request)
+        } catch let error as URLError where error.code == .cancelled {
+            // A locally-cancelled request must surface as CancellationError,
+            // never as a transport failure.
+            throw CancellationError()
         } catch is CancellationError {
             throw CancellationError()
         } catch {
@@ -102,9 +210,23 @@ private struct MediaErrorEnvelope: Decodable {
 
 enum MediaServiceError: Error, LocalizedError, Equatable {
     case missingAPIKey
+    /// A request path contained query/fragment separators (`?`/`#`); paths
+    /// and query items must be supplied separately.
+    case invalidPath(String)
+    /// A caller-supplied polling URL failed the exact origin policy.
+    case untrustedURL(String)
     case http(status: Int, message: String)
     case transport(String)
     case decoding(String)
+    /// A media/file request was rejected locally (before any request was
+    /// sent) — e.g. an empty or oversized file upload.
+    case invalidUpload(String)
+    /// A destructive operation was invoked without the explicit
+    /// confirmation the service layer requires.
+    case deleteNotConfirmed(String)
+    /// A durable job record cannot be resumed (no remote ID, or already
+    /// terminal).
+    case resumeUnavailable(String)
 
     var errorDescription: String? {
         switch self {
@@ -121,6 +243,16 @@ enum MediaServiceError: Error, LocalizedError, Equatable {
             return "Network error while contacting OpenRouter: \(message)"
         case .decoding(let message):
             return "Could not understand OpenRouter's response: \(message)"
+        case .invalidPath(let path):
+            return "Invalid API path \"\(path)\": supply the path and query items separately (paths cannot contain '?' or '#')."
+        case .invalidUpload(let message):
+            return message
+        case .deleteNotConfirmed(let id):
+            return "Deleting file \(id) requires explicit confirmation. Deletion is irreversible."
+        case .resumeUnavailable(let reason):
+            return "This job cannot be resumed: \(reason)"
+        case .untrustedURL(let reference):
+            return "Refusing to send credentials to an unapproved URL: \(reference). Only HTTPS URLs on openrouter.ai with a path under /api/v1/ are allowed."
         }
     }
 }
@@ -159,6 +291,96 @@ struct ImageGenArchitecture: Codable, Sendable, Hashable {
 
 struct ImageGenModelList: Decodable {
     let data: [ImageGenModel]
+}
+
+// MARK: Image endpoint discovery (`GET /images/models/{author}/{slug}/endpoints`)
+
+/// One billable pricing line of an image endpoint (documented
+/// `ImagePricingEntry` shape). `billable` values include `output_image`,
+/// `input_image`, `input_reference`, …; `unit` is `image`, `megapixel`,
+/// `token`, or `request`; `variant` carries resolution-tier pricing (e.g.
+/// `2k`, `4k`). Never present these lines as token rates.
+struct ImageEndpointPricing: Decodable, Hashable, Sendable {
+    let billable: String
+    let unit: String
+    let costUSD: Double
+    let variant: String?
+
+    enum CodingKeys: String, CodingKey {
+        case billable, unit, variant
+        case costUSD = "cost_usd"
+    }
+}
+
+/// Typed capability descriptor for one supported parameter of an image
+/// endpoint. Documented types: `enum` (discrete value allowlist), `range`
+/// (integer `[min, max]`), and `boolean` (present = supported). Unknown
+/// descriptor types decode as `.unknown` instead of failing the response.
+enum ImageEndpointCapability: Decodable, Hashable, Sendable {
+    case enumValues([String])
+    case range(min: Double, max: Double)
+    case boolean
+    case unknown(type: String)
+
+    private enum CodingKeys: String, CodingKey { case type, values, min, max }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let type = try container.decode(String.self, forKey: .type)
+        switch type {
+        case "enum":
+            if let values = try? container.decode([String].self, forKey: .values) {
+                self = .enumValues(values)
+                return
+            }
+        case "range":
+            if let min = try? container.decode(Double.self, forKey: .min),
+               let max = try? container.decode(Double.self, forKey: .max) {
+                self = .range(min: min, max: max)
+                return
+            }
+        case "boolean":
+            self = .boolean
+            return
+        default:
+            break
+        }
+        self = .unknown(type: type)
+    }
+}
+
+/// One per-provider endpoint of an image model (documented
+/// `ImageEndpoint` shape). Every field except `provider_tag` (nullable) is
+/// required by the schema; the definitive per-endpoint parameter set lives
+/// in `supportedParameters` (a subset of the model-level union).
+struct ImageModelEndpoint: Decodable, Hashable, Sendable, Identifiable {
+    var id: String { providerSlug }
+    let providerName: String
+    let providerSlug: String
+    /// Pin requests to a specific provider; `nil` when provider-level
+    /// routing is unavailable.
+    let providerTag: String?
+    let supportedParameters: [String: ImageEndpointCapability]
+    let allowedPassthroughParameters: [String]
+    let supportsStreaming: Bool
+    let pricing: [ImageEndpointPricing]
+
+    enum CodingKeys: String, CodingKey {
+        case providerName = "provider_name"
+        case providerSlug = "provider_slug"
+        case providerTag = "provider_tag"
+        case supportedParameters = "supported_parameters"
+        case allowedPassthroughParameters = "allowed_passthrough_parameters"
+        case supportsStreaming = "supports_streaming"
+        case pricing
+    }
+}
+
+/// Documented `ImageModelEndpointsResponse`: top-level `{id, endpoints}` —
+/// deliberately not wrapped in a `data` envelope like the model lists.
+struct ImageModelEndpointsResponse: Decodable, Sendable {
+    let id: String
+    let endpoints: [ImageModelEndpoint]
 }
 
 struct ImageGenRequest: Encodable {
@@ -254,6 +476,21 @@ final class ImageGenService: ObservableObject {
         } catch {
             modelsError = error.localizedDescription
         }
+    }
+
+    /// Lists the per-provider endpoints for an image model
+    /// (`GET /images/models/{author}/{slug}/endpoints`), sorted by provider
+    /// slug. The model ID's `author/slug` segments are percent-encoded
+    /// individually by `MediaEndpointURL`; a `?`/`#` in the ID is rejected.
+    /// No query parameters are documented for this route, so none are sent.
+    func fetchImageModelEndpoints(modelID: String) async throws -> [ImageModelEndpoint] {
+        let trimmed = modelID.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            throw MediaServiceError.invalidPath(modelID)
+        }
+        let request = try transport.request(path: "images/models/\(trimmed)/endpoints")
+        let response: ImageModelEndpointsResponse = try await transport.send(request)
+        return response.endpoints.sorted { $0.providerSlug < $1.providerSlug }
     }
 
     /// Generates images. Returns one `ChatImageAttachment` per image, with
@@ -412,9 +649,25 @@ final class VideoGenService: ObservableObject {
     @Published var jobError: String?
 
     private let transport: MediaTransport
-    private var pollTask: Task<Void, Never>?
+    /// Application-owned durable job state (W06). Injectable so tests can
+    /// isolate storage; the default view path uses the shared controller so
+    /// job records survive navigation and app restarts.
+    private let jobController: JobController
+    /// The owned polling task, assigned by `submitAndPoll`, so `stopPolling()`
+    /// can cancel the in-flight loop.
+    private var pollTask: Task<VideoJob, Error>?
+    private var pollGeneration = 0
+    /// Remote ID of the job the owned poll loop is currently running for, if
+    /// any. Distinct from `activeJob`, which deliberately keeps the last known
+    /// state after a local stop — a stopped job is not an in-flight run.
+    private var inFlightRemoteID: String?
 
-    init(transport: MediaTransport = MediaTransport()) { self.transport = transport }
+    init(transport: MediaTransport = MediaTransport(), jobController: JobController? = nil) {
+        self.transport = transport
+        // Resolved on the main actor (VideoGenService is @MainActor): the
+        // default view path shares the application-owned controller.
+        self.jobController = jobController ?? JobController.shared
+    }
 
     func fetchModels() async {
         guard !isLoadingModels else { return }
@@ -434,6 +687,11 @@ final class VideoGenService: ObservableObject {
 
     /// Submits the job, then polls until it reaches a terminal status.
     /// Calls `onUpdate` on every poll so the UI can show progress.
+    ///
+    /// The polling loop runs in a task this method owns and assigns to
+    /// `pollTask`, so `stopPolling()` cancels the in-flight loop. Local
+    /// cancellation surfaces as `CancellationError` and never claims the
+    /// remote job was cancelled; remote failures throw `MediaServiceError`.
     func submitAndPoll(
         _ request: VideoGenRequest,
         pollInterval: Duration = .seconds(5),
@@ -442,24 +700,144 @@ final class VideoGenService: ObservableObject {
         stopPolling()
         let body = try JSONEncoder().encode(request)
         let submit = try transport.request(path: "videos", method: "POST", body: body)
-        var job: VideoJob = try await transport.send(submit)
+        let job: VideoJob
+        do {
+            job = try await transport.send(submit)
+        } catch {
+            // W01/W06 honesty: the POST /videos was SENT, so the outcome is
+            // genuinely unknown — a remote (possibly paid) job may or may not
+            // exist. Record exactly that durably — never an automatic
+            // resubmission candidate — and rethrow unchanged. Failures thrown
+            // ABOVE this point (request building, JSON encoding) sent nothing
+            // and must not record an unknown outcome. The localized
+            // description carries no key material: these errors are built
+            // from server messages and URLError descriptions, never from
+            // request headers.
+            jobController.recordUnknownSubmission(
+                modelID: request.model,
+                error: error.localizedDescription
+            )
+            throw error
+        }
         activeJob = job
+        // Durable record keyed by the remote job ID, persisted before any
+        // poll result is relied upon. A failed write never aborts the flow
+        // (JobController surfaces it as lastPersistenceError).
+        jobController.recordVideoSubmission(
+            remoteID: job.id,
+            modelID: request.model,
+            remoteStatus: job.status,
+            error: job.error,
+            cost: job.cost
+        )
         onUpdate(job)
+        return try await runOwnedPollLoop(from: job, pollInterval: pollInterval, onUpdate: onUpdate)
+    }
+
+    /// Resumes polling for a durable job record (W09): restarts the owned
+    /// poll loop for a job that already exists remotely, without any new
+    /// submission — a resume never issues `POST /videos`. Use this after an
+    /// app restart or a local stop (`JobRecord.stoppedLocally`) so the job
+    /// survives the view that started it.
+    ///
+    /// - Parameter record: a durable record with a remote ID and a
+    ///   non-terminal polling state (see `JobRecord.isResumable`).
+    /// - Throws: `MediaServiceError.resumeUnavailable` when the record has
+    ///   no remote ID to poll or already reached a terminal state — both
+    ///   refusals happen before any request is sent.
+    func resume(
+        _ record: JobRecord,
+        pollInterval: Duration = .seconds(5),
+        onUpdate: @escaping @Sendable (VideoJob) -> Void = { _ in }
+    ) async throws -> VideoJob {
+        guard let remoteID = record.remoteID?
+            .trimmingCharacters(in: .whitespacesAndNewlines), !remoteID.isEmpty else {
+            throw MediaServiceError.resumeUnavailable(
+                "the job never received a remote ID, so there is nothing to poll. Resubmitting is a user decision because it can duplicate a paid job."
+            )
+        }
+        guard !record.pollingState.isTerminal else {
+            throw MediaServiceError.resumeUnavailable(
+                "the job already finished (\(record.pollingState.rawValue))."
+            )
+        }
+        stopPolling()
+        // Seed the loop from the last known durable state; the first poll
+        // goes to the canonical `videos/<remoteID>` route (or the record's
+        // stored polling URL after origin validation) exactly like an
+        // uninterrupted poll would.
+        let initial = VideoJob(id: remoteID, status: record.lastRemoteStatus ?? "queued")
+        onUpdate(initial)
+        return try await runOwnedPollLoop(
+            from: initial, pollInterval: pollInterval, onUpdate: onUpdate
+        )
+    }
+
+    /// Starts the owned polling task for `job` and awaits its terminal
+    /// result. Shared by submit-then-poll and resume so both flows have the
+    /// same cancellation and durability semantics.
+    private func runOwnedPollLoop(
+        from job: VideoJob,
+        pollInterval: Duration,
+        onUpdate: @escaping @Sendable (VideoJob) -> Void
+    ) async throws -> VideoJob {
+        activeJob = job
+        pollGeneration += 1
+        let generation = pollGeneration
+        inFlightRemoteID = job.id
+        let loop: Task<VideoJob, Error> = Task {
+            try await pollUntilTerminal(job, pollInterval: pollInterval, onUpdate: onUpdate)
+        }
+        pollTask = loop
+        defer {
+            if pollGeneration == generation {
+                pollTask = nil
+                inFlightRemoteID = nil
+            }
+        }
+        return try await loop.value
+    }
+
+    /// Polls until a terminal status. Prefers the canonical `videos/<jobId>`
+    /// route; a supplied `polling_url` is used only after it resolves and
+    /// passes the exact origin policy, before any credential is attached to
+    /// the request.
+    private func pollUntilTerminal(
+        _ initial: VideoJob,
+        pollInterval: Duration,
+        onUpdate: @escaping @Sendable (VideoJob) -> Void
+    ) async throws -> VideoJob {
+        var job = initial
         while !job.isTerminal {
             try Task.checkCancellation()
             try await Task.sleep(for: pollInterval)
             try Task.checkCancellation()
-            // Prefer the absolute polling URL when given, else the job path.
-            let path = job.pollingURL?.replacingOccurrences(of: "/api/v1/", with: "") ?? "videos/\(job.id)"
-            let poll = try transport.request(path: path)
-            job = try await transport.send(poll)
+            job = try await transport.send(pollRequest(for: job))
             activeJob = job
+            jobController.recordPollUpdate(
+                remoteID: job.id, remoteStatus: job.status, error: job.error, cost: job.cost
+            )
             onUpdate(job)
         }
+        // Terminal: persist the final state and cost regardless of outcome so
+        // a completed job keeps its usage and a failure keeps its error.
+        jobController.recordTerminal(
+            remoteID: job.id, remoteStatus: job.status, error: job.error, cost: job.cost
+        )
         guard job.isSuccess else {
             throw MediaServiceError.transport(job.error ?? "Video generation \(job.status).")
         }
         return job
+    }
+
+    private func pollRequest(for job: VideoJob) throws -> URLRequest {
+        if let reference = job.pollingURL,
+           !reference.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            // Validate the exact origin policy before attaching credentials.
+            let url = try MediaEndpointURL.pollingURL(reference)
+            return try transport.request(url: url)
+        }
+        return try transport.request(path: "videos/\(job.id)")
     }
 
     /// Downloads the finished video bytes (first unsigned URL).
@@ -472,9 +850,42 @@ final class VideoGenService: ObservableObject {
         return try await transport.sendRaw(request)
     }
 
+    /// Cancels the owned polling task, if any. Local stopping only ends the
+    /// polling loop; the remote job keeps running and its last known state
+    /// stays in `activeJob`. The durable record is marked `.stoppedLocally` —
+    /// explicitly distinct from remote failure/cancellation and still
+    /// resumable.
     func stopPolling() {
+        if let active = activeJob, !active.isTerminal {
+            jobController.recordStoppedLocally(remoteID: active.id)
+        }
         pollTask?.cancel()
         pollTask = nil
+        inFlightRemoteID = nil
+    }
+
+    // MARK: Durable resume affordance (W09 step 3 wiring)
+
+    /// Durable records that can still be resumed (remote ID present, polling
+    /// not terminal), read from this service's own JobController. Views use
+    /// this passthrough instead of reaching into `JobController.shared`, so
+    /// tests and alternate hosts stay isolated from shared state.
+    var resumableRecords: [JobRecord] { jobController.resumableJobs() }
+
+    /// Last persistence failure from the durable store, surfaced beside the
+    /// resume affordance so a failed write is visible, never silent.
+    var durablePersistenceError: String? { jobController.lastPersistenceError }
+
+    /// True while this service's owned poll loop is running for the record's
+    /// remote job. The resume affordance disables the control for such records
+    /// so a run cannot be double-started; matching is by remote ID because a
+    /// resumed run and its durable record share it. Deliberately reads the
+    /// in-flight marker rather than `activeJob`: after a local stop
+    /// `activeJob` still holds the last known (non-terminal) state, but no run
+    /// is in flight and the job stays resumable.
+    func isRunInFlight(for record: JobRecord) -> Bool {
+        guard let remoteID = record.remoteID else { return false }
+        return inFlightRemoteID == remoteID
     }
 }
 
@@ -685,8 +1096,36 @@ struct WorkspaceFileList: Decodable {
     let data: [WorkspaceFile]
 }
 
+/// Confirmation returned by `DELETE /api/v1/files/{file_id}`. The live
+/// OpenAPI schema (`FileDeleteResponse`) is a oneOf discriminated by
+/// `_shape`: OpenRouter/Anthropic return `{_shape, id, type:
+/// "file_deleted"}`, OpenAI returns `{_shape, id, object: "file", deleted:
+/// true}`. All documented fields are decoded tolerantly; `fileDeleted`
+/// normalizes the three shapes.
+struct FileDeleteConfirmation: Decodable, Equatable, Sendable {
+    let id: String
+    let shape: String?
+    let type: String?
+    let object: String?
+    let deleted: Bool?
+
+    enum CodingKeys: String, CodingKey {
+        case id, type, object, deleted
+        case shape = "_shape"
+    }
+
+    var fileDeleted: Bool {
+        deleted ?? (type == "file_deleted")
+    }
+}
+
 @MainActor
 final class FileService: ObservableObject {
+    /// Documented Files API upload maximum: 100 MiB (104,857,600 bytes).
+    /// A larger file is rejected with HTTP 413, so ORB refuses it locally
+    /// before any request is sent.
+    static let maxUploadBytes = 104_857_600
+
     @Published var files: [WorkspaceFile] = []
     @Published var isLoading = false
     @Published var lastError: String?
@@ -712,7 +1151,20 @@ final class FileService: ObservableObject {
     }
 
     /// Uploads raw bytes as multipart/form-data. Returns the stored file.
+    /// Uploads are validated client-side before any request: the Files API
+    /// rejects empty files with 400 and files over 100 MiB with 413, so ORB
+    /// refuses both locally with a clear message.
     func upload(filename: String, mimeType: String, data: Data) async throws -> WorkspaceFile {
+        guard !data.isEmpty else {
+            throw MediaServiceError.invalidUpload(
+                "\"\(filename)\" is empty; the Files API rejects empty files."
+            )
+        }
+        guard data.count <= Self.maxUploadBytes else {
+            throw MediaServiceError.invalidUpload(
+                "\"\(filename)\" is \(data.count) bytes and exceeds the 100 MiB upload limit (104,857,600 bytes)."
+            )
+        }
         let boundary = "ORB-\(UUID().uuidString)"
         var body = Data()
         func append(_ text: String) { body.append(Data(text.utf8)) }
@@ -728,14 +1180,20 @@ final class FileService: ObservableObject {
         return try await transport.send(request)
     }
 
-    func delete(id: String) async throws {
-        let request = try transport.request(path: "files/\(id)", method: "DELETE")
-        // Delete returns `{id, type: "file_deleted"}` — not a file record.
-        struct DeleteConfirmation: Decodable {
-            let id: String?
+    /// Deletes a workspace file (`DELETE /api/v1/files/{file_id}`).
+    /// Deletion is irreversible, so the service refuses to act without an
+    /// explicit `confirming: true` — the view layer must only pass it after
+    /// the user confirmed the exact target. The local list is updated only
+    /// after the confirmed request succeeds.
+    @discardableResult
+    func delete(id: String, confirming: Bool) async throws -> FileDeleteConfirmation {
+        guard confirming else {
+            throw MediaServiceError.deleteNotConfirmed(id)
         }
-        let _: DeleteConfirmation = try await transport.send(request)
+        let request = try transport.request(path: "files/\(id)", method: "DELETE")
+        let confirmation: FileDeleteConfirmation = try await transport.send(request)
         files.removeAll { $0.id == id }
+        return confirmation
     }
 
     /// Downloads raw bytes for server-side files (uploads return 400).
@@ -779,7 +1237,10 @@ final class GenerationService: ObservableObject {
     init(transport: MediaTransport = MediaTransport()) { self.transport = transport }
 
     func fetch(id: String) async throws -> GenerationMetadata.Payload {
-        let request = try transport.request(path: "generation?id=\(id)")
+        let request = try transport.request(
+            path: "generation",
+            queryItems: [URLQueryItem(name: "id", value: id)]
+        )
         let response: GenerationMetadata = try await transport.send(request)
         return response.data
     }

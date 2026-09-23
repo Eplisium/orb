@@ -300,7 +300,73 @@ final class DatabaseManager {
             // A1: multimodal persistence — attachment wire parts + generated images.
             try addColumnIfMissing(table: "messages", column: "parts_json", definition: "TEXT")
             try addColumnIfMissing(table: "messages", column: "images_json", definition: "TEXT")
-            try execChecked("PRAGMA user_version=3;")
+            // W05/F07: structured reasoning blocks (`reasoning_details`), kept
+            // separately from the display `reasoning` summary so opaque
+            // signature/encrypted payloads survive restarts byte-exact.
+            try addColumnIfMissing(table: "messages", column: "reasoning_details_json", definition: "TEXT")
+            // W06: durable media jobs and assets. Additive migrations only —
+            // existing tables are never altered or dropped and legacy rows
+            // keep loading.
+            try execChecked("""
+            CREATE TABLE IF NOT EXISTS jobs (
+                id TEXT PRIMARY KEY,
+                remote_id TEXT,
+                kind TEXT NOT NULL,
+                submission_state TEXT NOT NULL,
+                polling_state TEXT NOT NULL,
+                remote_status TEXT,
+                conversation_id TEXT,
+                message_id TEXT,
+                model_id TEXT,
+                usage_cost REAL,
+                recoverable_error TEXT,
+                created_at REAL NOT NULL,
+                updated_at REAL NOT NULL
+            );
+            """)
+            try execChecked("CREATE INDEX IF NOT EXISTS idx_jobs_remote_id ON jobs(remote_id);")
+            try execChecked("""
+            CREATE TABLE IF NOT EXISTS assets (
+                id TEXT PRIMARY KEY,
+                relative_path TEXT NOT NULL,
+                remote_reference TEXT,
+                mime_type TEXT,
+                size_bytes INTEGER NOT NULL,
+                checksum TEXT NOT NULL,
+                job_id TEXT,
+                message_id TEXT,
+                retention TEXT NOT NULL DEFAULT 'keep',
+                created_at REAL NOT NULL
+            );
+            """)
+            try execChecked("CREATE INDEX IF NOT EXISTS idx_assets_checksum ON assets(checksum);")
+            // W12/F10: durable experiment run records. The full Codable
+            // record is stored as JSON (record_json) so nested artifact
+            // checks, assertions, and spend round-trip losslessly; scalar
+            // columns exist for ordering and future filtering. Additive
+            // migration only — existing tables are never altered.
+            try execChecked("""
+            CREATE TABLE IF NOT EXISTS experiment_runs (
+                id TEXT PRIMARY KEY,
+                scenario_id TEXT NOT NULL,
+                scenario_title TEXT NOT NULL,
+                scenario_version INTEGER NOT NULL DEFAULT 1,
+                category TEXT NOT NULL,
+                model_id TEXT NOT NULL,
+                completion_status TEXT NOT NULL,
+                verdict TEXT NOT NULL,
+                prompt_tokens INTEGER,
+                completion_tokens INTEGER,
+                total_tokens INTEGER,
+                known_cost REAL,
+                started_at REAL NOT NULL,
+                finished_at REAL NOT NULL,
+                record_json TEXT NOT NULL,
+                created_at REAL NOT NULL
+            );
+            """)
+            try execChecked("CREATE INDEX IF NOT EXISTS idx_experiment_runs_started ON experiment_runs(started_at);")
+            try execChecked("PRAGMA user_version=5;")
         } catch {
             // A failed migration must never take the app down. Back up the
             // failing file, swap in a fresh in-memory database, and surface
@@ -560,8 +626,8 @@ final class DatabaseManager {
     func saveMessageChecked(_ message: ChatMessage, conversationId: UUID, sortOrder: Int) throws {
         let sql = """
         INSERT OR REPLACE INTO messages
-        (id, conversation_id, role, content, tool_calls_json, tool_call_id, tool_name, sort_order, created_at, status, finish_reason, error_message, parts_json, images_json)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+        (id, conversation_id, role, content, tool_calls_json, tool_call_id, tool_name, sort_order, created_at, status, finish_reason, error_message, parts_json, images_json, reasoning_details_json)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
         """
         guard let stmt = prepare(sql) else { throw DatabaseManagerError.operationFailed(currentError()) }
         defer { sqlite3_finalize(stmt) }
@@ -610,6 +676,13 @@ final class DatabaseManager {
         } else {
             sqlite3_bind_null(stmt, 14)
         }
+        if let details = message.reasoningDetails, !details.isEmpty,
+           let data = try? JSONEncoder().encode(details),
+           let json = String(data: data, encoding: .utf8) {
+            sqlite3_bind_text(stmt, 15, json, -1, t)
+        } else {
+            sqlite3_bind_null(stmt, 15)
+        }
         try requireDone(stmt)
     }
 
@@ -631,6 +704,9 @@ final class DatabaseManager {
             let errorMessage = columnTextOrNil(stmt, 11)
             let partsJSON = columnTextOrNil(stmt, 12)
             let imagesJSON = columnTextOrNil(stmt, 13)
+            // Resolved by name: legacy databases gain the column via ALTER
+            // TABLE, so its position depends on the schema vintage.
+            let reasoningDetailsJSON = columnTextOrNil(stmt, columnIndex(stmt, "reasoning_details_json"))
 
             var toolCalls: [ToolCallDisplay]? = nil
             if let json = toolCallsJSON, let data = json.data(using: .utf8) {
@@ -644,13 +720,18 @@ final class DatabaseManager {
             if let json = imagesJSON, let data = json.data(using: .utf8) {
                 images = try? JSONDecoder().decode([ChatImageAttachment].self, from: data)
             }
+            var reasoningDetails: [ReasoningDetail]? = nil
+            if let json = reasoningDetailsJSON, let data = json.data(using: .utf8) {
+                reasoningDetails = try? JSONDecoder().decode([ReasoningDetail].self, from: data)
+            }
 
             guard let id = UUID(uuidString: idStr) else { continue }
             let msg = ChatMessage(
                 id: id, role: role, content: content, parts: parts, images: images,
                 toolCalls: toolCalls,
                 toolCallId: toolCallId, toolName: toolName, status: status,
-                finishReason: finishReason, errorMessage: errorMessage
+                finishReason: finishReason, errorMessage: errorMessage,
+                reasoningDetails: reasoningDetails
             )
             messages.append(msg)
         }
@@ -687,6 +768,192 @@ final class DatabaseManager {
 
     func markStreamingMessagesInterruptedChecked() throws {
         try execChecked("UPDATE messages SET status='interrupted', finish_reason='app_terminated', error_message=COALESCE(error_message, 'Interrupted when ORB closed.') WHERE status='streaming';")
+    }
+
+    // MARK: - Jobs (durable media job records)
+
+    func saveJobRecordChecked(_ record: JobRecord) throws {
+        let sql = """
+        INSERT INTO jobs
+        (id, remote_id, kind, submission_state, polling_state, remote_status,
+         conversation_id, message_id, model_id, usage_cost, recoverable_error,
+         created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+            remote_id=excluded.remote_id, kind=excluded.kind,
+            submission_state=excluded.submission_state,
+            polling_state=excluded.polling_state, remote_status=excluded.remote_status,
+            conversation_id=excluded.conversation_id, message_id=excluded.message_id,
+            model_id=excluded.model_id, usage_cost=excluded.usage_cost,
+            recoverable_error=excluded.recoverable_error, updated_at=excluded.updated_at;
+        """
+        guard let stmt = prepare(sql) else { throw DatabaseManagerError.operationFailed(currentError()) }
+        defer { sqlite3_finalize(stmt) }
+        let t = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
+        sqlite3_bind_text(stmt, 1, record.id.uuidString, -1, t)
+        if let remoteID = record.remoteID { sqlite3_bind_text(stmt, 2, remoteID, -1, t) } else { sqlite3_bind_null(stmt, 2) }
+        sqlite3_bind_text(stmt, 3, record.kind, -1, t)
+        sqlite3_bind_text(stmt, 4, record.submissionState.rawValue, -1, t)
+        sqlite3_bind_text(stmt, 5, record.pollingState.rawValue, -1, t)
+        if let status = record.lastRemoteStatus { sqlite3_bind_text(stmt, 6, status, -1, t) } else { sqlite3_bind_null(stmt, 6) }
+        if let conversationID = record.conversationID { sqlite3_bind_text(stmt, 7, conversationID.uuidString, -1, t) } else { sqlite3_bind_null(stmt, 7) }
+        if let messageID = record.messageID { sqlite3_bind_text(stmt, 8, messageID.uuidString, -1, t) } else { sqlite3_bind_null(stmt, 8) }
+        if let modelID = record.modelID { sqlite3_bind_text(stmt, 9, modelID, -1, t) } else { sqlite3_bind_null(stmt, 9) }
+        if let cost = record.usageCost { sqlite3_bind_double(stmt, 10, cost) } else { sqlite3_bind_null(stmt, 10) }
+        if let error = record.recoverableError { sqlite3_bind_text(stmt, 11, error, -1, t) } else { sqlite3_bind_null(stmt, 11) }
+        sqlite3_bind_double(stmt, 12, record.createdAt.timeIntervalSince1970)
+        sqlite3_bind_double(stmt, 13, record.updatedAt.timeIntervalSince1970)
+        try requireDone(stmt)
+    }
+
+    func loadJobRecords() -> [JobRecord] {
+        let sql = """
+        SELECT id, remote_id, kind, submission_state, polling_state, remote_status,
+               conversation_id, message_id, model_id, usage_cost, recoverable_error,
+               created_at, updated_at
+        FROM jobs ORDER BY created_at DESC;
+        """
+        guard let stmt = prepare(sql) else { return [] }
+        defer { sqlite3_finalize(stmt) }
+        var records: [JobRecord] = []
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            if let record = jobRecord(from: stmt) { records.append(record) }
+        }
+        return records
+    }
+
+    func findJobRecord(id: UUID) -> JobRecord? {
+        let sql = """
+        SELECT id, remote_id, kind, submission_state, polling_state, remote_status,
+               conversation_id, message_id, model_id, usage_cost, recoverable_error,
+               created_at, updated_at
+        FROM jobs WHERE id = ?;
+        """
+        guard let stmt = prepare(sql) else { return nil }
+        defer { sqlite3_finalize(stmt) }
+        sqlite3_bind_text(stmt, 1, id.uuidString, -1, unsafeBitCast(-1, to: sqlite3_destructor_type.self))
+        guard sqlite3_step(stmt) == SQLITE_ROW else { return nil }
+        return jobRecord(from: stmt)
+    }
+
+    func findJobRecord(remoteID: String) -> JobRecord? {
+        let sql = """
+        SELECT id, remote_id, kind, submission_state, polling_state, remote_status,
+               conversation_id, message_id, model_id, usage_cost, recoverable_error,
+               created_at, updated_at
+        FROM jobs WHERE remote_id = ? ORDER BY created_at DESC LIMIT 1;
+        """
+        guard let stmt = prepare(sql) else { return nil }
+        defer { sqlite3_finalize(stmt) }
+        sqlite3_bind_text(stmt, 1, remoteID, -1, unsafeBitCast(-1, to: sqlite3_destructor_type.self))
+        guard sqlite3_step(stmt) == SQLITE_ROW else { return nil }
+        return jobRecord(from: stmt)
+    }
+
+    private func jobRecord(from stmt: OpaquePointer) -> JobRecord? {
+        guard let idStr = columnTextOrNil(stmt, 0), let id = UUID(uuidString: idStr),
+              let kind = columnTextOrNil(stmt, 2),
+              let submissionRaw = columnTextOrNil(stmt, 3),
+              let submissionState = JobSubmissionState(rawValue: submissionRaw),
+              let pollingRaw = columnTextOrNil(stmt, 4),
+              let pollingState = JobPollingState(rawValue: pollingRaw)
+        else { return nil }
+        let createdAt = Date(timeIntervalSince1970: sqlite3_column_double(stmt, 11))
+        let updatedAt = Date(timeIntervalSince1970: sqlite3_column_double(stmt, 12))
+        return JobRecord(
+            id: id,
+            remoteID: columnTextOrNil(stmt, 1),
+            kind: kind,
+            submissionState: submissionState,
+            pollingState: pollingState,
+            lastRemoteStatus: columnTextOrNil(stmt, 5),
+            conversationID: columnTextOrNil(stmt, 6).flatMap(UUID.init(uuidString:)),
+            messageID: columnTextOrNil(stmt, 7).flatMap(UUID.init(uuidString:)),
+            modelID: columnTextOrNil(stmt, 8),
+            usageCost: sqlite3_column_type(stmt, 9) == SQLITE_NULL ? nil : sqlite3_column_double(stmt, 9),
+            recoverableError: columnTextOrNil(stmt, 10),
+            createdAt: createdAt,
+            updatedAt: updatedAt
+        )
+    }
+
+    // MARK: - Assets (durable asset metadata)
+
+    func saveAssetRecordChecked(_ record: AssetRecord) throws {
+        let sql = """
+        INSERT INTO assets
+        (id, relative_path, remote_reference, mime_type, size_bytes, checksum,
+         job_id, message_id, retention, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+            relative_path=excluded.relative_path, remote_reference=excluded.remote_reference,
+            mime_type=excluded.mime_type, size_bytes=excluded.size_bytes,
+            checksum=excluded.checksum, job_id=excluded.job_id,
+            message_id=excluded.message_id, retention=excluded.retention;
+        """
+        guard let stmt = prepare(sql) else { throw DatabaseManagerError.operationFailed(currentError()) }
+        defer { sqlite3_finalize(stmt) }
+        let t = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
+        sqlite3_bind_text(stmt, 1, record.id.uuidString, -1, t)
+        sqlite3_bind_text(stmt, 2, record.relativePath, -1, t)
+        if let remote = record.remoteReference { sqlite3_bind_text(stmt, 3, remote, -1, t) } else { sqlite3_bind_null(stmt, 3) }
+        if let mime = record.mimeType { sqlite3_bind_text(stmt, 4, mime, -1, t) } else { sqlite3_bind_null(stmt, 4) }
+        sqlite3_bind_int64(stmt, 5, Int64(record.sizeBytes))
+        sqlite3_bind_text(stmt, 6, record.checksum, -1, t)
+        if let jobID = record.jobID { sqlite3_bind_text(stmt, 7, jobID.uuidString, -1, t) } else { sqlite3_bind_null(stmt, 7) }
+        if let messageID = record.messageID { sqlite3_bind_text(stmt, 8, messageID.uuidString, -1, t) } else { sqlite3_bind_null(stmt, 8) }
+        sqlite3_bind_text(stmt, 9, record.retention.rawValue, -1, t)
+        sqlite3_bind_double(stmt, 10, record.createdAt.timeIntervalSince1970)
+        try requireDone(stmt)
+    }
+
+    func loadAssetRecords() -> [AssetRecord] {
+        let sql = """
+        SELECT id, relative_path, remote_reference, mime_type, size_bytes, checksum,
+               job_id, message_id, retention, created_at
+        FROM assets ORDER BY created_at DESC;
+        """
+        guard let stmt = prepare(sql) else { return [] }
+        defer { sqlite3_finalize(stmt) }
+        var records: [AssetRecord] = []
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            if let record = assetRecord(from: stmt) { records.append(record) }
+        }
+        return records
+    }
+
+    func findAssetRecord(checksum: String) -> AssetRecord? {
+        let sql = """
+        SELECT id, relative_path, remote_reference, mime_type, size_bytes, checksum,
+               job_id, message_id, retention, created_at
+        FROM assets WHERE checksum = ? ORDER BY created_at ASC LIMIT 1;
+        """
+        guard let stmt = prepare(sql) else { return nil }
+        defer { sqlite3_finalize(stmt) }
+        sqlite3_bind_text(stmt, 1, checksum, -1, unsafeBitCast(-1, to: sqlite3_destructor_type.self))
+        guard sqlite3_step(stmt) == SQLITE_ROW else { return nil }
+        return assetRecord(from: stmt)
+    }
+
+    private func assetRecord(from stmt: OpaquePointer) -> AssetRecord? {
+        guard let idStr = columnTextOrNil(stmt, 0), let id = UUID(uuidString: idStr),
+              let relativePath = columnTextOrNil(stmt, 1),
+              let checksum = columnTextOrNil(stmt, 5),
+              let retentionRaw = columnTextOrNil(stmt, 8),
+              let retention = AssetRetention(rawValue: retentionRaw)
+        else { return nil }
+        return AssetRecord(
+            id: id,
+            relativePath: relativePath,
+            remoteReference: columnTextOrNil(stmt, 2),
+            mimeType: columnTextOrNil(stmt, 3),
+            sizeBytes: Int(sqlite3_column_int64(stmt, 4)),
+            checksum: checksum,
+            jobID: columnTextOrNil(stmt, 6).flatMap(UUID.init(uuidString:)),
+            messageID: columnTextOrNil(stmt, 7).flatMap(UUID.init(uuidString:)),
+            retention: retention,
+            createdAt: Date(timeIntervalSince1970: sqlite3_column_double(stmt, 9))
+        )
     }
 
     // MARK: - Export
@@ -838,6 +1105,70 @@ final class DatabaseManager {
         sqlite3_step(stmt)
     }
 
+    // MARK: - Experiment Run Records (W12)
+
+    func saveExperimentRunRecord(_ record: ExperimentRunRecord) {
+        do {
+            try saveExperimentRunRecordChecked(record)
+        } catch {
+            // A failed experiment-record write must never break a run that
+            // just finished; the in-memory result still reaches the UI.
+        }
+    }
+
+    func saveExperimentRunRecordChecked(_ record: ExperimentRunRecord) throws {
+        let json: String
+        do {
+            let data = try JSONEncoder().encode(record)
+            json = String(data: data, encoding: .utf8) ?? "{}"
+        } catch {
+            throw DatabaseManagerError.operationFailed("Could not encode experiment record: \(error.localizedDescription)")
+        }
+        let sql = """
+        INSERT OR REPLACE INTO experiment_runs
+        (id, scenario_id, scenario_title, scenario_version, category, model_id,
+         completion_status, verdict, prompt_tokens, completion_tokens, total_tokens,
+         known_cost, started_at, finished_at, record_json, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+        """
+        guard let stmt = prepare(sql) else { throw DatabaseManagerError.operationFailed(currentError()) }
+        defer { sqlite3_finalize(stmt) }
+        let t = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
+        sqlite3_bind_text(stmt, 1, record.id.uuidString, -1, t)
+        sqlite3_bind_text(stmt, 2, record.scenarioID, -1, t)
+        sqlite3_bind_text(stmt, 3, record.scenarioTitle, -1, t)
+        sqlite3_bind_int(stmt, 4, Int32(record.scenarioVersion))
+        sqlite3_bind_text(stmt, 5, record.categoryRawValue, -1, t)
+        sqlite3_bind_text(stmt, 6, record.modelID, -1, t)
+        sqlite3_bind_text(stmt, 7, record.completionStatus.rawValue, -1, t)
+        sqlite3_bind_text(stmt, 8, record.verdict.rawValue, -1, t)
+        if let v = record.spend.promptTokens { sqlite3_bind_int(stmt, 9, Int32(v)) } else { sqlite3_bind_null(stmt, 9) }
+        if let v = record.spend.completionTokens { sqlite3_bind_int(stmt, 10, Int32(v)) } else { sqlite3_bind_null(stmt, 10) }
+        if let v = record.spend.totalTokens { sqlite3_bind_int(stmt, 11, Int32(v)) } else { sqlite3_bind_null(stmt, 11) }
+        if let v = record.spend.knownCostUSD { sqlite3_bind_double(stmt, 12, v) } else { sqlite3_bind_null(stmt, 12) }
+        sqlite3_bind_double(stmt, 13, record.startedAt.timeIntervalSince1970)
+        sqlite3_bind_double(stmt, 14, record.finishedAt.timeIntervalSince1970)
+        sqlite3_bind_text(stmt, 15, json, -1, t)
+        sqlite3_bind_double(stmt, 16, Date().timeIntervalSince1970)
+        try requireDone(stmt)
+    }
+
+    func loadExperimentRunRecords() -> [ExperimentRunRecord] {
+        let sql = "SELECT record_json FROM experiment_runs ORDER BY started_at DESC;"
+        guard let stmt = prepare(sql) else { return [] }
+        defer { sqlite3_finalize(stmt) }
+        var records: [ExperimentRunRecord] = []
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            guard let json = columnTextOrNil(stmt, 0),
+                  let data = json.data(using: .utf8)
+            else { continue }
+            if let record = try? JSONDecoder().decode(ExperimentRunRecord.self, from: data) {
+                records.append(record)
+            }
+        }
+        return records
+    }
+
     // MARK: - Custom Tests
 
     func saveCustomTest(_ test: CustomTest) {
@@ -904,8 +1235,20 @@ final class DatabaseManager {
     // MARK: - Helpers
 
     private func columnTextOrNil(_ stmt: OpaquePointer, _ index: Int32) -> String? {
+        if index < 0 { return nil }
         if sqlite3_column_type(stmt, index) == SQLITE_NULL { return nil }
         guard let cStr = sqlite3_column_text(stmt, index) else { return nil }
         return String(cString: cStr)
+    }
+
+    /// Zero-based position of a result column by name, or -1 when absent.
+    private func columnIndex(_ stmt: OpaquePointer, _ name: String) -> Int32 {
+        let count = sqlite3_column_count(stmt)
+        for index in 0..<count {
+            if let cName = sqlite3_column_name(stmt, index), String(cString: cName) == name {
+                return index
+            }
+        }
+        return -1
     }
 }

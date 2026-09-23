@@ -69,8 +69,8 @@ struct NativeAgentRunnerStreamingTests {
     @Test("two calls retain IDs and sequential result order")
     func orderedCalls() async throws {
         let client = AgentFixtureClient([[
-            .toolCallFragment(choiceIndex: 0, toolIndex: 0, id: "a", type: "function", name: "first", arguments: "{}"),
-            .toolCallFragment(choiceIndex: 0, toolIndex: 1, id: "b", type: "function", name: "second", arguments: "{}"),
+            .toolCallFragment(choiceIndex: 0, toolIndex: 0, id: "a", type: "function", name: "read_file", arguments: "{}"),
+            .toolCallFragment(choiceIndex: 0, toolIndex: 1, id: "b", type: "function", name: "list_directory", arguments: "{}"),
             .finishReason(choiceIndex: 0, reason: "tool_calls")
         ], [.contentDelta(choiceIndex: 0, text: "ok"), .done]])
         let tools = ToolRecorder()

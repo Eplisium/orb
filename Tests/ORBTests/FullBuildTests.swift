@@ -138,12 +138,15 @@ struct NewRequestParameterTests {
         #expect(nested["name"] as? String == "answer")
     }
 
-    @Test("degenerate schemas are dropped, not sent")
-    func degenerateSchemaDropped() throws {
+    @Test("degenerate schemas block the request instead of being silently dropped")
+    func degenerateSchemaDropped() {
         var settings = GenerationSettings.default
         settings.responseFormat = .jsonSchema(name: "  ", schema: .object([:]))
-        let encoded = try testBody(settings: settings)
-        #expect(encoded["response_format"] == nil)
+        // F08: a malformed required constraint must fail closed at the request
+        // boundary — never strip it and send an unconstrained paid call.
+        #expect(throws: GenerationSettingsValidationError.self) {
+            try testBody(settings: settings)
+        }
     }
 
     @Test("service tier, user, session, modalities, image config encode")
