@@ -124,6 +124,44 @@ enum KeychainSecrets {
         return SecItemCopyMatching(query as CFDictionary, nil) == errSecSuccess
     }
 
+    // MARK: One-shot legacy migration
+
+    /// Account names of legacy items. Metadata-only — never prompts.
+    static func legacyAccounts() -> [String] {
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: legacyService,
+            kSecMatchLimit as String: kSecMatchLimitAll,
+            kSecReturnAttributes as String: true,
+        ]
+        var result: AnyObject?
+        guard SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess,
+              let items = result as? [[String: Any]] else { return [] }
+        return items.compactMap { $0[kSecAttrAccount as String] as? String }
+    }
+
+    /// Accounts with a legacy item but no v2 copy yet (tombstones count as
+    /// migrated — a deleted secret must stay deleted). Prompt-free.
+    static func pendingLegacyAccounts() -> [String] {
+        legacyAccounts().filter { readItem(service: v2Service, account: $0) == nil }
+    }
+
+    /// Batch migration: reads every unmigrated legacy item — the one
+    /// operation that can prompt, exactly once per item ("Allow" is enough;
+    /// the value is mirrored immediately) — and returns the migrated
+    /// accounts. Run while unlocked.
+    @discardableResult
+    static func migrateAllLegacy() -> [String] {
+        guard KeychainGate.allowsLegacyReads else { return [] }
+        var migrated: [String] = []
+        for account in pendingLegacyAccounts() {
+            if read(account) != nil {
+                migrated.append(account)
+            }
+        }
+        return migrated
+    }
+
     // MARK: Raw item operations
 
     /// (data, itemPresent) — distinguishes "absent" from "present but empty".

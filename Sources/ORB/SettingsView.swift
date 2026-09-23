@@ -123,11 +123,23 @@ struct SettingsView: View {
             ))
             .toggleStyle(.switch)
 
+            if pendingLegacyCount > 0 {
+                Button("Move \(pendingLegacyCount) stored key\(pendingLegacyCount == 1 ? "" : "s") to prompt-free storage") {
+                    KeychainSecrets.migrateAllLegacy()
+                }
+                .buttonStyle(.bordered)
+                .font(.callout)
+            }
+
             Button("Lock ORB Now") {
                 appLock.lock()
             }
             .disabled(!appLock.isEnabled)
         }
+    }
+
+    private var pendingLegacyCount: Int {
+        KeychainSecrets.pendingLegacyAccounts().count
     }
 
     // MARK: - API Key

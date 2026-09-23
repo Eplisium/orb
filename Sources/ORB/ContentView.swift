@@ -350,11 +350,14 @@ struct ContentView: View {
 
     // MARK: Sidebar
 
-    /// One-time post-unlock side effects: bring MCP servers up so their tools
-    /// are registered before the first agent run. Never runs while locked.
+    /// One-time post-unlock side effects: batch-migrate any remaining legacy
+    /// keychain items (each prompts once — "Allow" — then the value lives in
+    /// prompt-free v2 storage forever), then bring MCP servers up so their
+    /// tools register before the first agent run. Never runs while locked.
     private func startPostUnlockWorkIfNeeded() async {
         guard appLock.isUnlocked, !startedPostUnlockWork else { return }
         startedPostUnlockWork = true
+        KeychainSecrets.migrateAllLegacy()
         await MCPRegistry.shared.startEnabledServers()
     }
 
