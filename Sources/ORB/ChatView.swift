@@ -535,30 +535,16 @@ struct ChatView: View {
     }
 
     private var activityRow: some View {
-        HStack(spacing: 12) {
-            ZStack {
-                Circle()
-                    .fill(accent.opacity(0.12))
-                ProgressView()
-                    .controlSize(.small)
-                    .tint(accent)
-            }
-            .frame(width: 32, height: 32)
-            VStack(alignment: .leading, spacing: 2) {
-                Text(chatService.activityLabel)
-                    .font(.system(size: 11, weight: .semibold))
-                Text("Streaming from OpenRouter")
-                    .font(.system(size: 9))
-                    .foregroundStyle(.secondary)
-            }
-            Spacer()
-            Button("Stop") { chatService.stopStreaming() }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
+        HStack(spacing: 10) {
+            ActivityPulseOrb(accent: accent)
+            Text(chatService.activityLabel)
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(.secondary)
+                .contentTransition(.opacity)
+            Spacer(minLength: 0)
         }
-        .padding(12)
-        .background(Color.primary.opacity(0.035))
-        .clipShape(RoundedRectangle(cornerRadius: 12))
+        .padding(.vertical, 4)
+        .frame(maxWidth: 650, alignment: .leading)
     }
 
     // MARK: - Composer

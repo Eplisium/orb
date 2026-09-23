@@ -528,44 +528,23 @@ struct AgentView: View {
     }
 
     private var activityRow: some View {
-        HStack(spacing: 12) {
-            ZStack {
-                Circle().fill(accent.opacity(0.12))
-                ProgressView()
-                    .controlSize(.small)
-                    .tint(accent)
-            }
-            .frame(width: 32, height: 32)
-
-            VStack(alignment: .leading, spacing: 3) {
+        HStack(spacing: 10) {
+            ActivityPulseOrb(accent: accent)
+            HStack(spacing: 6) {
                 Text(chatService.activityLabel)
-                    .font(.system(size: 11, weight: .semibold))
                     .contentTransition(.opacity)
-                // Real progress signal instead of a static reassurance string.
-                HStack(spacing: 6) {
-                    Text(elapsedText)
-                    if let toolCount = activeToolCount, toolCount > 0 {
-                        Text("·")
-                        Text("^[\(toolCount) tool call](inflect: true)")
-                    }
+                Text("· \(elapsedText)")
+                if let toolCount = activeToolCount, toolCount > 0 {
+                    Text("·")
+                    Text("^[\(toolCount) tool call](inflect: true)")
                 }
-                .font(.system(size: 9, design: .monospaced))
-                .foregroundStyle(.secondary)
             }
-
-            Spacer()
-
-            Button("Stop") { chatService.stopStreaming() }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
+            .font(.system(size: 10))
+            .foregroundStyle(.secondary)
+            Spacer(minLength: 0)
         }
-        .padding(12)
-        .background(Color.primary.opacity(0.035))
-        .overlay {
-            RoundedRectangle(cornerRadius: 12)
-                .stroke(accent.opacity(0.18), lineWidth: 0.5)
-        }
-        .clipShape(RoundedRectangle(cornerRadius: 12))
+        .padding(.vertical, 4)
+        .frame(maxWidth: 650, alignment: .leading)
         .animation(.easeInOut(duration: 0.2), value: chatService.activityLabel)
         .onReceive(activityTimer) { activityTick = $0 }
     }

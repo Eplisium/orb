@@ -279,7 +279,9 @@ struct MarkdownText: View {
 
     private func cursor(_ isLast: Bool) -> Text {
         guard showsCursor, isLast else { return Text("") }
-        return Text(" ▍").foregroundColor(accent)
+        // Soft write-head: keeps the "still typing" signal without shouting
+        // louder than the text it tails.
+        return Text(" ▍").foregroundColor(accent.opacity(0.55))
     }
 
     private func headingSize(_ level: Int) -> CGFloat {

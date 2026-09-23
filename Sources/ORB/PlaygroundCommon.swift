@@ -112,22 +112,30 @@ struct CapabilityPill: View {
 
 // MARK: - Typing Indicator
 
-/// Three dots with a staggered breathing animation — the standard "assistant is
-/// composing" affordance. Replaces the previous static dots.
+/// Three gradient dots with a staggered breathing wave and a soft accent
+/// glow — the "assistant is composing" affordance shown before the first
+/// token arrives.
 struct TypingIndicator: View {
     let accent: Color
     @State private var phase = 0.0
 
     var body: some View {
-        HStack(spacing: 5) {
+        HStack(spacing: 6) {
             ForEach(0..<3) { index in
                 Circle()
-                    .fill(accent.opacity(0.75))
-                    .frame(width: 5, height: 5)
+                    .fill(LinearGradient(
+                        colors: [accent, accent.opacity(0.55)],
+                        startPoint: .top,
+                        endPoint: .bottom
+                    ))
+                    .frame(width: 6, height: 6)
                     .scaleEffect(scale(index))
-                    .opacity(0.45 + 0.55 * scale(index))
+                    .opacity(0.35 + 0.65 * scale(index))
+                    .shadow(color: accent.opacity(0.35), radius: 2.5)
             }
         }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("Assistant is thinking")
         .onAppear {
             withAnimation(.linear(duration: 1.05).repeatForever(autoreverses: false)) {
                 phase = 1
@@ -463,10 +471,12 @@ struct PlaygroundMessageView: View {
     }
 }
 
-/// Collapsible "thinking" panel shown above an assistant reply.
+/// Collapsible chain-of-thought panel above an assistant reply.
 ///
-/// Auto-expands while reasoning is the only thing streaming so the user sees
-/// progress, then collapses once real content starts arriving.
+/// While the model thinks, a breathing "Thinking… 8s" pill with a live
+/// elapsed timer sits above the streaming reasoning; the panel auto-
+/// collapses the moment real content starts and freezes to "Thought for
+/// 11s". The header can be tapped to expand/collapse at any time.
 struct ReasoningDisclosure: View {
     let text: String
     let accent: Color
@@ -474,48 +484,163 @@ struct ReasoningDisclosure: View {
 
     @State private var isExpanded = false
     @State private var userToggled = false
+    @State private var thoughtStartedAt: Date?
+    @State private var frozenDuration: TimeInterval?
+    @State private var breathe = false
 
     private var effectiveExpansion: Bool {
         userToggled ? isExpanded : isStreaming
     }
 
-    var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Button {
-                userToggled = true
-                isExpanded.toggle()
-            } label: {
-                HStack(spacing: 5) {
-                    Image(systemName: "brain")
-                        .font(.system(size: 9))
-                    Text(isStreaming ? "Thinking…" : "Reasoning")
-                        .font(.system(size: 10, weight: .medium))
-                    Text("\(text.count) chars")
-                        .font(.system(size: 9))
-                        .foregroundStyle(.tertiary)
-                    Image(systemName: "chevron.right")
-                        .font(.system(size: 8, weight: .semibold))
-                        .rotationEffect(.degrees(effectiveExpansion ? 90 : 0))
-                }
-                .foregroundStyle(.secondary)
-            }
-            .buttonStyle(.plain)
+    private var elapsed: TimeInterval? {
+        if let frozenDuration { return frozenDuration }
+        guard let thoughtStartedAt else { return nil }
+        return Date().timeIntervalSince(thoughtStartedAt)
+    }
 
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            header
             if effectiveExpansion {
-                ScrollView {
-                    Text(text)
-                        .font(.system(size: 11, design: .monospaced))
-                        .foregroundStyle(.secondary)
-                        .textSelection(.enabled)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(8)
-                }
-                // Long chains of thought must not push the answer off screen.
-                .frame(maxHeight: 220)
-                .background(accent.opacity(0.05), in: RoundedRectangle(cornerRadius: 7))
+                bodyPanel
+                    .transition(.opacity.combined(with: .move(edge: .top)))
             }
         }
-        .animation(.easeInOut(duration: 0.16), value: effectiveExpansion)
+        .animation(.spring(response: 0.3, dampingFraction: 0.85), value: effectiveExpansion)
+        .onAppear {
+            if isStreaming, thoughtStartedAt == nil { thoughtStartedAt = Date() }
+            withAnimation(.easeInOut(duration: 0.9).repeatForever(autoreverses: true)) {
+                breathe = true
+            }
+        }
+        .onChange(of: isStreaming) { _, streaming in
+            if streaming {
+                frozenDuration = nil
+                if thoughtStartedAt == nil { thoughtStartedAt = Date() }
+            } else if let start = thoughtStartedAt, frozenDuration == nil {
+                frozenDuration = max(1, Date().timeIntervalSince(start))
+            }
+        }
+    }
+
+    private var headerTitle: String {
+        if isStreaming, let elapsed {
+            return ThoughtDurationFormatter.live(elapsed)
+        }
+        if let frozenDuration {
+            return ThoughtDurationFormatter.summary(frozenDuration)
+        }
+        return "Thoughts"
+    }
+
+    private var header: some View {
+        Button {
+            userToggled = true
+            isExpanded.toggle()
+        } label: {
+            HStack(spacing: 6) {
+                Image(systemName: "sparkles")
+                    .font(.system(size: 9, weight: .semibold))
+                    .foregroundStyle(accent)
+                    .opacity(isStreaming ? (breathe ? 1.0 : 0.45) : 0.8)
+                if isStreaming {
+                    TimelineView(.periodic(from: .now, by: 1)) { _ in
+                        Text(headerTitle)
+                            .font(.system(size: 10, weight: .medium))
+                            .foregroundStyle(.secondary)
+                    }
+                } else {
+                    Text(headerTitle)
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundStyle(.secondary)
+                }
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 8, weight: .semibold))
+                    .foregroundStyle(.tertiary)
+                    .rotationEffect(.degrees(effectiveExpansion ? 90 : 0))
+            }
+            .padding(.horizontal, 9)
+            .padding(.vertical, 5)
+            .background(Capsule().fill(Color.primary.opacity(0.04)))
+            .overlay(Capsule().stroke(Color.primary.opacity(0.06), lineWidth: 0.5))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+
+    private var bodyPanel: some View {
+        HStack(alignment: .top, spacing: 0) {
+            // Accent rail — quietly marks the block as "the model's own words".
+            RoundedRectangle(cornerRadius: 2)
+                .fill(accent.opacity(0.5))
+                .frame(width: 3)
+                .padding(.vertical, 12)
+                .padding(.leading, 3)
+            ScrollView {
+                (Text(text) + Text(isStreaming ? " ▍" : "").foregroundColor(accent.opacity(0.55)))
+                    .font(.system(size: 12))
+                    .foregroundStyle(.secondary)
+                    .lineSpacing(5)
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 10)
+            }
+            // Long chains of thought must not push the answer off screen.
+            .frame(maxHeight: 240)
+        }
+        .background(RoundedRectangle(cornerRadius: 10).fill(Color.primary.opacity(0.03)))
+        .clipShape(RoundedRectangle(cornerRadius: 10))
+    }
+}
+
+/// Human phrasing for chain-of-thought timing — pure, unit-tested.
+enum ThoughtDurationFormatter {
+    /// "Thinking… 4s" / "Thinking… 1m 12s" — live phase.
+    static func live(_ seconds: TimeInterval) -> String {
+        "Thinking… \(duration(seconds))"
+    }
+
+    /// "Thought for 8s" / "Thought for 1m" — finished phase.
+    static func summary(_ seconds: TimeInterval) -> String {
+        "Thought for \(duration(seconds))"
+    }
+
+    static func duration(_ seconds: TimeInterval) -> String {
+        let total = Int(seconds.rounded())
+        if total < 60 { return "\(max(total, 1))s" }
+        let minutes = total / 60
+        let rest = total % 60
+        return rest == 0 ? "\(minutes)m" : "\(minutes)m \(rest)s"
+    }
+}
+
+/// Pulsing accent orb for the run-activity row while the agent works.
+struct ActivityPulseOrb: View {
+    let accent: Color
+    @State private var breathing = false
+
+    var body: some View {
+        ZStack {
+            Circle()
+                .fill(accent.opacity(breathing ? 0.18 : 0.08))
+                .scaleEffect(breathing ? 1.0 : 0.82)
+            Circle()
+                .fill(accent.opacity(0.3))
+                .frame(width: 12, height: 12)
+            Circle()
+                .fill(accent)
+                .frame(width: 7, height: 7)
+                .shadow(color: accent.opacity(0.5), radius: 3)
+        }
+        .frame(width: 32, height: 32)
+        .onAppear {
+            withAnimation(.easeInOut(duration: 0.9).repeatForever(autoreverses: true)) {
+                breathing = true
+            }
+        }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("Working")
     }
 }
 
@@ -540,7 +665,7 @@ extension PlaygroundMessageView {
                 } else if isUser {
                     Text(message.content)
                         .font(.system(size: 13))
-                        .lineSpacing(3)
+                        .lineSpacing(4)
                         .textSelection(.enabled)
                     if let parts = message.parts, !parts.isEmpty {
                         SentAttachmentsLabel(count: parts.count)
@@ -550,7 +675,7 @@ extension PlaygroundMessageView {
                     // code fences and lists never appear as raw syntax.
                     MarkdownText(content: message.content, accent: accent, showsCursor: isStreaming)
                         .font(.system(size: 13))
-                        .lineSpacing(3)
+                        .lineSpacing(4)
                         .textSelection(.enabled)
                     if let images = message.images, !images.isEmpty {
                         AssistantImageRow(images: images, accent: accent)
