@@ -20,6 +20,7 @@ final class AppLock: ObservableObject {
     static let shared = AppLock()
 
     @Published private(set) var isUnlocked: Bool
+    @Published private(set) var isUnlocking = false
     @Published var lastFailureMessage: String?
 
     private let defaults: UserDefaults
@@ -34,6 +35,9 @@ final class AppLock: ObservableObject {
         evaluate: @escaping (String) async -> Bool = { reason in
             let context = LAContext()
             do {
+                // .deviceOwnerAuthentication always offers the Mac password
+                // as a fallback in the system prompt — there is no
+                // password-only LAPolicy to route to.
                 return try await context.evaluatePolicy(.deviceOwnerAuthentication, localizedReason: reason)
             } catch {
                 return false
@@ -64,12 +68,15 @@ final class AppLock: ObservableObject {
     /// effects (keychain migration, MCP startup) are owned by the view layer
     /// so this type stays unit-testable.
     func unlock() async {
+        guard !isUnlocking else { return }
         lastFailureMessage = nil
+        isUnlocking = true
         let ok = await evaluate(Self.unlockReason)
+        isUnlocking = false
         if ok {
             isUnlocked = true
         } else {
-            lastFailureMessage = "Authentication failed. Try again."
+            lastFailureMessage = "Not recognized — the prompt also accepts your Mac password."
         }
     }
 

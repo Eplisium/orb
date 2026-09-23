@@ -194,21 +194,25 @@ if [ -z "$IDENTITY" ]; then
     IDENTITY=$(security find-identity -p codesigning 2>/dev/null | grep -o "[0-9A-F]\{40\} \"$CERT_NAME\"" | grep -o "[0-9A-F]\{40\}" | head -1 || true)
 fi
 
+RCODESIGN="$(command -v rcodesign || echo "$HOME/bin/rcodesign")"
 echo "Codesigning ($CERT_NAME)..."
-if [ -n "$IDENTITY" ]; then
-    # Custom designated requirement: `certificate leaf`, NOT `certificate root`.
-    # tccd evaluates the stored requirement WITHOUT the user's login keychain,
-    # so `certificate root = H"…"` on a self-signed cert never matches there —
-    # grants look "on" but are silently rejected, re-prompting forever.
-    # `certificate leaf` evaluates purely from the signature blob.
+if [ -x "$RCODESIGN" ]; then
     LEAF_SHA1=$(openssl x509 -in "$CERT_DIR/cert.pem" -noout -fingerprint -sha1 \
         | sed 's/.*=//; s/:://g; s/://g' | tr 'A-F' 'a-f')
-    REQ_FILE="$(mktemp)"
-    printf 'designated => identifier "%s" and certificate leaf = H"%s"' "$BUNDLE_ID" "$LEAF_SHA1" > "$REQ_FILE"
-    codesign --force --deep --sign "$IDENTITY" --requirements "$REQ_FILE" "$APP_BUNDLE"
-    rm -f "$REQ_FILE"
+    REQ_TEXT="$(mktemp)"
+    REQ_BIN="$(mktemp)"
+    printf 'identifier "%s" and certificate leaf = H"%s"' "$BUNDLE_ID" "$LEAF_SHA1" > "$REQ_TEXT"
+    csreq -r "$REQ_TEXT" -b "$REQ_BIN"
+    SIGN_TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    "$RCODESIGN" sign --signing-time "$SIGN_TS" \
+        --p12-file "$CERT_DIR/orb.p12" --p12-password orb \
+        --code-requirements-file "$REQ_BIN" "$APP_BUNDLE"
+    rm -f "$REQ_TEXT" "$REQ_BIN"
+    codesign --verify --deep --strict "$APP_BUNDLE" && echo "Signed: stable dev identity ✓"
 else
-    echo "WARNING: could not create a signing identity; falling back to ad-hoc (Keychain/TCC prompts will return after rebuilds)"
+    echo "WARNING: rcodesign not found (https://github.com/indygreg/apple-platform-rs/releases —"
+    echo "         unpack the aarch64 apple-darwin tarball to ~/bin/rcodesign)."
+    echo "WARNING: falling back to ad-hoc signing (Keychain/TCC prompts return after rebuilds)."
     codesign --force --deep --sign - "$APP_BUNDLE" 2>&1 || echo "Codesign warning (may still work)"
 fi
 

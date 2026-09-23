@@ -269,7 +269,11 @@ struct ContentView: View {
     var body: some View {
         Group {
             if !appLock.isUnlocked {
-                LockScreenView(lock: appLock, accent: ORBTheme.accent)
+                LockScreenView(
+                    lock: appLock,
+                    accent: ORBTheme.accent,
+                    onOpenSettings: { selectedSection = .account }
+                )
             } else if selectedSection.isBrowser {
                 NavigationSplitView {
                     sidebar
