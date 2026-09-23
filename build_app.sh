@@ -170,12 +170,47 @@ if [ -f "$APP_BUNDLE/Contents/Resources/AppIcon.icns" ]; then
     echo "Icon added to bundle"
 fi
 
-# --- Codesign (ad-hoc, no certificate needed) ---
-# NOTE: `codesign --deep` rewrites the main binary in place, which desyncs
-# the .app from .build. Use --preserve-metadata and verify the bundle keeps
-# working; do NOT re-sign the bare .build binary.
-echo "Codesigning..."
-codesign --force --deep --sign - "$APP_BUNDLE" 2>&1 || echo "Codesign warning (may still work)"
+# --- Codesign (stable self-signed identity) ---
+# Ad-hoc (`--sign -`) produces a NEW identity on every rebuild, which macOS
+# treats as a different app: Keychain ACLs stop matching (the legacy "enter
+# your login keychain password" dialog) and TCC grants reset. A stable
+# identity keeps both alive across rebuilds. Same recipe as SnapFrame.
+CERT_NAME="ORB Code Signing"
+CERT_DIR="$PROJECT_DIR/codesign"
+IDENTITY=$(security find-identity -p codesigning 2>/dev/null | grep -o "[0-9A-F]\{40\} \"$CERT_NAME\"" | grep -o "[0-9A-F]\{40\}" | head -1 || true)
+
+if [ -z "$IDENTITY" ]; then
+    echo "==> Creating self-signed code-signing identity (one-time)"
+    mkdir -p "$CERT_DIR"
+    if [ ! -f "$CERT_DIR/orb.p12" ]; then
+        openssl req -x509 -newkey rsa:2048 -keyout "$CERT_DIR/key.pem" -out "$CERT_DIR/cert.pem" \
+            -days 3650 -nodes -subj "/CN=$CERT_NAME/O=ORB" \
+            -addext "keyUsage=digitalSignature" -addext "extendedKeyUsage=codeSigning" 2>/dev/null
+        openssl pkcs12 -export -out "$CERT_DIR/orb.p12" \
+            -inkey "$CERT_DIR/key.pem" -in "$CERT_DIR/cert.pem" -passout pass:orb 2>/dev/null
+    fi
+    security import "$CERT_DIR/orb.p12" -k "$HOME/Library/Keychains/login.keychain-db" \
+        -T /usr/bin/codesign -P orb 2>/dev/null || true
+    IDENTITY=$(security find-identity -p codesigning 2>/dev/null | grep -o "[0-9A-F]\{40\} \"$CERT_NAME\"" | grep -o "[0-9A-F]\{40\}" | head -1 || true)
+fi
+
+echo "Codesigning ($CERT_NAME)..."
+if [ -n "$IDENTITY" ]; then
+    # Custom designated requirement: `certificate leaf`, NOT `certificate root`.
+    # tccd evaluates the stored requirement WITHOUT the user's login keychain,
+    # so `certificate root = H"…"` on a self-signed cert never matches there —
+    # grants look "on" but are silently rejected, re-prompting forever.
+    # `certificate leaf` evaluates purely from the signature blob.
+    LEAF_SHA1=$(openssl x509 -in "$CERT_DIR/cert.pem" -noout -fingerprint -sha1 \
+        | sed 's/.*=//; s/:://g; s/://g' | tr 'A-F' 'a-f')
+    REQ_FILE="$(mktemp)"
+    printf 'designated => identifier "%s" and certificate leaf = H"%s"' "$BUNDLE_ID" "$LEAF_SHA1" > "$REQ_FILE"
+    codesign --force --deep --sign "$IDENTITY" --requirements "$REQ_FILE" "$APP_BUNDLE"
+    rm -f "$REQ_FILE"
+else
+    echo "WARNING: could not create a signing identity; falling back to ad-hoc (Keychain/TCC prompts will return after rebuilds)"
+    codesign --force --deep --sign - "$APP_BUNDLE" 2>&1 || echo "Codesign warning (may still work)"
+fi
 
 # --- Report ---
 echo ""

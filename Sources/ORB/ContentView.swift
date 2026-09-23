@@ -263,10 +263,14 @@ struct ContentView: View {
     // supervised shell session migrates them additively.
     @EnvironmentObject private var environment: AppEnvironment
     @FocusState private var searchFocused: Bool
+    @ObservedObject private var appLock = AppLock.shared
+    @State private var startedPostUnlockWork = false
 
     var body: some View {
         Group {
-            if selectedSection.isBrowser {
+            if !appLock.isUnlocked {
+                LockScreenView(lock: appLock, accent: ORBTheme.accent)
+            } else if selectedSection.isBrowser {
                 NavigationSplitView {
                     sidebar
                 } content: {
@@ -307,6 +311,12 @@ struct ContentView: View {
                 DatabaseManager.lastLaunchFailure = nil
             }
             await vm.refresh()
+            await startPostUnlockWorkIfNeeded()
+        }
+        .onChange(of: appLock.isUnlocked) { _, unlocked in
+            if unlocked {
+                Task { await startPostUnlockWorkIfNeeded() }
+            }
         }
         .alert(
             Text(databaseFailure?.title ?? "Database Problem"),
@@ -329,6 +339,17 @@ struct ContentView: View {
     }
 
     // MARK: Sidebar
+
+    /// One-time post-unlock side effects: rewrite legacy keychain items to
+    /// open access (so the old keychain dialog can never return) and bring
+    /// MCP servers up so their tools register before the first agent run.
+    /// Never runs while locked.
+    private func startPostUnlockWorkIfNeeded() async {
+        guard appLock.isUnlocked, !startedPostUnlockWork else { return }
+        startedPostUnlockWork = true
+        KeychainMigrator.migrateToOpenAccess()
+        await MCPRegistry.shared.startEnabledServers()
+    }
 
     private var sidebar: some View {
         List(selection: $selectedSection) {

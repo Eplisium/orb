@@ -198,6 +198,7 @@ final class ChatService: ObservableObject {
             lastError = "No API key configured. Go to Account to add one."
             return nil
         }
+        ModelRecentsStore().record(modelId)
         if activeConversation == nil || activeConversation?.modelId != modelId || activeConversation?.mode != .chat {
             _ = newConversation(modelId: modelId, mode: .chat)
         }
@@ -491,6 +492,7 @@ final class ChatService: ObservableObject {
             lastError = "Add your OpenRouter API key in Account before using Agent mode."
             return
         }
+        ModelRecentsStore().record(modelId)
         if activeConversation == nil || activeConversation?.modelId != modelId || activeConversation?.mode != .agent {
             _ = newConversation(modelId: modelId, mode: .agent)
         }

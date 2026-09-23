@@ -26,13 +26,18 @@ enum KeychainManager {
         ]
         SecItemDelete(deleteQuery as CFDictionary)
 
-        let addQuery: [String: Any] = [
+        var addQuery: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
             kSecAttrAccount as String: account,
             kSecValueData as String: data,
             kSecAttrAccessible as String: kSecAttrAccessibleWhenUnlocked,
         ]
+        // "Allow all applications" access: no keychain dialog, ever — see
+        // KeychainOpenAccess. Falls back to default access if unavailable.
+        if let access = KeychainOpenAccess.makeAccess() {
+            addQuery[kSecAttrAccess as String] = access
+        }
         let status = SecItemAdd(addQuery as CFDictionary, nil)
         if status == errSecSuccess { return nil }
         return keychainError(status)

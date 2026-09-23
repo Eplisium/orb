@@ -15,11 +15,6 @@ struct ORBApp: App {
                 .environmentObject(focusManager)
                 .environmentObject(environment)
                 .frame(minWidth: 1100, minHeight: 700)
-                .task {
-                    // Bring MCP servers up in the background so their tools are
-                    // registered before the first agent run.
-                    await MCPRegistry.shared.startEnabledServers()
-                }
         }
         .windowStyle(.hiddenTitleBar)
         .commands {

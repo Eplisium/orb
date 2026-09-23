@@ -14,7 +14,10 @@ enum AgentModelCatalog {
         models: [ModelInfo],
         favoriteIds: Set<String>,
         searchText: String,
-        toolCapableOnly: Bool
+        toolCapableOnly: Bool,
+        recentIds: [String] = [],
+        sortField: SortField = .name,
+        sortOrder: SortOrder = .ascending
     ) -> [AgentModelSection] {
         let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         let filtered = models.filter { model in
@@ -25,15 +28,35 @@ enum AgentModelCatalog {
                 || model.provider.lowercased().contains(query)
             return supportsRequestedMode && matchesSearch
         }
-        .sorted { lhs, rhs in
-            lhs.name.localizedCaseInsensitiveCompare(rhs.name) == .orderedAscending
+
+        // Favorites keep their own complete, stably-sorted home; recents and
+        // the remainder are disjoint from it (and from each other), so no
+        // model row appears twice in the picker.
+        let favorites = sort(
+            filtered.filter { favoriteIds.contains($0.id) },
+            by: sortField, order: sortOrder
+        )
+
+        var claimed = Set(favoriteIds)
+        var recents: [ModelInfo] = []
+        for id in recentIds {
+            guard !claimed.contains(id),
+                  let model = filtered.first(where: { $0.id == id }) else { continue }
+            claimed.insert(id)
+            recents.append(model)
         }
 
-        let favorites = filtered.filter { favoriteIds.contains($0.id) }
-        let remaining = filtered.filter { !favoriteIds.contains($0.id) }
+        let remaining = sort(
+            filtered.filter { !claimed.contains($0.id) },
+            by: sortField, order: sortOrder
+        )
+
         var sections: [AgentModelSection] = []
         if !favorites.isEmpty {
             sections.append(AgentModelSection(title: "Favorites", models: favorites))
+        }
+        if !recents.isEmpty {
+            sections.append(AgentModelSection(title: "Recents", models: recents))
         }
         if !remaining.isEmpty {
             sections.append(AgentModelSection(
@@ -42,6 +65,68 @@ enum AgentModelCatalog {
             ))
         }
         return sections
+    }
+
+    /// Sorts a section's models by the chosen field and direction. Missing
+    /// values always sort last (in both directions) and ties break on name,
+    /// so the comparison is consistent in every direction. Pure — unit-tested
+    /// directly.
+    static func sort(
+        _ models: [ModelInfo],
+        by field: SortField,
+        order: SortOrder
+    ) -> [ModelInfo] {
+        models.sorted { lhs, rhs in
+            // Missing values always sort last, in either direction.
+            let lhsMissing = isMissing(lhs, field)
+            let rhsMissing = isMissing(rhs, field)
+            if lhsMissing != rhsMissing { return !lhsMissing }
+            if !lhsMissing {
+                let result = valueCompare(lhs, rhs, by: field)
+                if result == .orderedAscending { return order == .ascending }
+                if result == .orderedDescending { return order == .descending }
+            }
+            // Ties break on name for a stable, reproducible order.
+            return lhs.name.localizedCaseInsensitiveCompare(rhs.name) == .orderedAscending
+        }
+    }
+
+    private static func isMissing(_ model: ModelInfo, _ field: SortField) -> Bool {
+        switch field {
+        case .name, .provider: return false
+        case .contextLength: return model.contextLength == nil
+        case .promptCost: return model.promptCostPer1M == nil
+        case .completionCost: return model.completionCostPer1M == nil
+        case .created: return model.created == nil
+        case .designElo: return model.bestDesignElo == nil
+        }
+    }
+
+    /// Three-way comparison over present values only (missing handled above).
+    private static func valueCompare(_ lhs: ModelInfo, _ rhs: ModelInfo, by field: SortField) -> ComparisonResult {
+        switch field {
+        case .name:
+            return lhs.name.localizedCaseInsensitiveCompare(rhs.name)
+        case .provider:
+            return lhs.provider.localizedCaseInsensitiveCompare(rhs.provider)
+        case .contextLength:
+            return compareValues(lhs.contextLength, rhs.contextLength)
+        case .promptCost:
+            return compareValues(lhs.promptCostPer1M, rhs.promptCostPer1M)
+        case .completionCost:
+            return compareValues(lhs.completionCostPer1M, rhs.completionCostPer1M)
+        case .created:
+            return compareValues(lhs.created, rhs.created)
+        case .designElo:
+            return compareValues(lhs.bestDesignElo, rhs.bestDesignElo)
+        }
+    }
+
+    private static func compareValues<T: Comparable>(_ lhs: T?, _ rhs: T?) -> ComparisonResult {
+        guard let lhs, let rhs else { return .orderedSame }
+        if lhs < rhs { return .orderedAscending }
+        if lhs > rhs { return .orderedDescending }
+        return .orderedSame
     }
 }
 

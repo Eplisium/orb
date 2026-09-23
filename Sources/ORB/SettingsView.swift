@@ -16,6 +16,7 @@ struct SettingsView: View {
     // itself is always read from `account.hasManagementKey`.
     @State private var management = ManagementKeyPanel()
     @State private var showRemoveManagementKeyConfirmation = false
+    @ObservedObject private var appLock = AppLock.shared
 
     enum SettingsTab: String, CaseIterable {
         case apiKey = "API Key"
@@ -49,6 +50,8 @@ struct SettingsView: View {
                             apiKeySection
                             Divider()
                             managementKeySection
+                            Divider()
+                            securitySection
                         }
                     case .credits: creditsSection
                     case .activity: activitySection
@@ -100,6 +103,30 @@ struct SettingsView: View {
             Button("Cancel", role: .cancel) {}
         } message: {
             Text(ManagementKeyPanel.removeMessage)
+        }
+    }
+
+    // MARK: - Security
+
+    private var securitySection: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Label("Security", systemImage: "lock.fill")
+                .font(.title3.weight(.semibold))
+
+            Text("When enabled, ORB asks for \(appLock.biometricLabel) or your Mac password at launch — one \"allow all access\" gesture instead of repeated Keychain dialogs.")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+
+            Toggle("Require unlock at launch", isOn: Binding(
+                get: { appLock.isEnabled },
+                set: { appLock.setEnabled($0) }
+            ))
+            .toggleStyle(.switch)
+
+            Button("Lock ORB Now") {
+                appLock.lock()
+            }
+            .disabled(!appLock.isEnabled)
         }
     }
 

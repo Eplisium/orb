@@ -18,6 +18,10 @@ struct PlaygroundModelPicker: View {
     let toggleFavorite: (ModelInfo) -> Void
     let dismiss: () -> Void
 
+    @State private var sortField: SortField = .name
+    @State private var sortOrder: SortOrder = .ascending
+    @State private var recentIds: [String] = []
+
     private var toolFilter: Bool { toolCapableOnly?.wrappedValue ?? false }
 
     private var sections: [AgentModelSection] {
@@ -25,7 +29,10 @@ struct PlaygroundModelPicker: View {
             models: models,
             favoriteIds: favoriteIds,
             searchText: searchText,
-            toolCapableOnly: toolFilter
+            toolCapableOnly: toolFilter,
+            recentIds: recentIds,
+            sortField: sortField,
+            sortOrder: sortOrder
         )
     }
 
@@ -38,7 +45,7 @@ struct PlaygroundModelPicker: View {
                     VStack(alignment: .leading, spacing: 2) {
                         Text("Choose a model")
                             .font(.system(size: 15, weight: .semibold))
-                        Text(defaultModelId == nil ? "Favorites are always shown first" : "Pin a model to use it for every new \(defaultLabel ?? "playground") session")
+                        Text(defaultModelId == nil ? "Favorites first, then your most recent models" : "Pin a model to use it for every new \(defaultLabel ?? "playground") session")
                             .font(.system(size: 10))
                             .foregroundStyle(.secondary)
                     }
@@ -71,6 +78,12 @@ struct PlaygroundModelPicker: View {
                 .padding(.vertical, 8)
                 .background(Color.primary.opacity(0.05))
                 .clipShape(RoundedRectangle(cornerRadius: 8))
+
+                HStack(spacing: 8) {
+                    sortMenu
+                    directionButton
+                    Spacer()
+                }
 
                 if let toolCapableOnly {
                     Toggle(isOn: toolCapableOnly) {
@@ -105,6 +118,9 @@ struct PlaygroundModelPicker: View {
                                     if section.title == "Favorites" {
                                         Image(systemName: "star.fill")
                                             .foregroundStyle(.yellow)
+                                    } else if section.title == "Recents" {
+                                        Image(systemName: "clock.arrow.circlepath")
+                                            .foregroundStyle(.secondary)
                                     }
                                     Text(section.title.uppercased())
                                     Spacer()
@@ -123,6 +139,54 @@ struct PlaygroundModelPicker: View {
             }
         }
         .frame(width: 440, height: 540)
+        .onAppear {
+            recentIds = ModelRecentsStore().recentIds()
+        }
+    }
+
+    // MARK: - Sorting controls
+
+    private var sortMenu: some View {
+        Menu {
+            ForEach(SortField.allCases) { field in
+                Button {
+                    sortField = field
+                } label: {
+                    if sortField == field {
+                        Label(field.rawValue, systemImage: "checkmark")
+                    } else {
+                        Text(field.rawValue)
+                    }
+                }
+            }
+        } label: {
+            HStack(spacing: 4) {
+                Image(systemName: "arrow.up.arrow.down")
+                Text("Sort: \(sortField.rawValue)")
+            }
+            .font(.system(size: 10, weight: .medium))
+            .padding(.horizontal, 8)
+            .padding(.vertical, 5)
+            .background(Color.primary.opacity(0.05))
+            .clipShape(RoundedRectangle(cornerRadius: 6))
+        }
+        .menuStyle(.borderlessButton)
+        .fixedSize()
+        .help("Sort models by name, context, cost, date added, provider, or Elo")
+    }
+
+    private var directionButton: some View {
+        Button {
+            sortOrder = (sortOrder == .ascending) ? .descending : .ascending
+        } label: {
+            Image(systemName: sortOrder == .ascending ? "arrow.up" : "arrow.down")
+                .font(.system(size: 10, weight: .semibold))
+                .frame(width: 24, height: 24)
+                .background(Color.primary.opacity(0.05))
+                .clipShape(RoundedRectangle(cornerRadius: 6))
+        }
+        .buttonStyle(.plain)
+        .help(sortOrder == .ascending ? "Ascending (click for descending)" : "Descending (click for ascending)")
     }
 
     private func modelRow(_ model: ModelInfo) -> some View {

@@ -89,14 +89,22 @@ struct KeychainCredentialStore: CredentialSecretStore {
             kSecAttrAccount as String: reference,
         ]
         // Update first; add when absent. The old secret stays intact if the
-        // update or add fails.
-        let update: [String: Any] = [kSecValueData as String: data]
+        // update or add fails. Both paths stamp open access so a stale ACL
+        // from an older, differently-signed build can never raise the legacy
+        // "login keychain password" dialog (see KeychainOpenAccess).
+        var update: [String: Any] = [kSecValueData as String: data]
+        if let access = KeychainOpenAccess.makeAccess() {
+            update[kSecAttrAccess as String] = access
+        }
         let updateStatus = SecItemUpdate(baseQuery as CFDictionary, update as CFDictionary)
         if updateStatus == errSecSuccess { return nil }
         if updateStatus == errSecItemNotFound {
             var add = baseQuery
             add[kSecValueData as String] = data
             add[kSecAttrAccessible as String] = kSecAttrAccessibleWhenUnlocked
+            if let access = KeychainOpenAccess.makeAccess() {
+                add[kSecAttrAccess as String] = access
+            }
             let addStatus = SecItemAdd(add as CFDictionary, nil)
             if addStatus == errSecSuccess { return nil }
             return "Keychain error \(addStatus)."
