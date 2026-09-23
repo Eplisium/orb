@@ -310,6 +310,9 @@ struct ContentView: View {
         }
         .navigationSplitViewStyle(.balanced)
         .task {
+            // With the lock disabled there is no onChange edge — set the
+            // legacy-read gate from the initial state too.
+            KeychainGate.allowsLegacyReads = appLock.isUnlocked
             if let failure = DatabaseManager.lastLaunchFailure {
                 databaseFailure = failure
                 DatabaseManager.lastLaunchFailure = nil
@@ -318,6 +321,9 @@ struct ContentView: View {
             await startPostUnlockWorkIfNeeded()
         }
         .onChange(of: appLock.isUnlocked) { _, unlocked in
+            // Legacy keychain reads (the one prompt-capable operation) are
+            // allowed only while unlocked — see KeychainGate.
+            KeychainGate.allowsLegacyReads = unlocked
             if unlocked {
                 Task { await startPostUnlockWorkIfNeeded() }
             }
@@ -344,14 +350,11 @@ struct ContentView: View {
 
     // MARK: Sidebar
 
-    /// One-time post-unlock side effects: rewrite legacy keychain items to
-    /// open access (so the old keychain dialog can never return) and bring
-    /// MCP servers up so their tools register before the first agent run.
-    /// Never runs while locked.
+    /// One-time post-unlock side effects: bring MCP servers up so their tools
+    /// are registered before the first agent run. Never runs while locked.
     private func startPostUnlockWorkIfNeeded() async {
         guard appLock.isUnlocked, !startedPostUnlockWork else { return }
         startedPostUnlockWork = true
-        KeychainMigrator.migrateToOpenAccess()
         await MCPRegistry.shared.startEnabledServers()
     }
 

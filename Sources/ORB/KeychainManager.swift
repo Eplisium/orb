@@ -4,87 +4,35 @@ import Security
 
 /// Secure storage for the OpenRouter API key using macOS Keychain.
 ///
-/// Save always uses open-access (no ACL) so it never fails on any Mac
-/// configuration. Read operations use `LAContext` with Touch ID / passcode
-/// when the item has biometric access control, and fall back to plain
-/// reads for open-access items.
+/// All mechanics live in `KeychainSecrets`: saves go to the open-access v2
+/// service (prompt-free), and any item left by an older build under the
+/// legacy service is read at most once to mirror it across, then never
+/// touched again. No operation raises the legacy keychain dialogs.
 enum KeychainManager {
-    private static let service = "com.eplisium.orb"
     private static let account = "openrouter-api-key"
 
     /// Save or update the API key in the Keychain.
-    /// Always uses open-access (no ACL) so save never fails.
     /// Returns nil on success, or a diagnostic error string on failure.
     static func saveAPIKey(_ key: String) -> String? {
-        guard let data = key.data(using: .utf8) else { return "Could not encode key as UTF-8." }
-
-        // Delete any existing item first (clears stale ACLs from old builds)
-        let deleteQuery: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: account,
-        ]
-        SecItemDelete(deleteQuery as CFDictionary)
-
-        var addQuery: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: account,
-            kSecValueData as String: data,
-            kSecAttrAccessible as String: kSecAttrAccessibleWhenUnlocked,
-        ]
-        // "Allow all applications" access: no keychain dialog, ever — see
-        // KeychainOpenAccess. Falls back to default access if unavailable.
-        if let access = KeychainOpenAccess.makeAccess() {
-            addQuery[kSecAttrAccess as String] = access
-        }
-        let status = SecItemAdd(addQuery as CFDictionary, nil)
-        if status == errSecSuccess { return nil }
-        return keychainError(status)
-    }
-
-    private static func keychainError(_ status: OSStatus) -> String {
-        if #available(macOS 12.0, *),
-           let msg = SecCopyErrorMessageString(status, nil) {
-            return "Keychain error \(status): \(msg)"
-        }
-        return "Keychain error \(status)."
+        KeychainSecrets.save(account, key)
     }
 
     /// Retrieve the API key from the Keychain. Returns nil if not set.
     static func getAPIKey() -> String? {
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: account,
-            kSecReturnData as String: true,
-            kSecMatchLimit as String: kSecMatchLimitOne,
-        ]
-        var result: AnyObject?
-        let status = SecItemCopyMatching(query as CFDictionary, &result)
-        guard status == errSecSuccess, let data = result as? Data else { return nil }
-        return String(data: data, encoding: .utf8)
+        KeychainSecrets.read(account)
     }
 
-    /// Delete the API key from the Keychain.
+    /// Delete the API key (leaves a tombstone so a dormant legacy copy can
+    /// never resurrect the old value).
+    @discardableResult
     static func deleteAPIKey() -> Bool {
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: account,
-        ]
-        return SecItemDelete(query as CFDictionary) == errSecSuccess
+        KeychainSecrets.delete(account)
+        return true
     }
 
     /// Whether an API key is currently stored. Does NOT trigger auth prompts.
     static var hasAPIKey: Bool {
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: account,
-        ]
-        let status = SecItemCopyMatching(query as CFDictionary, nil)
-        return status == errSecSuccess
+        KeychainSecrets.exists(account)
     }
 
     /// Masked version of the key for display (e.g. "sk-or-v1-abc...xyz").

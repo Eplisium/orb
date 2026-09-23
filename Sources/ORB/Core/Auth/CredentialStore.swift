@@ -60,74 +60,26 @@ protocol CredentialSecretStore: Sendable {
     func hasSecret(forReference reference: String) -> Bool
 }
 
-/// macOS Keychain-backed store. Generic-password items under the ORB service
-/// with one account per credential role.
+/// macOS Keychain-backed store. All mechanics live in `KeychainSecrets`:
+/// saves go to the open-access v2 service (prompt-free) and legacy items from
+/// older builds are read at most once to mirror across, then never touched —
+/// so no path can raise the legacy keychain dialogs.
 struct KeychainCredentialStore: CredentialSecretStore {
-    private let service = "com.eplisium.orb"
-
     func secret(forReference reference: String) -> String? {
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: reference,
-            kSecReturnData as String: true,
-            kSecMatchLimit as String: kSecMatchLimitOne,
-        ]
-        var result: AnyObject?
-        let status = SecItemCopyMatching(query as CFDictionary, &result)
-        guard status == errSecSuccess, let data = result as? Data else { return nil }
-        return String(data: data, encoding: .utf8)
+        KeychainSecrets.read(reference)
     }
 
     func saveSecret(_ secret: String, forReference reference: String) -> String? {
-        guard let data = secret.data(using: .utf8) else {
-            return "Could not encode key as UTF-8."
-        }
-        let baseQuery: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: reference,
-        ]
-        // Update first; add when absent. The old secret stays intact if the
-        // update or add fails. Both paths stamp open access so a stale ACL
-        // from an older, differently-signed build can never raise the legacy
-        // "login keychain password" dialog (see KeychainOpenAccess).
-        var update: [String: Any] = [kSecValueData as String: data]
-        if let access = KeychainOpenAccess.makeAccess() {
-            update[kSecAttrAccess as String] = access
-        }
-        let updateStatus = SecItemUpdate(baseQuery as CFDictionary, update as CFDictionary)
-        if updateStatus == errSecSuccess { return nil }
-        if updateStatus == errSecItemNotFound {
-            var add = baseQuery
-            add[kSecValueData as String] = data
-            add[kSecAttrAccessible as String] = kSecAttrAccessibleWhenUnlocked
-            if let access = KeychainOpenAccess.makeAccess() {
-                add[kSecAttrAccess as String] = access
-            }
-            let addStatus = SecItemAdd(add as CFDictionary, nil)
-            if addStatus == errSecSuccess { return nil }
-            return "Keychain error \(addStatus)."
-        }
-        return "Keychain error \(updateStatus)."
+        KeychainSecrets.save(reference, secret)
     }
 
     func deleteSecret(forReference reference: String) -> Bool {
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: reference,
-        ]
-        return SecItemDelete(query as CFDictionary) == errSecSuccess
+        KeychainSecrets.delete(reference)
+        return true
     }
 
     func hasSecret(forReference reference: String) -> Bool {
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: reference,
-        ]
-        return SecItemCopyMatching(query as CFDictionary, nil) == errSecSuccess
+        KeychainSecrets.exists(reference)
     }
 }
 
