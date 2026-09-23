@@ -4,8 +4,10 @@ import SwiftUI
 // MARK: - Shared playground constants
 
 enum PlaygroundTheme {
-    static let accent = Color(red: 0.46, green: 0.38, blue: 0.96)
-    static let agentAccent = Color(red: 0.46, green: 0.38, blue: 0.96)
+    // One purple for the whole app: the restrained ORB accent from the
+    // shared theme. Feature accents stay distinct (chat blue, test coral).
+    static let accent = ORBTheme.accent
+    static let agentAccent = ORBTheme.accent
     static let chatAccent = Color(red: 0.30, green: 0.58, blue: 0.94)
     static let testAccent = Color(red: 0.94, green: 0.42, blue: 0.50)
 }
@@ -66,12 +68,12 @@ struct SuggestionCard: View {
                     .foregroundStyle(accent)
                     .frame(width: 28, height: 28)
                     .background(accent.opacity(0.10))
-                    .clipShape(RoundedRectangle(cornerRadius: 7))
+                    .clipShape(RoundedRectangle(cornerRadius: 8))
                 VStack(alignment: .leading, spacing: 4) {
                     Text(suggestion.title)
-                        .font(.system(size: 11, weight: .semibold))
+                        .font(.system(size: 12, weight: .semibold))
                     Text(suggestion.subtitle)
-                        .font(.system(size: 9))
+                        .font(.system(size: 10))
                         .foregroundStyle(.secondary)
                         .lineLimit(2)
                 }
@@ -81,10 +83,10 @@ struct SuggestionCard: View {
             .frame(maxWidth: .infinity, minHeight: 64, alignment: .leading)
             .background(Color.primary.opacity(0.032))
             .overlay {
-                RoundedRectangle(cornerRadius: 11)
+                RoundedRectangle(cornerRadius: 10)
                     .stroke(Color.primary.opacity(0.06), lineWidth: 1)
             }
-            .clipShape(RoundedRectangle(cornerRadius: 11))
+            .clipShape(RoundedRectangle(cornerRadius: 10))
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
@@ -99,7 +101,7 @@ struct CapabilityPill: View {
 
     var body: some View {
         Label(title, systemImage: icon)
-            .font(.system(size: 9, weight: .semibold))
+            .font(.system(size: 10, weight: .semibold))
             .foregroundStyle(.secondary)
             .padding(.horizontal, 9)
             .padding(.vertical, 5)

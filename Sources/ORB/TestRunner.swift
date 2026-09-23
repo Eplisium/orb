@@ -6,6 +6,20 @@ import SwiftUI
 
 // MARK: - Test Runner
 
+/// Composes the prompt a test run sends, layering the user's optional
+/// run-specific input on top of the scenario's fixed prompt. Pure and
+/// side-effect free so the composition rules are unit-testable.
+enum TestPromptComposer {
+    /// Appends `userInput` to `base` under a clear "user input" heading.
+    /// Blank or whitespace-only input leaves `base` untouched — a run with
+    /// no input must be byte-identical to the stock scenario prompt.
+    static func compose(base: String, userInput: String?) -> String {
+        let trimmed = userInput?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard !trimmed.isEmpty else { return base }
+        return base + "\n\nUser input for this run:\n" + trimmed
+    }
+}
+
 @MainActor
 final class TestRunner: ObservableObject {
     @Published var results: [TestRunResult] = []
@@ -41,7 +55,12 @@ final class TestRunner: ObservableObject {
         results.removeAll()
     }
 
-    func run(scenario: TestScenario, modelId: String, models: [ModelInfo]) async {
+    func run(
+        scenario: TestScenario,
+        modelId: String,
+        models: [ModelInfo],
+        userInput: String? = nil
+    ) async {
         guard let apiKey = KeychainManager.getAPIKey(), !apiKey.isEmpty else {
             let result = TestRunResult(
                 scenarioId: scenario.id,
@@ -96,7 +115,7 @@ final class TestRunner: ObservableObject {
 
         do {
             let result = try await NativeAgentRunner.run(
-                prompt: scenario.userPrompt,
+                prompt: TestPromptComposer.compose(base: scenario.userPrompt, userInput: userInput),
                 modelId: modelId,
                 apiKey: apiKey,
                 workspace: projectDir.path,

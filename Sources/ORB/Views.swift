@@ -10,7 +10,7 @@ struct ModelRowView: View {
         HStack(spacing: 10) {
             // Provider badge
             Text(model.provider.uppercased())
-                .font(.system(size: 8, weight: .bold, design: .monospaced))
+                .font(.system(size: 9, weight: .bold, design: .monospaced))
                 .foregroundStyle(.white)
                 .padding(.horizontal, 5)
                 .padding(.vertical, 3)
@@ -30,7 +30,7 @@ struct ModelRowView: View {
                     }
                     if model.isFree {
                         Text("FREE")
-                            .font(.system(size: 9, weight: .bold))
+                            .font(.system(size: 10, weight: .bold))
                             .foregroundStyle(.green)
                     }
                     if model.supportsImages {
@@ -189,7 +189,7 @@ struct ModelDetailView: View {
                         .foregroundStyle(.secondary)
                     if model.isUnofficial {
                         Text("UNOFFICIAL")
-                            .font(.system(size: 9, weight: .bold))
+                            .font(.system(size: 10, weight: .bold))
                             .foregroundStyle(.orange)
                             .padding(.horizontal, 5)
                             .padding(.vertical, 2)
@@ -199,7 +199,7 @@ struct ModelDetailView: View {
                     }
                     if model.hasExpired {
                         Text("EXPIRED")
-                            .font(.system(size: 9, weight: .bold))
+                            .font(.system(size: 10, weight: .bold))
                             .foregroundStyle(.red)
                             .padding(.horizontal, 5)
                             .padding(.vertical, 2)

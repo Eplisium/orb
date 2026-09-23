@@ -4,7 +4,8 @@ import SwiftUI
 /// A professional test suite for evaluating AI models across real-world
 /// development tasks. Each test runs through the agent function-calling loop,
 /// so the AI actually creates files, runs commands, and builds a working
-/// project in its own directory — not just a wall of text.
+/// project in its own directory — not just a wall of text. Runs accept
+/// optional user input layered on top of the scenario prompt.
 struct TestSuiteView: View {
     @ObservedObject var viewModel: BrowserViewModel
     @StateObject private var testRunner = TestRunner()
@@ -17,8 +18,14 @@ struct TestSuiteView: View {
     @State private var showCreateTest = false
     @State private var customTests: [CustomTest] = []
     @State private var showSavedResults = false
+    @State private var userInstructions = ""
 
     private let accent = PlaygroundTheme.testAccent
+
+    // MARK: - Design tokens (shared vocabulary: cards 10, controls 8)
+
+    private let cardRadius: CGFloat = 10
+    private let controlRadius: CGFloat = 8
 
     var body: some View {
         HStack(spacing: 0) {
@@ -34,6 +41,10 @@ struct TestSuiteView: View {
             viewModel.loadFavorites()
             customTests = DatabaseManager.shared.loadCustomTests()
             testRunner.loadSavedResults()
+        }
+        .onChange(of: selectedScenario?.id) { _, _ in
+            // Input is scoped to the run the user is looking at.
+            userInstructions = ""
         }
     }
 
@@ -60,14 +71,14 @@ struct TestSuiteView: View {
             Spacer(minLength: 0)
             sidebarFooter
         }
-        .frame(width: 224)
+        .frame(width: 232)
         .background(.ultraThinMaterial.opacity(0.72))
     }
 
     private var sidebarHeader: some View {
         HStack(spacing: 10) {
             ZStack {
-                RoundedRectangle(cornerRadius: 9)
+                RoundedRectangle(cornerRadius: 8)
                     .fill(
                         LinearGradient(
                             colors: [accent, Color(red: 0.98, green: 0.55, blue: 0.42)],
@@ -85,7 +96,7 @@ struct TestSuiteView: View {
                 Text("Test Suite")
                     .font(.system(size: 14, weight: .semibold))
                 Text("Builds real projects")
-                    .font(.system(size: 10, weight: .medium))
+                    .font(.system(size: 11, weight: .medium))
                     .foregroundStyle(.secondary)
             }
             Spacer()
@@ -105,11 +116,11 @@ struct TestSuiteView: View {
                 .font(.system(size: 8, weight: .bold))
                 .foregroundStyle(.tertiary)
         }
-        .font(.system(size: 10, weight: .semibold))
-        .padding(.horizontal, 9)
-        .padding(.vertical, 6)
+        .font(.system(size: 11, weight: .semibold))
+        .padding(.horizontal, 10)
+        .padding(.vertical, 7)
         .background(Color.primary.opacity(0.05))
-        .clipShape(RoundedRectangle(cornerRadius: 7))
+        .clipShape(RoundedRectangle(cornerRadius: controlRadius))
         .contentShape(Rectangle())
         .onTapGesture {
             modelSearchText = ""
@@ -145,10 +156,10 @@ struct TestSuiteView: View {
                 } header: {
                     HStack(spacing: 6) {
                         Image(systemName: "square.grid.2x2")
-                            .font(.system(size: 9, weight: .semibold))
+                            .font(.system(size: 10, weight: .semibold))
                             .foregroundStyle(accent)
                         Text("CATEGORIES")
-                            .font(.system(size: 9, weight: .bold))
+                            .font(.system(size: 10, weight: .bold))
                         Spacer()
                     }
                     .foregroundStyle(.secondary)
@@ -166,10 +177,10 @@ struct TestSuiteView: View {
         VStack(spacing: 4) {
             HStack(spacing: 6) {
                 Image(systemName: "plus.app")
-                    .font(.system(size: 9, weight: .semibold))
+                    .font(.system(size: 10, weight: .semibold))
                     .foregroundStyle(accent)
                 Text("CUSTOM TESTS")
-                    .font(.system(size: 9, weight: .bold))
+                    .font(.system(size: 10, weight: .bold))
                 Spacer()
             }
             .foregroundStyle(.secondary)
@@ -187,10 +198,10 @@ struct TestSuiteView: View {
 
         return HStack(spacing: 6) {
             Image(systemName: test.icon)
-                .font(.system(size: 10, weight: .semibold))
+                .font(.system(size: 11, weight: .semibold))
                 .foregroundStyle(isSelected ? accent : .secondary)
             Text(test.title)
-                .font(.system(size: 11, weight: isSelected ? .semibold : .medium))
+                .font(.system(size: 12, weight: isSelected ? .semibold : .medium))
                 .lineLimit(1)
             Spacer(minLength: 0)
         }
@@ -200,10 +211,10 @@ struct TestSuiteView: View {
         .contentShape(Rectangle())
         .background(isSelected ? accent.opacity(0.14) : Color.primary.opacity(0.025))
         .overlay {
-            RoundedRectangle(cornerRadius: 9)
+            RoundedRectangle(cornerRadius: controlRadius)
                 .stroke(isSelected ? accent.opacity(0.34) : Color.primary.opacity(0.04), lineWidth: 1)
         }
-        .clipShape(RoundedRectangle(cornerRadius: 9))
+        .clipShape(RoundedRectangle(cornerRadius: controlRadius))
         .contextMenu {
             Button("Delete", role: .destructive) {
                 DatabaseManager.shared.deleteCustomTest(test.id)
@@ -233,14 +244,14 @@ struct TestSuiteView: View {
         } label: {
             HStack(spacing: 6) {
                 Image(systemName: icon)
-                    .font(.system(size: 10, weight: .semibold))
+                    .font(.system(size: 11, weight: .semibold))
                     .foregroundStyle(isSelected ? accent : .secondary)
                 Text(title)
-                    .font(.system(size: 11, weight: isSelected ? .semibold : .medium))
+                    .font(.system(size: 12, weight: isSelected ? .semibold : .medium))
                     .lineLimit(1)
                 Spacer(minLength: 0)
                 Text("\(count)")
-                    .font(.system(size: 9, weight: .medium, design: .monospaced))
+                    .font(.system(size: 10, weight: .medium, design: .monospaced))
                     .foregroundStyle(.tertiary)
             }
             .padding(.horizontal, 10)
@@ -249,10 +260,10 @@ struct TestSuiteView: View {
             .contentShape(Rectangle())
             .background(isSelected ? accent.opacity(0.14) : Color.primary.opacity(0.025))
             .overlay {
-                RoundedRectangle(cornerRadius: 9)
+                RoundedRectangle(cornerRadius: controlRadius)
                     .stroke(isSelected ? accent.opacity(0.34) : Color.primary.opacity(0.04), lineWidth: 1)
             }
-            .clipShape(RoundedRectangle(cornerRadius: 9))
+            .clipShape(RoundedRectangle(cornerRadius: controlRadius))
         }
         .buttonStyle(.plain)
     }
@@ -269,7 +280,7 @@ struct TestSuiteView: View {
                     .frame(width: 7, height: 7)
                     .shadow(color: runnerStatusColor.opacity(0.6), radius: 3)
                 Text(runnerStatusText)
-                    .font(.system(size: 10, weight: .medium))
+                    .font(.system(size: 11, weight: .medium))
                     .foregroundStyle(.secondary)
                 Spacer()
             }
@@ -280,7 +291,7 @@ struct TestSuiteView: View {
                     Spacer()
                     Text(testRunner.formattedTotalCost)
                 }
-                .font(.system(size: 9, weight: .medium, design: .monospaced))
+                .font(.system(size: 10, weight: .medium, design: .monospaced))
                 .foregroundStyle(.secondary)
             }
         }
@@ -323,15 +334,15 @@ struct TestSuiteView: View {
         HStack(spacing: 12) {
             VStack(alignment: .leading, spacing: 3) {
                 Text(selectedCategory?.rawValue ?? "All Tests")
-                    .font(.system(size: 15, weight: .semibold))
+                    .font(.system(size: 16, weight: .semibold))
                 if let cat = selectedCategory {
                     Text(cat.description)
-                        .font(.system(size: 10, weight: .medium))
+                        .font(.system(size: 11, weight: .medium))
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
                 } else {
                     Text("\(TestCatalog.allScenarios.count) professional tests — each builds a real project in its own directory")
-                        .font(.system(size: 10, weight: .medium))
+                        .font(.system(size: 11, weight: .medium))
                         .foregroundStyle(.secondary)
                 }
             }
@@ -345,13 +356,14 @@ struct TestSuiteView: View {
                         Image(systemName: "plus")
                         Text("New Test")
                     }
-                    .font(.system(size: 10, weight: .semibold))
+                    .font(.system(size: 11, weight: .semibold))
                     .padding(.horizontal, 10)
                     .padding(.vertical, 6)
                     .background(accent.opacity(0.12))
-                    .clipShape(RoundedRectangle(cornerRadius: 7))
+                    .clipShape(RoundedRectangle(cornerRadius: controlRadius))
                 }
                 .buttonStyle(.plain)
+                .help("Create a custom test with your own prompt")
             }
 
             if let cat = selectedCategory {
@@ -362,15 +374,16 @@ struct TestSuiteView: View {
                         Image(systemName: "play.fill")
                         Text("Run All")
                     }
-                    .font(.system(size: 10, weight: .semibold))
+                    .font(.system(size: 11, weight: .semibold))
                     .foregroundStyle(.white)
                     .padding(.horizontal, 12)
                     .padding(.vertical, 7)
                     .background(testRunner.isRunning ? Color.gray : accent)
-                    .clipShape(RoundedRectangle(cornerRadius: 7))
+                    .clipShape(RoundedRectangle(cornerRadius: controlRadius))
                 }
                 .buttonStyle(.plain)
                 .disabled(testRunner.isRunning || !KeychainManager.hasAPIKey)
+                .help("Run every test in this category")
             }
         }
         .padding(.horizontal, 18)
@@ -428,7 +441,7 @@ struct TestSuiteView: View {
                     testRunner.clearResults()
                 } label: {
                     Text("Clear All")
-                        .font(.system(size: 9, weight: .medium))
+                        .font(.system(size: 10, weight: .medium))
                         .foregroundStyle(.red)
                 }
                 .buttonStyle(.plain)
@@ -454,7 +467,7 @@ struct TestSuiteView: View {
 
                 VStack(alignment: .leading, spacing: 2) {
                     Text(result.scenarioTitle)
-                        .font(.system(size: 11, weight: .semibold))
+                        .font(.system(size: 12, weight: .semibold))
                         .lineLimit(1)
                     HStack(spacing: 6) {
                         Text(shortModelName(result.modelId))
@@ -467,18 +480,18 @@ struct TestSuiteView: View {
                             Label("Project", systemImage: "folder.fill")
                         }
                     }
-                    .font(.system(size: 8, weight: .medium, design: .monospaced))
+                    .font(.system(size: 10, weight: .medium, design: .monospaced))
                     .foregroundStyle(.tertiary)
                 }
                 Spacer()
                 Text(testRunner.formattedCost(result.cost))
-                    .font(.system(size: 9, weight: .medium, design: .monospaced))
+                    .font(.system(size: 10, weight: .medium, design: .monospaced))
                     .foregroundStyle(.secondary)
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 9)
             .background(Color.primary.opacity(0.025))
-            .clipShape(RoundedRectangle(cornerRadius: 9))
+            .clipShape(RoundedRectangle(cornerRadius: controlRadius))
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
@@ -524,10 +537,10 @@ struct TestSuiteView: View {
 
                     VStack(alignment: .leading, spacing: 2) {
                         Text(scenario.title)
-                            .font(.system(size: 12, weight: .semibold))
+                            .font(.system(size: 13, weight: .semibold))
                             .lineLimit(1)
                         Text(scenario.category.rawValue)
-                            .font(.system(size: 9, weight: .medium))
+                            .font(.system(size: 10, weight: .medium))
                             .foregroundStyle(.secondary)
                     }
                     Spacer()
@@ -538,7 +551,7 @@ struct TestSuiteView: View {
                 }
 
                 Text(scenario.subtitle)
-                    .font(.system(size: 10))
+                    .font(.system(size: 11))
                     .foregroundStyle(.secondary)
                     .lineLimit(2)
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -546,11 +559,11 @@ struct TestSuiteView: View {
                 HStack(spacing: 8) {
                     difficultyTag(scenario.difficulty)
                     Label("\(scenario.estimatedSeconds)s", systemImage: "clock")
-                        .font(.system(size: 8, weight: .medium))
+                        .font(.system(size: 10, weight: .medium))
                         .foregroundStyle(.tertiary)
                     if result?.outputPath != nil {
                         Label("Built", systemImage: "folder.badge.checkmark")
-                            .font(.system(size: 8, weight: .medium))
+                            .font(.system(size: 10, weight: .medium))
                             .foregroundStyle(.green)
                     }
                     Spacer()
@@ -560,10 +573,10 @@ struct TestSuiteView: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(Color.primary.opacity(0.032))
             .overlay {
-                RoundedRectangle(cornerRadius: 12)
+                RoundedRectangle(cornerRadius: cardRadius)
                     .stroke(Color.primary.opacity(0.06), lineWidth: 1)
             }
-            .clipShape(RoundedRectangle(cornerRadius: 12))
+            .clipShape(RoundedRectangle(cornerRadius: cardRadius))
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
@@ -575,7 +588,7 @@ struct TestSuiteView: View {
             Image(systemName: result.success ? "checkmark.circle.fill" : "xmark.circle.fill")
                 .font(.system(size: 10))
             Text(result.success ? "Pass" : "Fail")
-                .font(.system(size: 8, weight: .bold))
+                .font(.system(size: 10, weight: .bold))
         }
         .foregroundStyle(result.success ? Color.green : Color.red)
         .padding(.horizontal, 6)
@@ -595,7 +608,7 @@ struct TestSuiteView: View {
         }()
 
         return Text(difficulty.rawValue.uppercased())
-            .font(.system(size: 7, weight: .bold))
+            .font(.system(size: 9, weight: .bold))
             .foregroundStyle(color)
             .padding(.horizontal, 6)
             .padding(.vertical, 2)
@@ -620,9 +633,10 @@ struct TestSuiteView: View {
                             .font(.system(size: 12, weight: .semibold))
                     }
                     .buttonStyle(.plain)
+                    .help("Back to all tests")
 
                     ZStack {
-                        RoundedRectangle(cornerRadius: 10)
+                        RoundedRectangle(cornerRadius: 8)
                             .fill(accent.opacity(0.10))
                         Image(systemName: scenario.icon)
                             .font(.system(size: 18, weight: .semibold))
@@ -632,14 +646,13 @@ struct TestSuiteView: View {
 
                     VStack(alignment: .leading, spacing: 3) {
                         Text(scenario.title)
-                            .font(.system(size: 17, weight: .semibold))
+                            .font(.system(size: 18, weight: .semibold))
                         Text(scenario.subtitle)
-                            .font(.system(size: 11))
+                            .font(.system(size: 12))
                             .foregroundStyle(.secondary)
                     }
 
                     Spacer()
-
                     difficultyTag(scenario.difficulty)
                 }
                 .frame(maxWidth: 820)
@@ -651,26 +664,28 @@ struct TestSuiteView: View {
                     Label("\(scenario.evaluationCriteria.count) criteria", systemImage: "checklist")
                     Spacer()
                 }
-                .font(.system(size: 10, weight: .medium))
+                .font(.system(size: 11, weight: .medium))
                 .foregroundStyle(.secondary)
                 .frame(maxWidth: 820)
 
                 // Evaluation Criteria
                 VStack(alignment: .leading, spacing: 8) {
                     Text("EVALUATION CRITERIA")
-                        .font(.system(size: 9, weight: .bold))
+                        .font(.system(size: 10, weight: .bold))
                         .foregroundStyle(.secondary)
                     ForEach(scenario.evaluationCriteria, id: \.self) { criterion in
                         HStack(spacing: 6) {
                             Image(systemName: "checkmark.circle")
-                                .font(.system(size: 10))
+                                .font(.system(size: 11))
                                 .foregroundStyle(accent)
                             Text(criterion)
-                                .font(.system(size: 11))
+                                .font(.system(size: 12))
                         }
                     }
                 }
                 .frame(maxWidth: 820, alignment: .leading)
+
+                userInputSection(isRunning: isThisRunning)
 
                 Divider().frame(maxWidth: 820)
 
@@ -689,19 +704,19 @@ struct TestSuiteView: View {
                             }
                             Text(isThisRunning ? (testRunner.activityLabel.isEmpty ? "Running…" : testRunner.activityLabel) : "Run Test")
                         }
-                        .font(.system(size: 12, weight: .semibold))
+                        .font(.system(size: 13, weight: .semibold))
                         .foregroundStyle(.white)
                         .padding(.horizontal, 16)
                         .padding(.vertical, 9)
                         .background(isThisRunning ? Color.gray : accent)
-                        .clipShape(RoundedRectangle(cornerRadius: 8))
+                        .clipShape(RoundedRectangle(cornerRadius: controlRadius))
                     }
                     .buttonStyle(.plain)
                     .disabled(testRunner.isRunning || !KeychainManager.hasAPIKey)
 
                     if !KeychainManager.hasAPIKey {
                         Text("Add your OpenRouter API key in Account to run tests.")
-                            .font(.system(size: 10))
+                            .font(.system(size: 11))
                             .foregroundStyle(.orange)
                     }
 
@@ -723,26 +738,26 @@ struct TestSuiteView: View {
                 // System prompt preview
                 DisclosureGroup("System Prompt") {
                     Text(scenario.systemPrompt)
-                        .font(.system(size: 10, design: .monospaced))
+                        .font(.system(size: 11, design: .monospaced))
                         .textSelection(.enabled)
                         .padding(12)
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .background(Color.primary.opacity(0.03))
-                        .clipShape(RoundedRectangle(cornerRadius: 8))
+                        .clipShape(RoundedRectangle(cornerRadius: controlRadius))
                 }
-                .font(.system(size: 10, weight: .medium))
+                .font(.system(size: 11, weight: .medium))
                 .frame(maxWidth: 820, alignment: .leading)
 
                 DisclosureGroup("User Prompt") {
                     Text(scenario.userPrompt)
-                        .font(.system(size: 10, design: .monospaced))
+                        .font(.system(size: 11, design: .monospaced))
                         .textSelection(.enabled)
                         .padding(12)
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .background(Color.primary.opacity(0.03))
-                        .clipShape(RoundedRectangle(cornerRadius: 8))
+                        .clipShape(RoundedRectangle(cornerRadius: controlRadius))
                 }
-                .font(.system(size: 10, weight: .medium))
+                .font(.system(size: 11, weight: .medium))
                 .frame(maxWidth: 820, alignment: .leading)
             }
             .padding(.horizontal, 28)
@@ -751,22 +766,83 @@ struct TestSuiteView: View {
         }
     }
 
+    // MARK: - User Input
+
+    /// Optional run-specific input: a small note, constraint, or extra
+    /// instruction the user wants layered on top of the scenario prompt.
+    private func userInputSection(isRunning: Bool) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 6) {
+                Text("YOUR INPUT")
+                    .font(.system(size: 10, weight: .bold))
+                    .foregroundStyle(.secondary)
+                Text("OPTIONAL")
+                    .font(.system(size: 9, weight: .bold))
+                    .foregroundStyle(.tertiary)
+                    .padding(.horizontal, 5)
+                    .padding(.vertical, 2)
+                    .background(Color.primary.opacity(0.05))
+                    .clipShape(Capsule())
+                Spacer()
+                if !userInstructions.isEmpty {
+                    Button {
+                        userInstructions = ""
+                    } label: {
+                        Text("Clear")
+                            .font(.system(size: 10, weight: .medium))
+                            .foregroundStyle(.secondary)
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(isRunning)
+                }
+            }
+
+            Text("Add a note, constraint, or extra instruction for this run. It is appended to the task prompt below.")
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+
+            ZStack(alignment: .topLeading) {
+                if userInstructions.isEmpty {
+                    Text("e.g. Use a dark theme, keep the project under 200 lines…")
+                        .font(.system(size: 12))
+                        .foregroundStyle(.tertiary)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 14)
+                        .allowsHitTesting(false)
+                }
+                TextEditor(text: $userInstructions)
+                    .font(.system(size: 12))
+                    .frame(minHeight: 72)
+                    .scrollContentBackground(.hidden)
+                    .padding(6)
+                    .disabled(isRunning)
+            }
+            .background(Color.primary.opacity(0.04))
+            .overlay {
+                RoundedRectangle(cornerRadius: controlRadius)
+                    .stroke(Color.primary.opacity(0.06), lineWidth: 1)
+            }
+            .clipShape(RoundedRectangle(cornerRadius: controlRadius))
+        }
+        .frame(maxWidth: 820, alignment: .leading)
+    }
+
     // MARK: - Activity Log
 
     private var activityLogView: some View {
         VStack(alignment: .leading, spacing: 6) {
             Text("AGENT ACTIVITY")
-                .font(.system(size: 9, weight: .bold))
+                .font(.system(size: 10, weight: .bold))
                 .foregroundStyle(accent)
             ScrollView {
                 VStack(alignment: .leading, spacing: 3) {
                     ForEach(Array(testRunner.activityLog.enumerated()), id: \.offset) { _, entry in
                         HStack(spacing: 6) {
                             Image(systemName: entry.icon)
-                                .font(.system(size: 9))
+                                .font(.system(size: 10))
                                 .foregroundStyle(accent.opacity(0.7))
                             Text(entry.text)
-                                .font(.system(size: 10, design: .monospaced))
+                                .font(.system(size: 11, design: .monospaced))
                                 .foregroundStyle(.secondary)
                         }
                     }
@@ -776,7 +852,7 @@ struct TestSuiteView: View {
             .frame(maxHeight: 200)
             .padding(10)
             .background(Color.primary.opacity(0.03))
-            .clipShape(RoundedRectangle(cornerRadius: 8))
+            .clipShape(RoundedRectangle(cornerRadius: controlRadius))
         }
     }
 
@@ -799,17 +875,17 @@ struct TestSuiteView: View {
                 Label("\(result.latencyMs)ms", systemImage: "clock")
                 Label(testRunner.formattedCost(result.cost), systemImage: "dollarsign.circle")
             }
-            .font(.system(size: 9, weight: .medium, design: .monospaced))
+            .font(.system(size: 10, weight: .medium, design: .monospaced))
             .foregroundStyle(.secondary)
 
             if let error = result.errorMessage {
                 Text(error)
-                    .font(.system(size: 10))
+                    .font(.system(size: 11))
                     .foregroundStyle(.red)
                     .padding(10)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .background(Color.red.opacity(0.06))
-                    .clipShape(RoundedRectangle(cornerRadius: 8))
+                    .clipShape(RoundedRectangle(cornerRadius: controlRadius))
             }
 
             // Project directory actions
@@ -821,20 +897,20 @@ struct TestSuiteView: View {
             if !result.response.isEmpty {
                 VStack(alignment: .leading, spacing: 8) {
                     Text("AGENT SUMMARY")
-                        .font(.system(size: 9, weight: .bold))
+                        .font(.system(size: 10, weight: .bold))
                         .foregroundStyle(.secondary)
                     Text(result.response)
-                        .font(.system(size: 12))
+                        .font(.system(size: 13))
                         .lineSpacing(3)
                         .textSelection(.enabled)
                         .padding(14)
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .background(Color.primary.opacity(0.03))
                         .overlay {
-                            RoundedRectangle(cornerRadius: 10)
+                            RoundedRectangle(cornerRadius: cardRadius)
                                 .stroke(Color.primary.opacity(0.06), lineWidth: 1)
                         }
-                        .clipShape(RoundedRectangle(cornerRadius: 10))
+                        .clipShape(RoundedRectangle(cornerRadius: cardRadius))
                 }
             }
         }
@@ -844,7 +920,7 @@ struct TestSuiteView: View {
     private func projectActionsView(_ projectPath: String, result: TestRunResult) -> some View {
         VStack(alignment: .leading, spacing: 10) {
             Text("PROJECT OUTPUT")
-                .font(.system(size: 9, weight: .bold))
+                .font(.system(size: 10, weight: .bold))
                 .foregroundStyle(.secondary)
 
             HStack(spacing: 12) {
@@ -853,13 +929,13 @@ struct TestSuiteView: View {
                     Image(systemName: "folder.fill")
                         .foregroundStyle(accent)
                     Text(projectPath.replacingOccurrences(of: FileManager.default.homeDirectoryForCurrentUser.path, with: "~"))
-                        .font(.system(size: 10, design: .monospaced))
+                        .font(.system(size: 11, design: .monospaced))
                         .lineLimit(1)
                 }
                 .padding(.horizontal, 10)
                 .padding(.vertical, 7)
                 .background(Color.primary.opacity(0.04))
-                .clipShape(RoundedRectangle(cornerRadius: 7))
+                .clipShape(RoundedRectangle(cornerRadius: controlRadius))
 
                 Spacer()
 
@@ -871,11 +947,11 @@ struct TestSuiteView: View {
                         Image(systemName: "folder.open.fill")
                         Text("Open Folder")
                     }
-                    .font(.system(size: 10, weight: .semibold))
+                    .font(.system(size: 11, weight: .semibold))
                     .padding(.horizontal, 10)
                     .padding(.vertical, 7)
                     .background(accent.opacity(0.12))
-                    .clipShape(RoundedRectangle(cornerRadius: 7))
+                    .clipShape(RoundedRectangle(cornerRadius: controlRadius))
                 }
                 .buttonStyle(.plain)
 
@@ -887,11 +963,11 @@ struct TestSuiteView: View {
                         Image(systemName: "macfinder")
                         Text("Reveal")
                     }
-                    .font(.system(size: 10, weight: .semibold))
+                    .font(.system(size: 11, weight: .semibold))
                     .padding(.horizontal, 10)
                     .padding(.vertical, 7)
                     .background(Color.primary.opacity(0.06))
-                    .clipShape(RoundedRectangle(cornerRadius: 7))
+                    .clipShape(RoundedRectangle(cornerRadius: controlRadius))
                 }
                 .buttonStyle(.plain)
             }
@@ -903,10 +979,10 @@ struct TestSuiteView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(accent.opacity(0.04))
         .overlay {
-            RoundedRectangle(cornerRadius: 10)
+            RoundedRectangle(cornerRadius: cardRadius)
                 .stroke(accent.opacity(0.15), lineWidth: 1)
         }
-        .clipShape(RoundedRectangle(cornerRadius: 10))
+        .clipShape(RoundedRectangle(cornerRadius: cardRadius))
     }
 
     private func htmlFileButtons(_ projectPath: String) -> some View {
@@ -916,7 +992,7 @@ struct TestSuiteView: View {
             if !htmlFiles.isEmpty {
                 VStack(alignment: .leading, spacing: 6) {
                     Text("OPEN IN BROWSER")
-                        .font(.system(size: 8, weight: .bold))
+                        .font(.system(size: 9, weight: .bold))
                         .foregroundStyle(.secondary)
 
                     ForEach(htmlFiles, id: \.self) { file in
@@ -928,11 +1004,11 @@ struct TestSuiteView: View {
                                 Text(URL(fileURLWithPath: file).lastPathComponent)
                                     .lineLimit(1)
                             }
-                            .font(.system(size: 10, weight: .medium))
+                            .font(.system(size: 11, weight: .medium))
                             .padding(.horizontal, 10)
                             .padding(.vertical, 6)
                             .background(accent.opacity(0.10))
-                            .clipShape(RoundedRectangle(cornerRadius: 7))
+                            .clipShape(RoundedRectangle(cornerRadius: controlRadius))
                         }
                         .buttonStyle(.plain)
                     }
@@ -973,7 +1049,8 @@ struct TestSuiteView: View {
             await testRunner.run(
                 scenario: scenario,
                 modelId: currentModelId,
-                models: viewModel.api.models
+                models: viewModel.api.models,
+                userInput: userInstructions
             )
         }
     }
@@ -991,4 +1068,3 @@ struct TestSuiteView: View {
         }
     }
 }
-

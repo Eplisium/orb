@@ -229,7 +229,7 @@ enum SidebarSection: String, CaseIterable, Identifiable {
         case .video: return "video.fill"
         case .files: return "folder.fill"
         case .speech: return "speaker.wave.2.fill"
-        case .embeddings: return "vector"
+        case .embeddings: return "chart.dots.scatter"
         case .testSuite: return "checkmark.seal.fill"
         case .account: return "gearshape.fill"
         }
@@ -388,9 +388,9 @@ struct ContentView: View {
             .padding(.vertical, 3)
         }
         .buttonStyle(.plain)
-        .foregroundStyle(isSelected ? Color.accentColor : Color.primary)
+        .foregroundStyle(isSelected ? ORBTheme.accent : Color.primary)
         .font(isSelected ? .body.weight(.semibold) : .body)
-        .listRowBackground(isSelected ? Color.accentColor.opacity(0.12).opacity(0.5) : Color.clear)
+        .listRowBackground(isSelected ? ORBTheme.accent.opacity(0.12) : Color.clear)
         .tag(section)
     }
 
@@ -525,8 +525,8 @@ struct ContentView: View {
                 .font(.system(size: 11, weight: isSelected ? .semibold : .regular))
                 .padding(.horizontal, 9)
                 .padding(.vertical, 4)
-                .background(isSelected ? Color.accentColor.opacity(0.18) : Color.primary.opacity(0.08))
-                .foregroundStyle(isSelected ? Color.accentColor : Color.primary)
+                .background(isSelected ? ORBTheme.accent.opacity(0.18) : Color.primary.opacity(0.08))
+                .foregroundStyle(isSelected ? ORBTheme.accent : Color.primary)
                 .clipShape(Capsule())
         }
         .buttonStyle(.plain)
@@ -553,7 +553,7 @@ struct ContentView: View {
             if let ts = vm.api.lastRefresh {
                 Text("Updated \(ts.formatted(.relative(presentation: .named)))")
                     .font(.caption2)
-                    .foregroundStyle(.tertiary)
+                    .foregroundStyle(.secondary)
             }
         }
         .padding(.horizontal, 12)
@@ -625,16 +625,21 @@ struct ContentView: View {
         if let model = vm.selectedModel {
             ModelDetailView(model: model, viewModel: vm)
         } else {
-            VStack(spacing: 16) {
-                Image(systemName: "cpu")
-                    .font(.system(size: 48))
-                    .foregroundStyle(.tertiary)
+            VStack(spacing: 10) {
+                ZStack {
+                    Circle()
+                        .fill(ORBTheme.accent.opacity(0.08))
+                        .frame(width: 84, height: 84)
+                    Image(systemName: "cpu")
+                        .font(.system(size: 34))
+                        .foregroundStyle(ORBTheme.accent.opacity(0.75))
+                }
                 Text("Select a model")
-                    .font(.title2)
-                    .foregroundStyle(.secondary)
+                    .font(.title2.weight(.semibold))
                 Text("Browse hundreds of models across " +
                      "\(vm.providerOptions.count - 1) providers on OpenRouter")
-                    .foregroundStyle(.tertiary)
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
