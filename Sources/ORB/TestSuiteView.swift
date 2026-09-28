@@ -1,11 +1,7 @@
 import AppKit
 import SwiftUI
 
-/// A professional test suite for evaluating AI models across real-world
-/// development tasks. Each test runs through the agent function-calling loop,
-/// so the AI actually creates files, runs commands, and builds a working
-/// project in its own directory — not just a wall of text. Runs accept
-/// optional user input layered on top of the scenario prompt.
+/// Text-only models receive a response check; tool models build projects.
 struct TestSuiteView: View {
     @ObservedObject var viewModel: BrowserViewModel
     @StateObject private var testRunner = TestRunner()
@@ -19,6 +15,12 @@ struct TestSuiteView: View {
     @State private var customTests: [CustomTest] = []
     @State private var showSavedResults = false
     @State private var userInstructions = ""
+    @State private var toolCapableOnly = false
+    @State private var showBatchPicker = false
+    @State private var showBatchConfirmation = false
+    @State private var batchSelectedIDs: Set<String> = []
+    @State private var batchSearch = ""
+    @State private var batchCeiling = "1.00"
 
     private let accent = PlaygroundTheme.testAccent
 
@@ -46,6 +48,16 @@ struct TestSuiteView: View {
             // Input is scoped to the run the user is looking at.
             userInstructions = ""
         }
+        .sheet(isPresented: $showBatchPicker) { batchPicker }
+        .confirmationDialog("Run selected models?", isPresented: $showBatchConfirmation) {
+            Button("Run \(batchSelectedIDs.count) models") {
+                guard let scenario = selectedScenario, let ceiling = Double(batchCeiling) else { return }
+                testRunner.start(scenario: scenario, modelIDs: batchSelectedIDs.sorted(),
+                                 models: viewModel.api.models, userInput: userInstructions, ceilingUSD: ceiling)
+            }
+        } message: {
+            Text("Inference may cost money. Known spend is checked before each model against the $\(batchCeiling) ceiling; one request may exceed it. Unknown cost stops the batch. Text responses do not verify a project.")
+        }
     }
 
     private var testBackground: some View {
@@ -59,6 +71,58 @@ struct TestSuiteView: View {
             )
         }
         .ignoresSafeArea()
+    }
+
+    private var batchPicker: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Compare models on this test").font(.headline)
+            Text("Select up to \(TestBatchSelection.maximumModels) text-output models. No requests start until confirmation.")
+                .font(.caption).foregroundStyle(.secondary)
+            TextField("Search models", text: $batchSearch)
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 4) {
+                    ForEach(viewModel.api.models.filter {
+                        TestModelRoute.resolve($0) != nil &&
+                        (batchSearch.isEmpty || $0.id.localizedCaseInsensitiveContains(batchSearch) ||
+                         $0.name.localizedCaseInsensitiveContains(batchSearch))
+                    }, id: \.id) { model in
+                        Button {
+                            if batchSelectedIDs.contains(model.id) {
+                                batchSelectedIDs.remove(model.id)
+                            } else if batchSelectedIDs.count < TestBatchSelection.maximumModels {
+                                batchSelectedIDs.insert(model.id)
+                            }
+                        } label: {
+                            HStack {
+                                Image(systemName: batchSelectedIDs.contains(model.id) ? "checkmark.square.fill" : "square")
+                                Text(model.name).lineLimit(1)
+                                Spacer()
+                                Text(selectedScenario?.evaluationMode == .textResponse ? "Text probe" :
+                                     TestModelRoute.resolve(model) == .project ? "Project" : "Text only")
+                                    .foregroundStyle(.secondary)
+                            }
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .padding(.vertical, 4)
+                    }
+                }
+            }
+            HStack {
+                Text("Spend ceiling (USD)")
+                TextField("1.00", text: $batchCeiling).frame(width: 90)
+                Spacer()
+                Button("Cancel") { showBatchPicker = false }
+                Button("Review \(batchSelectedIDs.count) models") {
+                    showBatchPicker = false
+                    showBatchConfirmation = true
+                }
+                .disabled(batchSelectedIDs.isEmpty ||
+                          (Double(batchCeiling).map { !$0.isFinite || $0 <= 0 } ?? true))
+            }
+        }
+        .padding(20)
+        .frame(width: 520, height: 480)
     }
 
     // MARK: - Category Sidebar
@@ -95,7 +159,7 @@ struct TestSuiteView: View {
             VStack(alignment: .leading, spacing: 1) {
                 Text("Test Suite")
                     .font(.system(size: 14, weight: .semibold))
-                Text("Builds real projects")
+                Text("Text & project tests")
                     .font(.system(size: 11, weight: .medium))
                     .foregroundStyle(.secondary)
             }
@@ -132,7 +196,7 @@ struct TestSuiteView: View {
                 favoriteIds: viewModel.favoriteIds,
                 selectedModelId: $selectedModelId,
                 searchText: $modelSearchText,
-                toolCapableOnly: $testRunner.toolCapableOnly,
+                toolCapableOnly: $toolCapableOnly,
                 accent: accent,
                 toggleFavorite: viewModel.toggleFavorite,
                 dismiss: { showModelPicker = false }
@@ -235,7 +299,7 @@ struct TestSuiteView: View {
         let title = category?.rawValue ?? "All Tests"
         let icon = category?.icon ?? "checkmark.seal"
         let count = category == nil
-            ? TestCatalog.allScenarios.count
+            ? TestCatalog.availableScenarios.count
             : TestCatalog.scenarios(in: category!).count
 
         return Button {
@@ -309,7 +373,7 @@ struct TestSuiteView: View {
         if testRunner.isRunning {
             return testRunner.activityLabel.isEmpty ? "Running test…" : testRunner.activityLabel
         }
-        if !testRunner.results.isEmpty { return "\(testRunner.results.count) tests completed" }
+        if !testRunner.results.isEmpty { return "\(testRunner.results.count) results saved" }
         return KeychainManager.hasAPIKey ? "Ready to test" : "API key needed"
     }
 
@@ -341,7 +405,7 @@ struct TestSuiteView: View {
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
                 } else {
-                    Text("\(TestCatalog.allScenarios.count) professional tests — each builds a real project in its own directory")
+                    Text("\(TestCatalog.availableScenarios.count) prompts — project tasks use tools when available; text probes do not")
                         .font(.system(size: 11, weight: .medium))
                         .foregroundStyle(.secondary)
                 }
@@ -366,25 +430,7 @@ struct TestSuiteView: View {
                 .help("Create a custom test with your own prompt")
             }
 
-            if let cat = selectedCategory {
-                Button {
-                    runAllInCategory(cat)
-                } label: {
-                    HStack(spacing: 6) {
-                        Image(systemName: "play.fill")
-                        Text("Run All")
-                    }
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(.white)
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 7)
-                    .background(testRunner.isRunning ? Color.gray : accent)
-                    .clipShape(RoundedRectangle(cornerRadius: controlRadius))
-                }
-                .buttonStyle(.plain)
-                .disabled(testRunner.isRunning || !KeychainManager.hasAPIKey)
-                .help("Run every test in this category")
-            }
+            // No implicit category-wide paid inference.
         }
         .padding(.horizontal, 18)
         .padding(.vertical, 11)
@@ -447,6 +493,9 @@ struct TestSuiteView: View {
                 .buttonStyle(.plain)
             }
 
+            Text("Older saved passes may predate artifact checks; rerun to verify them. — cost means zero or unreported; totals are lower bounds.")
+                .font(.system(size: 10)).foregroundStyle(.secondary)
+
             ForEach(testRunner.results.prefix(8)) { result in
                 savedResultRow(result)
             }
@@ -458,12 +507,15 @@ struct TestSuiteView: View {
         Button {
             if let scenario = TestCatalog.scenario(id: result.scenarioId) {
                 selectedScenario = scenario
+                selectedModelId = result.modelId
             }
         } label: {
             HStack(spacing: 10) {
-                Image(systemName: result.success ? "checkmark.circle.fill" : "xmark.circle.fill")
+                Image(systemName: result.errorMessage == TestRunner.unverifiedMessage ? "questionmark.circle.fill" :
+                      result.success ? "checkmark.circle.fill" : "xmark.circle.fill")
                     .font(.system(size: 14))
-                    .foregroundStyle(result.success ? .green : .red)
+                    .foregroundStyle(result.errorMessage == TestRunner.unverifiedMessage ? .orange :
+                                     result.success ? .green : .red)
 
                 VStack(alignment: .leading, spacing: 2) {
                     Text(result.scenarioTitle)
@@ -515,11 +567,11 @@ struct TestSuiteView: View {
         if let category = selectedCategory {
             return TestCatalog.scenarios(in: category).sorted { $0.difficulty.sortOrder < $1.difficulty.sortOrder }
         }
-        return TestCatalog.allScenarios.sorted { $0.difficulty.sortOrder < $1.difficulty.sortOrder }
+        return TestCatalog.availableScenarios.sorted { $0.difficulty.sortOrder < $1.difficulty.sortOrder }
     }
 
     private func scenarioCard(_ scenario: TestScenario) -> some View {
-        let result = testRunner.results.first { $0.scenarioId == scenario.id }
+        let result = testRunner.results.first { $0.scenarioId == scenario.id && $0.modelId == currentModelId }
 
         return Button {
             selectedScenario = scenario
@@ -584,16 +636,17 @@ struct TestSuiteView: View {
     }
 
     private func resultBadge(_ result: TestRunResult) -> some View {
-        HStack(spacing: 3) {
-            Image(systemName: result.success ? "checkmark.circle.fill" : "xmark.circle.fill")
+        let unverified = result.errorMessage == TestRunner.unverifiedMessage
+        return HStack(spacing: 3) {
+            Image(systemName: unverified ? "questionmark.circle.fill" : result.success ? "checkmark.circle.fill" : "xmark.circle.fill")
                 .font(.system(size: 10))
-            Text(result.success ? "Pass" : "Fail")
+            Text(unverified ? "Review" : result.success ? "Pass" : "Fail")
                 .font(.system(size: 10, weight: .bold))
         }
-        .foregroundStyle(result.success ? Color.green : Color.red)
+        .foregroundStyle(unverified ? Color.orange : result.success ? Color.green : Color.red)
         .padding(.horizontal, 6)
         .padding(.vertical, 3)
-        .background((result.success ? Color.green : Color.red).opacity(0.10))
+        .background((unverified ? Color.orange : result.success ? Color.green : Color.red).opacity(0.10))
         .clipShape(Capsule())
     }
 
@@ -619,8 +672,9 @@ struct TestSuiteView: View {
     // MARK: - Scenario Detail
 
     private func scenarioDetail(_ scenario: TestScenario) -> some View {
-        let result = testRunner.results.first { $0.scenarioId == scenario.id }
+        let result = testRunner.results.first { $0.scenarioId == scenario.id && $0.modelId == currentModelId }
         let isThisRunning = testRunner.isRunning && testRunner.runningScenarioId == scenario.id
+        let isEligible = viewModel.api.models.contains { $0.id == currentModelId && TestModelRoute.resolve($0) != nil }
 
         return ScrollView {
             VStack(alignment: .leading, spacing: 20) {
@@ -661,7 +715,7 @@ struct TestSuiteView: View {
                 HStack(spacing: 14) {
                     Label(scenario.category.rawValue, systemImage: scenario.category.icon)
                     Label("\(scenario.estimatedSeconds)s est.", systemImage: "clock")
-                    Label("\(scenario.evaluationCriteria.count) criteria", systemImage: "checklist")
+                    Label("\(scenario.evaluationCriteria.count) review criteria", systemImage: "checklist")
                     Spacer()
                 }
                 .font(.system(size: 11, weight: .medium))
@@ -670,7 +724,7 @@ struct TestSuiteView: View {
 
                 // Evaluation Criteria
                 VStack(alignment: .leading, spacing: 8) {
-                    Text("EVALUATION CRITERIA")
+                    Text("REVIEW CRITERIA — NOT AUTOMATICALLY SCORED")
                         .font(.system(size: 10, weight: .bold))
                         .foregroundStyle(.secondary)
                     ForEach(scenario.evaluationCriteria, id: \.self) { criterion in
@@ -712,7 +766,20 @@ struct TestSuiteView: View {
                         .clipShape(RoundedRectangle(cornerRadius: controlRadius))
                     }
                     .buttonStyle(.plain)
+                    .disabled(testRunner.isRunning || !KeychainManager.hasAPIKey || !isEligible)
+
+                    Button("Compare Models…") {
+                        batchSelectedIDs = isEligible ? [currentModelId] : []
+                        batchSearch = ""
+                        showBatchPicker = true
+                    }
                     .disabled(testRunner.isRunning || !KeychainManager.hasAPIKey)
+
+                    if testRunner.isRunning {
+                        Button("Cancel", role: .destructive) { testRunner.cancel() }
+                        Text("\(testRunner.batchCompleted)/\(testRunner.batchTotal) finished · \(testRunner.runningModelId ?? "")")
+                            .font(.system(size: 11)).lineLimit(1)
+                    }
 
                     if !KeychainManager.hasAPIKey {
                         Text("Add your OpenRouter API key in Account to run tests.")
@@ -720,9 +787,53 @@ struct TestSuiteView: View {
                             .foregroundStyle(.orange)
                     }
 
+                    if !isEligible {
+                        Text("Choose an available text-output model to run this test.")
+                            .font(.system(size: 11))
+                            .foregroundStyle(.orange)
+                    }
+
                     Spacer()
                 }
                 .frame(maxWidth: 820)
+
+                if isEligible && !testRunner.isRunning {
+                    Text("Single runs use credits without a ceiling; Compare Models offers a between-run spend limit.")
+                        .font(.system(size: 10))
+                        .foregroundStyle(.secondary)
+                        .frame(maxWidth: 820, alignment: .leading)
+                }
+
+                if let notice = testRunner.batchNotice {
+                    Text(notice).font(.system(size: 11)).foregroundStyle(.orange)
+                }
+
+                let modelResults = testRunner.results.filter { $0.scenarioId == scenario.id }
+                if !modelResults.isEmpty {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("RESULTS BY MODEL").font(.system(size: 10, weight: .bold))
+                        ForEach(modelResults.prefix(10)) { entry in
+                            Button {
+                                selectedModelId = entry.modelId
+                            } label: {
+                                HStack {
+                                    Text(entry.modelId).lineLimit(1)
+                                    Spacer()
+                                    Text(entry.errorMessage == TestRunner.unverifiedMessage ? "Needs review" :
+                                         entry.success ? "Project checks passed" : "Failed")
+                                        .foregroundStyle(entry.errorMessage == TestRunner.unverifiedMessage ? .orange :
+                                                         entry.success ? .green : .red)
+                                    Text(testRunner.formattedCost(entry.cost))
+                                }
+                                .font(.system(size: 11))
+                                .padding(5)
+                                .background(entry.modelId == currentModelId ? accent.opacity(0.10) : Color.clear)
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                    .frame(maxWidth: 820)
+                }
 
                 // Activity log during run
                 if isThisRunning, !testRunner.activityLog.isEmpty {
@@ -861,10 +972,13 @@ struct TestSuiteView: View {
     private func testResultView(_ scenario: TestScenario, _ result: TestRunResult) -> some View {
         VStack(alignment: .leading, spacing: 14) {
             HStack(spacing: 8) {
-                Image(systemName: result.success ? "checkmark.seal.fill" : "xmark.seal.fill")
+                Image(systemName: result.errorMessage == TestRunner.unverifiedMessage ? "questionmark.circle.fill" :
+                      result.success ? "checkmark.seal.fill" : "xmark.seal.fill")
                     .font(.system(size: 14))
-                    .foregroundStyle(result.success ? .green : .red)
-                Text(result.success ? "Test Passed" : "Test Failed")
+                    .foregroundStyle(result.errorMessage == TestRunner.unverifiedMessage ? .orange :
+                                     result.success ? .green : .red)
+                Text(result.errorMessage == TestRunner.unverifiedMessage ? "Text Response — Needs Review" :
+                     result.success ? "Project Checks Passed" : "Test Failed")
                     .font(.system(size: 13, weight: .semibold))
                 Spacer()
             }
@@ -879,12 +993,13 @@ struct TestSuiteView: View {
             .foregroundStyle(.secondary)
 
             if let error = result.errorMessage {
+                let needsReview = error == TestRunner.unverifiedMessage
                 Text(error)
                     .font(.system(size: 11))
-                    .foregroundStyle(.red)
+                    .foregroundStyle(needsReview ? .orange : .red)
                     .padding(10)
                     .frame(maxWidth: .infinity, alignment: .leading)
-                    .background(Color.red.opacity(0.06))
+                    .background((needsReview ? Color.orange : Color.red).opacity(0.06))
                     .clipShape(RoundedRectangle(cornerRadius: controlRadius))
             }
 
@@ -896,7 +1011,7 @@ struct TestSuiteView: View {
             // Agent summary
             if !result.response.isEmpty {
                 VStack(alignment: .leading, spacing: 8) {
-                    Text("AGENT SUMMARY")
+                    Text(result.outputPath == nil ? "TEXT RESPONSE (PROJECT NOT VERIFIED)" : "AGENT SUMMARY")
                         .font(.system(size: 10, weight: .bold))
                         .foregroundStyle(.secondary)
                     Text(result.response)
@@ -1055,16 +1170,4 @@ struct TestSuiteView: View {
         }
     }
 
-    private func runAllInCategory(_ category: TestCategory) {
-        let scenarios = TestCatalog.scenarios(in: category)
-        Task {
-            for scenario in scenarios {
-                await testRunner.run(
-                    scenario: scenario,
-                    modelId: currentModelId,
-                    models: viewModel.api.models
-                )
-            }
-        }
-    }
 }

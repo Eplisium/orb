@@ -9,8 +9,8 @@ import Foundation
 //   * `ExperimentCompletionStatus` — transport/lifecycle outcome only.
 //   * `ArtifactChecker` + `ResponseAssertions` — deterministic, offline
 //     checks over the run's project directory and response text.
-//   * `ExperimentVerdict` — passes only when the run completed AND every
-//     deterministic check passed. A nonempty answer alone is never proof.
+//   * `ExperimentVerdict` — project builds pass only on completed runs with
+//     deterministic evidence; text responses remain unverified on basic checks.
 //
 // Everything here is deterministic and network-free so it can be exercised
 // in `swift test` with synthesized results; no agent loop is ever invoked.
@@ -29,12 +29,14 @@ enum ExperimentCompletionStatus: String, Codable, Sendable {
     case exhausted
 }
 
-/// Overall deterministic verdict. `passed` requires completion AND artifacts
-/// AND assertions; every individual failure must be explainable from the
-/// recorded check results.
+/// Overall deterministic verdict. `passed` establishes only the checks below,
+/// never that human-readable scenario criteria were semantically satisfied.
+/// Text-only answers are `.unverified` when basic checks succeed.
 enum ExperimentVerdict: String, Codable, Sendable {
     case passed
     case failed
+    /// Text-response checks passed; the scenario rubric was NOT graded.
+    case unverified
 }
 
 // MARK: Check results
@@ -277,7 +279,7 @@ enum ResponseAssertions {
         return refusalPhrases.contains { lowered.contains($0) }
     }
 
-    static func evaluate(response: String) -> [AssertionResult] {
+    static func evaluate(response: String, allowsRefusal: Bool = false) -> [AssertionResult] {
         let trimmed = response.trimmingCharacters(in: .whitespacesAndNewlines)
         let nonEmpty = AssertionResult(
             name: "nonEmptyResponse",
@@ -289,12 +291,39 @@ enum ResponseAssertions {
         let refused = isRefusal(response)
         let noRefusal = AssertionResult(
             name: "noRefusalPhrasing",
-            passed: !refused,
-            detail: refused
+            passed: allowsRefusal || !refused,
+            detail: allowsRefusal ? "Refusal is permitted for this scenario; appropriateness requires human review." : refused
                 ? "Response contains a recognized refusal phrasing; text-only success is not acceptance."
                 : "No refusal phrasing detected."
         )
         return [nonEmpty, noRefusal]
+    }
+}
+
+enum ScenarioResponseChecks {
+    /// Exact-output probes can be checked without claiming the entire rubric
+    /// (or a free-form answer) has been graded.
+    static func evaluate(scenario: TestScenario, response: String) -> [AssertionResult] {
+        switch scenario.id {
+        case "llm-structured-output":
+            let object = (try? JSONSerialization.jsonObject(with: Data(response.utf8))) as? [String: Any]
+            let name = object?["name"] as? String
+            let count = object?["count"] as? NSNumber
+            let correct = object?.count == 2 && name == "A\"B"
+                && count?.intValue == 2 && count?.doubleValue == 2
+                && count.map { CFGetTypeID($0) != CFBooleanGetTypeID() } == true
+            return [AssertionResult(name: "exactStructuredJSON", passed: correct,
+                                    detail: correct ? "Exact JSON keys, escaped name, and numeric count verified."
+                                        : "Expected only JSON keys name= A\"B and count=2 (integer).")]
+        case "llm-unicode-fidelity":
+            let values = (try? JSONSerialization.jsonObject(with: Data(response.utf8))) as? [String]
+            let correct = values == ["café", "東京", "👩🏽‍💻"]
+            return [AssertionResult(name: "exactUnicodeArray", passed: correct,
+                                    detail: correct ? "Unicode values and order verified."
+                                        : "Expected the exact JSON array [café, 東京, 👩🏽‍💻] in order.")]
+        default:
+            return []
+        }
     }
 }
 
@@ -311,11 +340,18 @@ struct ArtifactChecker {
 
     func check() -> [ArtifactCheckResult] {
         var results: [ArtifactCheckResult] = []
-        let fm = FileManager.default
+        let root = projectDirectory.standardizedFileURL
+        let rootValues = try? root.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey])
+        guard rootValues?.isDirectory == true, rootValues?.isSymbolicLink != true else {
+            return [ArtifactCheckResult(name: "projectDirectoryPresent", passed: false,
+                                        detail: "Project directory is missing, not a directory, or is a symlink: \(root.path).")]
+        }
+        results.append(ArtifactCheckResult(name: "projectDirectoryPresent", passed: true,
+                                           detail: "Project directory exists: \(root.path)."))
 
         // 1. At least one real file created anywhere in the directory.
-        let allFiles = Self.files(under: projectDirectory)
-        let meaningful = allFiles.filter { $0.lastPathComponent != ".DS_Store" }
+        let allFiles = Self.files(under: root)
+        let meaningful = allFiles.filter { $0.lastPathComponent != ".DS_Store" && Self.nonBlankFile($0, root: root) }
         if meaningful.isEmpty {
             results.append(ArtifactCheckResult(
                 name: "atLeastOneFileCreated",
@@ -333,48 +369,68 @@ struct ArtifactChecker {
 
         // 2. Web-development scenarios must produce a non-trivial index.html.
         if scenario.category == .webDevelopment {
-            let indexURL = projectDirectory.appendingPathComponent("index.html")
-            let byteCount = (try? Data(contentsOf: indexURL))?.count ?? 0
-            if !fm.fileExists(atPath: indexURL.path) {
-                results.append(ArtifactCheckResult(
-                    name: "webIndexHTMLPresent",
-                    passed: false,
-                    detail: "Web scenario did not create an index.html in the project directory."
-                ))
-            } else if byteCount < Self.minimumMeaningfulBytes {
-                results.append(ArtifactCheckResult(
-                    name: "webIndexHTMLPresent",
-                    passed: false,
-                    detail: "index.html exists but is only \(byteCount) bytes (minimum \(Self.minimumMeaningfulBytes)); too trivial to count as a deliverable."
-                ))
-            } else {
-                results.append(ArtifactCheckResult(
-                    name: "webIndexHTMLPresent",
-                    passed: true,
-                    detail: "index.html exists (\(byteCount) bytes)."
-                ))
-            }
+            let indexURL = root.appendingPathComponent("index.html")
+            let data = Self.safeRegularFile(indexURL, root: root).flatMap { try? Data(contentsOf: $0) }
+            let html = data.flatMap { String(data: $0, encoding: .utf8) } ?? ""
+            let visible = html.replacingOccurrences(of: "<!--[\\s\\S]*?-->|<[^>]*>", with: " ", options: .regularExpression)
+                .trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            let placeholder = visible.count < 30 || ["hello world", "coming soon", "placeholder", "todo", "under construction"]
+                .contains(where: { visible == $0 || visible == "\($0)." })
+            let passed = (data?.count ?? 0) >= Self.minimumMeaningfulBytes
+                && html.lowercased().contains("<html") && html.lowercased().contains("<body")
+                && html.lowercased().contains("</html>") && !placeholder
+            results.append(ArtifactCheckResult(name: "webIndexHTMLPresent", passed: passed,
+                                               detail: passed ? "Non-trivial index.html found (\(data?.count ?? 0) bytes); functionality not verified."
+                                                   : "Missing, unsafe, blank, malformed, or trivial index.html (\(data?.count ?? 0) bytes)."))
         }
 
         // 3. Every artifact the scenario explicitly declares must exist.
         for relativePath in scenario.expectedArtifacts {
-            let url = projectDirectory.appendingPathComponent(relativePath)
-            if fm.fileExists(atPath: url.path) {
+            let components = relativePath.split(separator: "/", omittingEmptySubsequences: false)
+            let validPath = !relativePath.hasPrefix("/") && !components.isEmpty
+                && components.allSatisfy { !$0.isEmpty && $0 != "." && $0 != ".." && !$0.contains("\\") }
+            let url = root.appendingPathComponent(relativePath)
+            if validPath && Self.nonBlankFile(url, root: root) {
                 results.append(ArtifactCheckResult(
                     name: "expectedArtifact:\(relativePath)",
                     passed: true,
-                    detail: "Declared artifact \(relativePath) exists."
+                    detail: "Declared artifact \(relativePath) is a nonblank regular file inside the project."
                 ))
             } else {
                 results.append(ArtifactCheckResult(
                     name: "expectedArtifact:\(relativePath)",
                     passed: false,
-                    detail: "Declared artifact \(relativePath) is missing from the project directory."
+                    detail: "Declared artifact \(relativePath) is missing, blank, or outside the project directory."
                 ))
             }
         }
 
         return results
+    }
+
+    private static func safeRegularFile(_ url: URL, root: URL) -> URL? {
+        let candidate = url.standardizedFileURL
+        guard candidate.path.hasPrefix(root.path + "/") else { return nil }
+        // Check every existing ancestor, including the final component. This
+        // catches symlinked directories even when the final target is absent.
+        var cursor = candidate
+        while cursor.path != root.path {
+            let values = try? cursor.resourceValues(forKeys: [.isSymbolicLinkKey])
+            if values?.isSymbolicLink == true { return nil }
+            let parent = cursor.deletingLastPathComponent()
+            guard parent.path != cursor.path else { return nil }
+            cursor = parent
+        }
+        let values = try? candidate.resourceValues(forKeys: [.isRegularFileKey])
+        return values?.isRegularFile == true ? candidate : nil
+    }
+
+    private static func nonBlankFile(_ url: URL, root: URL) -> Bool {
+        guard let safe = safeRegularFile(url, root: root), let data = try? Data(contentsOf: safe), !data.isEmpty else { return false }
+        if let text = String(data: data, encoding: .utf8) {
+            return !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        }
+        return true // Nonempty binary artifacts are not judged semantically.
     }
 
     static func files(under directory: URL) -> [URL] {
@@ -388,7 +444,7 @@ struct ArtifactChecker {
         var files: [URL] = []
         for case let url as URL in enumerator {
             if let values = try? url.resourceValues(forKeys: [.isRegularFileKey]),
-               values.isRegularFile == true {
+               values.isRegularFile == true, safeRegularFile(url, root: directory) != nil {
                 files.append(url)
             }
         }
@@ -403,6 +459,8 @@ enum ExperimentEvaluation {
     static let responseExcerptLimit = 2_000
 
     /// Builds a complete record from a finished (or cancelled/failed) run.
+    /// Callers must pass `.textResponse` explicitly for text-only runs;
+    /// scenario.evaluationMode is catalog metadata, not an implicit override.
     /// Deterministic: same inputs → same record (aside from id/timestamps).
     static func record(
         id: UUID = UUID(),
@@ -415,18 +473,28 @@ enum ExperimentEvaluation {
         completionStatus: ExperimentCompletionStatus,
         startedAt: Date,
         finishedAt: Date,
-        errorMessage: String?
+        errorMessage: String?,
+        evaluationMode: TestEvaluationMode = .projectBuild
     ) -> ExperimentRunRecord {
-        let checker = projectDirectory.map {
-            ArtifactChecker(projectDirectory: $0, scenario: scenario)
+        let artifactChecks: [ArtifactCheckResult]
+        switch evaluationMode {
+        case .projectBuild:
+            artifactChecks = projectDirectory.map { ArtifactChecker(projectDirectory: $0, scenario: scenario).check() }
+                ?? [ArtifactCheckResult(name: "projectDirectoryPresent", passed: false,
+                                        detail: "Project-build run has no project directory.")]
+        case .textResponse:
+            artifactChecks = [ArtifactCheckResult(name: "textResponseMode", passed: true,
+                                                  detail: "No artifacts required; scenario criteria have not been graded.")]
         }
-        let artifactChecks = checker?.check() ?? []
-        let assertions = ResponseAssertions.evaluate(response: response)
-        let verdict = overallVerdict(
+        let assertions = ResponseAssertions.evaluate(response: response, allowsRefusal: scenario.allowsRefusal)
+            + ScenarioResponseChecks.evaluate(scenario: scenario, response: response)
+        let basicVerdict = overallVerdict(
             completionStatus: completionStatus,
             artifactChecks: artifactChecks,
             assertions: assertions
         )
+        let verdict: ExperimentVerdict = basicVerdict == .passed && evaluationMode == .textResponse
+            ? .unverified : basicVerdict
         let excerpt: String? = {
             let trimmed = response.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !trimmed.isEmpty else { return nil }
@@ -464,6 +532,7 @@ enum ExperimentEvaluation {
         assertions: [AssertionResult]
     ) -> ExperimentVerdict {
         guard completionStatus == .completed else { return .failed }
+        guard !artifactChecks.isEmpty, !assertions.isEmpty else { return .failed }
         let artifactsOK = artifactChecks.allSatisfy(\.passed)
         let assertionsOK = assertions.allSatisfy(\.passed)
         return (artifactsOK && assertionsOK) ? .passed : .failed

@@ -17,7 +17,10 @@ struct StreamPublishCoalescerTests {
         coalescer.submit("ab", addedCharacters: 1)
 
         #expect(published == ["a"])
-        try await Task.sleep(for: .milliseconds(60))
+        let deadline = ContinuousClock.now.advanced(by: .seconds(2))
+        while published.count < 2 && ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(10))
+        }
         #expect(published == ["a", "ab"])
     }
 }

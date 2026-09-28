@@ -2,7 +2,7 @@ import AppKit
 import Foundation
 import SwiftUI
 
-// Split out of TestSuiteView.swift for readability.
+// Test Suite execution and model routing.
 
 // MARK: - Test Runner
 
@@ -20,14 +20,75 @@ enum TestPromptComposer {
     }
 }
 
+enum TestModelRoute: Equatable {
+    case text, project
+
+    static func resolve(_ model: ModelInfo) -> Self? {
+        guard model.inputModalities.contains("text"),
+              model.outputModalities.contains("text"), !model.hasExpired else { return nil }
+        return model.supportsTools ? .project : .text
+    }
+}
+
+enum TestBatchSelection {
+    static let maximumModels = 5
+
+    static func eligibleIDs(_ ids: [String], catalog: [ModelInfo]) -> [String] {
+        let lookup = Dictionary(catalog.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        var seen = Set<String>()
+        return ids.filter { id in
+            guard seen.insert(id).inserted, let model = lookup[id] else { return false }
+            return TestModelRoute.resolve(model) != nil
+        }
+    }
+}
+
 @MainActor
 final class TestRunner: ObservableObject {
+    static let unverifiedMessage = "Text response received; scenario criteria require review."
     @Published var results: [TestRunResult] = []
     @Published var isRunning = false
     @Published var runningScenarioId: String?
     @Published var activityLabel = ""
     @Published var activityLog: [ActivityEntry] = []
-    @Published var toolCapableOnly = true
+    @Published var runningModelId: String?
+    @Published var batchCompleted = 0
+    @Published var batchTotal = 0
+    @Published var batchNotice: String?
+
+    typealias AgentRun = (String, String, String, URL, String, @escaping @MainActor (String) -> Void) async throws -> NativeAgentRunResult
+    private let client: any OpenRouterClientProtocol
+    private let agentRun: AgentRun
+    private let credential: () -> String?
+    private let saveResult: (TestRunResult) -> Void
+    private let saveExperiment: (ExperimentRunRecord) -> Void
+    private let outputRoot: URL
+    private var activeTask: Task<Void, Never>?
+    private var cancellationRequested = false
+    private var reportedCostForLastRun: Double?
+
+    init(
+        client: any OpenRouterClientProtocol = OpenRouterClient(),
+        agentRun: @escaping AgentRun = { prompt, modelID, key, directory, systemPrompt, activity in
+            try await NativeAgentRunner.run(
+                prompt: prompt, modelId: modelID, apiKey: key,
+                workspace: directory.path, fullComputerAccess: false, history: [],
+                systemPromptOverride: systemPrompt, policy: .projectBuild, onActivity: activity
+            )
+        },
+        credential: @escaping () -> String? = { KeychainManager.getAPIKey() },
+        saveResult: @escaping (TestRunResult) -> Void = { DatabaseManager.shared.saveTestResult($0) },
+        saveExperiment: @escaping (ExperimentRunRecord) -> Void = { DatabaseManager.shared.saveExperimentRunRecord($0) },
+        outputRoot: URL? = nil
+    ) {
+        self.client = client
+        self.agentRun = agentRun
+        self.credential = credential
+        self.saveResult = saveResult
+        self.saveExperiment = saveExperiment
+        self.outputRoot = outputRoot ?? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("ORB/TestProjects", isDirectory: true)
+    }
 
     struct ActivityEntry: Identifiable {
         let id = UUID()
@@ -35,220 +96,167 @@ final class TestRunner: ObservableObject {
         let icon: String
     }
 
-    /// Directory where all test projects are stored.
-    private var testOutputRoot: URL {
-        let fm = FileManager.default
-        let base = fm.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
-            ?? fm.homeDirectoryForCurrentUser
-        let dir = base.appendingPathComponent("ORB/TestProjects", isDirectory: true)
-        if !fm.fileExists(atPath: dir.path) {
-            try? fm.createDirectory(at: dir, withIntermediateDirectories: true)
+    func loadSavedResults() { results = DatabaseManager.shared.loadTestResults() }
+    func clearResults() { results.removeAll() }
+
+    /// Synchronous ownership prevents duplicate starts across UI Tasks.
+    func start(scenario: TestScenario, modelIDs: [String], models: [ModelInfo], userInput: String? = nil,
+               ceilingUSD: Double? = nil) {
+        guard !isRunning else { return }
+        let ids = TestBatchSelection.eligibleIDs(modelIDs, catalog: models)
+        guard !ids.isEmpty else { batchNotice = "No eligible text-output models selected."; return }
+        guard ids.count <= TestBatchSelection.maximumModels else {
+            batchNotice = "Select at most \(TestBatchSelection.maximumModels) models."; return
         }
-        return dir
-    }
-
-    func loadSavedResults() {
-        results = DatabaseManager.shared.loadTestResults()
-    }
-
-    func clearResults() {
-        results.removeAll()
-    }
-
-    func run(
-        scenario: TestScenario,
-        modelId: String,
-        models: [ModelInfo],
-        userInput: String? = nil
-    ) async {
-        guard let apiKey = KeychainManager.getAPIKey(), !apiKey.isEmpty else {
-            let result = TestRunResult(
-                scenarioId: scenario.id,
-                scenarioTitle: scenario.title,
-                category: scenario.category,
-                modelId: modelId,
-                response: "",
-                promptTokens: 0,
-                completionTokens: 0,
-                totalTokens: 0,
-                cost: 0,
-                latencyMs: 0,
-                success: false,
-                errorMessage: "No API key configured. Add one in Account."
-            )
-            results.insert(result, at: 0)
-            DatabaseManager.shared.saveTestResult(result)
-            return
+        if let ceilingUSD, (!ceilingUSD.isFinite || ceilingUSD <= 0) {
+            batchNotice = "Enter a positive spend ceiling."; return
         }
-
-        // Create a dedicated directory for this test run
-        let safeName = scenario.id.replacingOccurrences(of: "/", with: "-")
-            .replacingOccurrences(of: ":", with: "-")
-        let projectDir = testOutputRoot.appendingPathComponent("\(safeName)-\(Int(Date().timeIntervalSince1970))")
-        try? FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
-
+        batchNotice = ids.count == modelIDs.count ? nil : "Duplicate or unsupported models were omitted."
         isRunning = true
+        cancellationRequested = false
         runningScenarioId = scenario.id
-        activityLabel = "Starting agent…"
-        activityLog.removeAll()
-
-        let startTime = Date()
-
-        // Build an agent-style system prompt that tells the AI to create files
-        // in the project directory.
-        let agentSystemPrompt = """
-        \(scenario.systemPrompt)
-
-        You are running inside the ORB Test Suite. Your task is to create a complete, working project in the directory provided below. You MUST:
-
-        1. Use the write_file function to create every file the project needs.
-        2. Use list_directory to verify your files were created.
-        3. Use run_command to build, test, or verify the project if applicable.
-        4. For web projects, create an index.html that can be opened directly in a browser.
-        5. Keep all files within the project directory.
-
-        Project directory: \(projectDir.path)
-        Workspace: \(projectDir.path)
-
-        After completing the project, write a brief summary of what you built, the file structure, and how to run or open it.
-        """
-
-        do {
-            let result = try await NativeAgentRunner.run(
-                prompt: TestPromptComposer.compose(base: scenario.userPrompt, userInput: userInput),
-                modelId: modelId,
-                apiKey: apiKey,
-                workspace: projectDir.path,
-                fullComputerAccess: false,
-                history: [],
-                systemPromptOverride: agentSystemPrompt,
-                policy: .projectBuild,
-                onActivity: { [weak self] label in
-                    guard let self else { return }
-                    self.activityLabel = label
-                    self.activityLog.append(ActivityEntry(text: label, icon: "gearshape"))
+        batchCompleted = 0
+        batchTotal = ids.count
+        let prompt = TestPromptComposer.compose(base: scenario.userPrompt, userInput: userInput)
+        activeTask = Task { [weak self] in
+            guard let self else { return }
+            var spent = 0.0
+            for id in ids {
+                if Task.isCancelled || self.cancellationRequested { break }
+                if let ceilingUSD, spent >= ceilingUSD {
+                    self.batchNotice = "Spend ceiling reached; remaining models skipped. One request may exceed the ceiling."
+                    break
                 }
-            )
-
-            let elapsed = Int(Date().timeIntervalSince(startTime) * 1000)
-
-            let testResult = TestRunResult(
-                scenarioId: scenario.id,
-                scenarioTitle: scenario.title,
-                category: scenario.category,
-                modelId: modelId,
-                response: result.response,
-                promptTokens: result.usage?.promptTokens ?? 0,
-                completionTokens: result.usage?.completionTokens ?? 0,
-                totalTokens: result.usage?.totalTokens ?? 0,
-                cost: result.usage?.cost ?? 0,
-                latencyMs: elapsed,
-                success: !result.response.isEmpty && !ResponseAssertions.isRefusal(result.response),
-                errorMessage: result.response.isEmpty
-                    ? "Agent returned empty response"
-                    : (ResponseAssertions.isRefusal(result.response) ? "Agent response was a refusal" : nil),
-                outputPath: projectDir.path
-            )
-            results.insert(testResult, at: 0)
-            DatabaseManager.shared.saveTestResult(testResult)
-
-            // W12/F10: durable experiment record. Evaluation (artifacts +
-            // assertions + verdict) is separate from the transport-level
-            // `success` flag above; the verdict lives only on the record.
-            let experimentRecord = ExperimentEvaluation.record(
-                scenario: scenario,
-                modelID: modelId,
-                policy: .projectBuild,
-                projectDirectory: projectDir,
-                response: result.response,
-                usage: result.usage,
-                completionStatus: result.hitToolBudget ? .exhausted : .completed,
-                startedAt: startTime,
-                finishedAt: Date(),
-                errorMessage: testResult.errorMessage
-            )
-            DatabaseManager.shared.saveExperimentRunRecord(experimentRecord)
-
-            // Log tool usage
-            for toolName in result.toolNames {
-                activityLog.append(ActivityEntry(text: "Used tool: \(toolName)", icon: toolIcon(toolName)))
+                self.runningModelId = id
+                self.activityLabel = "Starting \(id)…"
+                self.activityLog.removeAll()
+                let result = await self.execute(scenario: scenario, modelID: id, models: models, prompt: prompt)
+                self.results.insert(result, at: 0)
+                self.saveResult(result)
+                self.batchCompleted += 1
+                if Task.isCancelled || self.cancellationRequested { break }
+                if ceilingUSD != nil {
+                    guard let cost = self.reportedCostForLastRun else {
+                        self.batchNotice = "Provider did not report cost; remaining models skipped."
+                        break
+                    }
+                    spent += cost
+                }
             }
-
-        } catch is CancellationError {
-            let elapsed = Int(Date().timeIntervalSince(startTime) * 1000)
-            let testResult = TestRunResult(
-                scenarioId: scenario.id,
-                scenarioTitle: scenario.title,
-                category: scenario.category,
-                modelId: modelId,
-                response: "Test was cancelled.",
-                promptTokens: 0,
-                completionTokens: 0,
-                totalTokens: 0,
-                cost: 0,
-                latencyMs: elapsed,
-                success: false,
-                errorMessage: "Cancelled by user",
-                outputPath: projectDir.path
-            )
-            results.insert(testResult, at: 0)
-            DatabaseManager.shared.saveTestResult(testResult)
-
-            // W12: cancelled runs keep their evidence (partial artifacts,
-            // cancellation reason). No usage block survives cancellation, so
-            // spend is labelled unknown rather than zero.
-            let cancelledRecord = ExperimentEvaluation.record(
-                scenario: scenario,
-                modelID: modelId,
-                policy: .projectBuild,
-                projectDirectory: projectDir,
-                response: "",
-                usage: nil,
-                completionStatus: .cancelled,
-                startedAt: startTime,
-                finishedAt: Date(),
-                errorMessage: "Cancelled by user"
-            )
-            DatabaseManager.shared.saveExperimentRunRecord(cancelledRecord)
-        } catch {
-            let elapsed = Int(Date().timeIntervalSince(startTime) * 1000)
-            let testResult = TestRunResult(
-                scenarioId: scenario.id,
-                scenarioTitle: scenario.title,
-                category: scenario.category,
-                modelId: modelId,
-                response: "",
-                promptTokens: 0,
-                completionTokens: 0,
-                totalTokens: 0,
-                cost: 0,
-                latencyMs: elapsed,
-                success: false,
-                errorMessage: error.localizedDescription,
-                outputPath: projectDir.path
-            )
-            results.insert(testResult, at: 0)
-            DatabaseManager.shared.saveTestResult(testResult)
-
-            // W12: failed runs keep their evidence too; spend is unknown.
-            let failedRecord = ExperimentEvaluation.record(
-                scenario: scenario,
-                modelID: modelId,
-                policy: .projectBuild,
-                projectDirectory: projectDir,
-                response: "",
-                usage: nil,
-                completionStatus: .failed,
-                startedAt: startTime,
-                finishedAt: Date(),
-                errorMessage: error.localizedDescription
-            )
-            DatabaseManager.shared.saveExperimentRunRecord(failedRecord)
+            self.runningModelId = nil
+            self.runningScenarioId = nil
+            self.activityLabel = ""
+            self.isRunning = false
+            self.activeTask = nil
         }
+    }
 
-        isRunning = false
-        runningScenarioId = nil
-        activityLabel = ""
+    func cancel() {
+        guard isRunning else { return }
+        cancellationRequested = true
+        activeTask?.cancel()
+        batchNotice = "Cancelling; unstarted models skipped."
+    }
+
+    func run(scenario: TestScenario, modelId: String, models: [ModelInfo], userInput: String? = nil) async {
+        guard !isRunning else { return }
+        start(scenario: scenario, modelIDs: [modelId], models: models, userInput: userInput)
+        await activeTask?.value
+    }
+
+    private func execute(scenario: TestScenario, modelID: String, models: [ModelInfo], prompt: String) async -> TestRunResult {
+        let started = Date()
+        reportedCostForLastRun = nil
+        guard let route = models.first(where: { $0.id == modelID }).flatMap(TestModelRoute.resolve) else {
+            return failure("Model is not eligible for text-output testing.", scenario: scenario, modelID: modelID, started: started)
+        }
+        let projectBuild = route == .project && scenario.evaluationMode == .projectBuild
+        guard let key = credential(), !key.isEmpty else {
+            return failure("No API key configured. Add one in Account.", scenario: scenario, modelID: modelID, started: started)
+        }
+        var directory: URL?
+        do {
+            var response = ""
+            var usage: ChatUsage?
+            var status: ExperimentCompletionStatus = .completed
+            if projectBuild {
+                let root = outputRoot.appendingPathComponent(UUID().uuidString, isDirectory: true)
+                try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+                directory = root
+                let systemPrompt = """
+                \(scenario.systemPrompt)
+
+                Build a complete working project in \(root.path). Use write_file, verify with list_directory,
+                and build/test with run_command if applicable. Keep files in the workspace.
+                For web projects, create an index.html that opens in a browser. Summarize actual work.
+                """
+                let result = try await agentRun(prompt, modelID, key, root, systemPrompt) { [weak self] label in
+                    self?.activityLabel = label
+                    self?.activityLog.append(ActivityEntry(text: label, icon: "gearshape"))
+                }
+                response = result.response
+                usage = result.usage
+                status = result.hitToolBudget ? .exhausted : .completed
+                for name in result.toolNames {
+                    activityLog.append(ActivityEntry(text: "Used tool: \(name)", icon: toolIcon(name)))
+                }
+            } else {
+                activityLabel = "Streaming text response…"
+                let request = OpenRouterRequest(apiKey: key, model: modelID,
+                    messages: [.init(role: "system", content: scenario.systemPrompt), .init(role: "user", content: prompt)],
+                    tools: nil, toolChoice: nil, temperature: 0.3)
+                for try await event in try await client.stream(request) {
+                    try Task.checkCancellation()
+                    switch event {
+                    case .contentDelta(let choice, let text) where choice == 0: response += text
+                    case .usage(let value): usage = value
+                    case .apiError(let error): throw TestStreamFailure.message(error.message)
+                    case .finishReason(let choice, let reason) where choice == 0 && reason == "length": status = .exhausted
+                    default: break
+                    }
+                }
+            }
+            try Task.checkCancellation()
+            reportedCostForLastRun = usage?.cost
+            let evaluationMode: TestEvaluationMode = projectBuild ? .projectBuild : .textResponse
+            let policy: ToolPolicy = projectBuild ? .projectBuild : ToolPolicy(capabilities: [])
+            let record = ExperimentEvaluation.record(
+                scenario: scenario, modelID: modelID, policy: policy, projectDirectory: directory,
+                response: response, usage: usage, completionStatus: status,
+                startedAt: started, finishedAt: Date(), errorMessage: nil,
+                evaluationMode: evaluationMode)
+            saveExperiment(record)
+            let passed = record.verdict == .passed
+            let message: String? = passed ? nil : (record.verdict == .unverified
+                ? Self.unverifiedMessage
+                : status == .exhausted ? "Response truncated or tool budget exhausted."
+                : record.artifactChecks.first(where: { !$0.passed })?.detail ??
+                  record.assertions.first(where: { !$0.passed })?.detail ?? "Evaluation failed.")
+            return TestRunResult(scenarioId: scenario.id, scenarioTitle: scenario.title,
+                category: scenario.category, modelId: modelID, response: response,
+                promptTokens: usage?.promptTokens ?? 0, completionTokens: usage?.completionTokens ?? 0,
+                totalTokens: usage?.totalTokens ?? 0, cost: usage?.cost ?? 0,
+                latencyMs: Int(Date().timeIntervalSince(started) * 1000), success: passed,
+                errorMessage: message, outputPath: directory?.path)
+        } catch {
+            let cancelled = error is CancellationError || Task.isCancelled
+            let message = cancelled ? "Cancelled by user" : error.localizedDescription
+            saveExperiment(ExperimentEvaluation.record(scenario: scenario, modelID: modelID,
+                policy: projectBuild ? .projectBuild : ToolPolicy(capabilities: []),
+                projectDirectory: directory, response: "", usage: nil,
+                completionStatus: cancelled ? .cancelled : .failed, startedAt: started,
+                finishedAt: Date(), errorMessage: message,
+                evaluationMode: projectBuild ? .projectBuild : .textResponse))
+            return failure(message, scenario: scenario, modelID: modelID, started: started, outputPath: directory?.path)
+        }
+    }
+
+    private func failure(_ message: String, scenario: TestScenario, modelID: String, started: Date,
+                         outputPath: String? = nil) -> TestRunResult {
+        TestRunResult(scenarioId: scenario.id, scenarioTitle: scenario.title, category: scenario.category,
+            modelId: modelID, response: "", promptTokens: 0, completionTokens: 0,
+            totalTokens: 0, cost: 0, latencyMs: Int(Date().timeIntervalSince(started) * 1000),
+            success: false, errorMessage: message, outputPath: outputPath)
     }
 
     private func toolIcon(_ name: String) -> String {
@@ -270,15 +278,27 @@ final class TestRunner: ObservableObject {
 
     var formattedTotalCost: String {
         let total = results.reduce(0.0) { $0 + $1.cost }
-        return total < 0.01 ? String(format: "$%.4f", total) : String(format: "$%.2f", total)
+        let amount = total < 0.01 ? String(format: "$%.4f", total) : String(format: "$%.2f", total)
+        // The legacy result schema stores missing provider cost as zero. This
+        // is a lower bound, not a claim that every run was free.
+        return "≥" + amount
     }
 
     func formattedCost(_ cost: Double) -> String {
-        cost < 0.01 ? String(format: "$%.4f", cost) : String(format: "$%.2f", cost)
+        // Zero is ambiguous in persisted legacy results: truly free or absent usage.
+        guard cost != 0 else { return "—" }
+        return cost < 0.01 ? String(format: "$%.4f", cost) : String(format: "$%.2f", cost)
     }
 }
 
 // MARK: - NSWorkspace Helpers
+
+private enum TestStreamFailure: LocalizedError {
+    case message(String)
+    var errorDescription: String? {
+        switch self { case .message(let message): return message }
+    }
+}
 
 extension NSWorkspace {
     func openFolder(atPath path: String) {
