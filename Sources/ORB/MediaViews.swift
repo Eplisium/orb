@@ -164,12 +164,12 @@ struct ImagesView: View {
     private var controlsColumn: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 14) {
-                header(title: "Images", subtitle: "Text-to-image generation", icon: "photo.fill")
+                StudioHeader(title: "Images", subtitle: "Text-to-image generation", icon: "photo.fill", accent: accent)
 
             modelPicker
             if !endpoints.isEmpty {
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("PROVIDER ROUTING").font(.system(size: 9, weight: .bold)).foregroundStyle(.secondary)
+                    StudioLabel("Provider Routing")
                     Picker("Provider", selection: $selectedProviderSlug) {
                         Text("Automatic routing").tag("")
                         ForEach(pinOptions, id: \.providerSlug) { endpoint in
@@ -184,53 +184,36 @@ struct ImagesView: View {
             }
 
             VStack(alignment: .leading, spacing: 6) {
-                Text("PROMPT").font(.system(size: 9, weight: .bold)).foregroundStyle(.secondary)
-                TextEditor(text: $prompt)
-                    .accessibilityLabel("Image prompt")
-                    .font(.system(size: 12))
-                    .frame(height: 112)
-                    .overlay {
-                        RoundedRectangle(cornerRadius: 6)
-                            .stroke(Color.primary.opacity(0.10), lineWidth: 1)
-                    }
+                StudioLabel("Prompt")
+                StudioPromptEditor(text: $prompt, placeholder: "Describe the image you want…",
+                                   accessibilityLabel: "Image prompt")
             }
 
-            HStack(spacing: 12) {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("Count").font(.caption).foregroundStyle(.secondary)
-                    Stepper("Image count: \(imageCount)", value: $imageCount, in: 1...maximumCount)
-                        .fixedSize()
-                        .disabled(maximumCount == 1)
-                }
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("Aspect").font(.caption).foregroundStyle(.secondary)
-                    Picker("Aspect", selection: $aspectRatio) {
-                        ForEach(options("aspect_ratio"), id: \.self) { Text($0).tag($0) }
+            StudioCard(title: "Options") {
+                StudioGrid {
+                    StudioField("Count") {
+                        Stepper("\(imageCount)", value: $imageCount, in: 1...maximumCount)
+                            .disabled(maximumCount == 1)
                     }
-                    .labelsHidden().fixedSize()
-                }
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("Quality").font(.caption).foregroundStyle(.secondary)
-                    Picker("Quality", selection: $quality) {
-                        ForEach(options("quality"), id: \.self) { Text($0).tag($0) }
+                    StudioField("Aspect") {
+                        Picker("Aspect", selection: $aspectRatio) {
+                            ForEach(options("aspect_ratio"), id: \.self) { Text($0).tag($0) }
+                        }.labelsHidden()
                     }
-                    .labelsHidden().fixedSize()
-                }
-            }
-
-            HStack(spacing: 12) {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("Resolution").font(.caption).foregroundStyle(.secondary)
-                    Picker("Resolution", selection: $resolution) {
-                        ForEach(options("resolution"), id: \.self) { Text($0).tag($0) }
+                    StudioField("Quality") {
+                        Picker("Quality", selection: $quality) {
+                            ForEach(options("quality"), id: \.self) { Text($0).tag($0) }
+                        }.labelsHidden()
                     }
-                    .labelsHidden().fixedSize()
+                    StudioField("Resolution") {
+                        Picker("Resolution", selection: $resolution) {
+                            ForEach(options("resolution"), id: \.self) { Text($0).tag($0) }
+                        }.labelsHidden()
+                    }
                 }
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("Seed (optional)").font(.caption).foregroundStyle(.secondary)
+                StudioField("Seed (optional)") {
                     TextField("random", text: $seedText)
                         .textFieldStyle(.roundedBorder)
-                        .frame(width: 110)
                         .disabled(!supports("seed"))
                 }
             }
@@ -265,21 +248,9 @@ struct ImagesView: View {
 
             Spacer()
 
-            Button(action: generate) {
-                HStack {
-                    if service.isGenerating { ProgressView().controlSize(.small).tint(.white) }
-                    Text(service.isGenerating ? "Generating…" : "Generate")
-                        .fontWeight(.semibold)
-                }
-                .frame(maxWidth: .infinity)
-                .padding(.vertical, 9)
-                .background(canGenerate ? accent : Color.gray.opacity(0.45))
-                .foregroundStyle(.white)
-                .clipShape(RoundedRectangle(cornerRadius: 9))
-            }
-            .buttonStyle(.plain)
-            .disabled(!canGenerate)
-            .keyboardShortcut(.return, modifiers: .command)
+            StudioPrimaryButton(title: "Generate", busyTitle: "Generating…", isBusy: service.isGenerating,
+                                isEnabled: canGenerate, accent: accent, action: generate)
+                .keyboardShortcut(.return, modifiers: .command)
 
             if totalCost > 0 {
                 Text("Reported spend (known charges): $\(totalCost, specifier: "%.4f")")
@@ -295,7 +266,7 @@ struct ImagesView: View {
 
     private var modelPicker: some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text("MODEL").font(.system(size: 9, weight: .bold)).foregroundStyle(.secondary)
+            StudioLabel("Model")
             if service.isLoadingModels {
                 ProgressView().controlSize(.small)
             } else if service.models.isEmpty {
@@ -322,16 +293,12 @@ struct ImagesView: View {
 
     private var referenceRow: some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text("REFERENCE IMAGES (OPTIONAL)").font(.system(size: 9, weight: .bold)).foregroundStyle(.secondary)
+            StudioLabel("Reference Images (optional)")
             HStack(spacing: 6) {
                 Button(action: chooseReferences) {
                     Label("Add", systemImage: "plus")
-                        .font(.caption)
-                        .padding(.horizontal, 9).padding(.vertical, 5)
-                        .background(Color.primary.opacity(0.05))
-                        .clipShape(Capsule())
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(StudioChipButtonStyle())
                 .disabled(service.models.first(where: { $0.id == selectedModelId })?.architecture?.takesReferenceImages != true || capabilities.referenceLimit == 0)
                 Text(referenceURLs.isEmpty ? "Guide image-to-image runs" : "\(referenceURLs.count) selected")
                     .font(.caption).foregroundStyle(.secondary)
@@ -383,19 +350,9 @@ struct ImagesView: View {
     }
 
     private var emptyGallery: some View {
-        VStack(spacing: 14) {
-            ZStack {
-                Circle().fill(accent.opacity(0.10)).frame(width: 96, height: 96)
-                Image(systemName: "photo.on.rectangle.angled")
-                    .font(.system(size: 32)).foregroundStyle(accent)
-            }
-            Text("Your image gallery")
-                .font(.system(size: 24, weight: .semibold, design: .rounded))
-            Text("Pick a model and describe your image. ORB saves generated images here for later; failed saves can be retried or exported.")
-                .font(.system(size: 13)).foregroundStyle(.secondary)
-                .multilineTextAlignment(.center).frame(maxWidth: 460)
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        StudioEmptyState(icon: "photo.on.rectangle.angled", title: "Your image gallery",
+                         message: "Pick a model and describe your image. ORB saves generated images here for later; failed saves can be retried or exported.",
+                         accent: accent)
     }
 
     private func galleryCard(_ result: GeneratedImage) -> some View {
@@ -416,8 +373,8 @@ struct ImagesView: View {
             }.font(.caption)
         }
         .padding(12)
-        .background(Color.primary.opacity(0.03))
-        .clipShape(RoundedRectangle(cornerRadius: 12))
+        .background(Color.primary.opacity(0.035), in: RoundedRectangle(cornerRadius: 14))
+        .overlay { RoundedRectangle(cornerRadius: 14).stroke(Color.primary.opacity(0.07), lineWidth: 0.5) }
     }
 
     private func header(title: String, subtitle: String, icon: String) -> some View {
@@ -639,10 +596,10 @@ struct VideoView: View {
     private var controlsColumn: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 14) {
-                header(title: "Video", subtitle: "Text-to-video generation", icon: "video.fill")
+                StudioHeader(title: "Video", subtitle: "Text-to-video generation", icon: "video.fill", accent: accent)
 
             VStack(alignment: .leading, spacing: 6) {
-                Text("MODEL").font(.system(size: 9, weight: .bold)).foregroundStyle(.secondary)
+                StudioLabel("Model")
                 if service.isLoadingModels {
                     ProgressView().controlSize(.small)
                 } else if service.models.isEmpty {
@@ -664,69 +621,58 @@ struct VideoView: View {
             }
 
             VStack(alignment: .leading, spacing: 6) {
-                Text("PROMPT").font(.system(size: 9, weight: .bold)).foregroundStyle(.secondary)
-                TextEditor(text: $prompt)
-                    .font(.system(size: 12))
-                    .frame(height: 112)
-                    .accessibilityLabel("Video prompt")
-                    .overlay {
-                        RoundedRectangle(cornerRadius: 6)
-                            .stroke(Color.primary.opacity(0.10), lineWidth: 1)
-                    }
+                StudioLabel("Prompt")
+                StudioPromptEditor(text: $prompt, placeholder: "Describe the video you want…",
+                                   accessibilityLabel: "Video prompt")
             }
 
-            HStack(spacing: 12) {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("Aspect").font(.caption).foregroundStyle(.secondary)
-                    Picker("Aspect", selection: $aspectRatio) {
-                        Text("auto").tag("auto")
-                        ForEach(supportedAspects(), id: \.self) { Text($0).tag($0) }
+            StudioCard(title: "Options") {
+                StudioGrid {
+                    StudioField("Aspect") {
+                        Picker("Aspect", selection: $aspectRatio) {
+                            Text("auto").tag("auto")
+                            ForEach(supportedAspects(), id: \.self) { Text($0).tag($0) }
+                        }.labelsHidden()
                     }
-                    .fixedSize()
-                }
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("Resolution").font(.caption).foregroundStyle(.secondary)
-                    Picker("Resolution", selection: $resolution) {
-                        Text("auto").tag("auto")
-                        ForEach(supportedResolutions(), id: \.self) { Text($0).tag($0) }
+                    StudioField("Resolution") {
+                        Picker("Resolution", selection: $resolution) {
+                            Text("auto").tag("auto")
+                            ForEach(supportedResolutions(), id: \.self) { Text($0).tag($0) }
+                        }.labelsHidden()
                     }
-                    .fixedSize()
-                }
-            }
-
-            HStack(spacing: 12) {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("Duration (s, optional)").font(.caption).foregroundStyle(.secondary)
-                    if let durations = selectedVideoModel?.supportedDurations, !durations.isEmpty {
-                        Picker("Duration", selection: $durationText) {
-                            Text("Model default").tag("")
-                            ForEach(durations, id: \.self) { Text("\($0) s").tag(String($0)) }
-                        }.fixedSize()
-                    } else {
-                        Text("Model default").font(.caption).foregroundStyle(.secondary)
+                    StudioField("Duration") {
+                        if let durations = selectedVideoModel?.supportedDurations, !durations.isEmpty {
+                            Picker("Duration", selection: $durationText) {
+                                Text("Model default").tag("")
+                                ForEach(durations, id: \.self) { Text("\($0) s").tag(String($0)) }
+                            }.labelsHidden()
+                        } else {
+                            Text("Model default").font(.system(size: 12)).foregroundStyle(.secondary)
+                        }
+                    }
+                    StudioField("Size") {
+                        Picker("Size", selection: $size) {
+                            Text("auto").tag("auto")
+                            ForEach(selectedVideoModel?.supportedSizes ?? [], id: \.self) { Text($0).tag($0) }
+                        }.labelsHidden().disabled(selectedVideoModel?.supportedSizes?.isEmpty != false)
                     }
                 }
-                Toggle("Audio", isOn: $generateAudio)
-                    .disabled(selectedVideoModel?.generateAudio != true)
-                    .help("Audio may change the per-job price. When off, send generate_audio: false explicitly.")
-            }
-            HStack(spacing: 12) {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("Size").font(.caption).foregroundStyle(.secondary)
-                    Picker("Size", selection: $size) {
-                        Text("auto").tag("auto")
-                        ForEach(selectedVideoModel?.supportedSizes ?? [], id: \.self) { Text($0).tag($0) }
-                    }.fixedSize().disabled(selectedVideoModel?.supportedSizes?.isEmpty != false)
+                StudioGrid {
+                    StudioField("Seed (optional)") {
+                        TextField("random", text: $seedText)
+                            .textFieldStyle(.roundedBorder)
+                            .disabled(selectedVideoModel?.seed != true)
+                    }
+                    StudioField("Audio") {
+                        Toggle("Generate audio", isOn: $generateAudio)
+                            .toggleStyle(.switch).controlSize(.small)
+                            .disabled(selectedVideoModel?.generateAudio != true)
+                            .help("Audio may change the per-job price. When off, send generate_audio: false explicitly.")
+                    }
                 }
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("Seed (optional)").font(.caption).foregroundStyle(.secondary)
-                    TextField("random", text: $seedText)
-                        .textFieldStyle(.roundedBorder).frame(width: 105)
-                        .disabled(selectedVideoModel?.seed != true)
+                if size != "auto" {
+                    StudioNotice(text: "Exact size overrides aspect and resolution.")
                 }
-            }
-            if size != "auto" {
-                Text("Exact size overrides aspect and resolution.").font(.caption2).foregroundStyle(.secondary)
             }
             HStack(spacing: 10) {
                 frameSelector("First frame", kind: "first_frame", selection: $firstFrameURL)
@@ -756,21 +702,9 @@ struct VideoView: View {
                 }
             }
 
-            Button(action: submit) {
-                HStack {
-                    if isSubmitting { ProgressView().controlSize(.small).tint(.white) }
-                    Text(isSubmitting ? "Generating…" : "Generate Video")
-                        .fontWeight(.semibold)
-                }
-                .frame(maxWidth: .infinity)
-                .padding(.vertical, 9)
-                .background(canSubmit ? accent : Color.gray.opacity(0.45))
-                .foregroundStyle(.white)
-                .clipShape(RoundedRectangle(cornerRadius: 9))
-            }
-            .buttonStyle(.plain)
-            .disabled(!canSubmit)
-            .keyboardShortcut(.return, modifiers: .command)
+            StudioPrimaryButton(title: "Generate Video", busyTitle: "Generating…", isBusy: isSubmitting,
+                                isEnabled: canSubmit, accent: accent, action: submit)
+                .keyboardShortcut(.return, modifiers: .command)
 
             Text("Video bills per job — check the model's price before submitting.")
                 .font(.caption2).foregroundStyle(.secondary)

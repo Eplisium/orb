@@ -404,9 +404,10 @@ struct ContentView: View {
             vm.showFavoritesOnly = effects.showFavoritesOnly
             vm.showNewThisWeek = effects.showNewThisWeek
         } label: {
-            HStack(spacing: 6) {
+            HStack(spacing: 8) {
                 Image(systemName: section.icon)
-                    .font(.system(size: 12))
+                    .font(.system(size: 12, weight: .medium))
+                    .frame(width: 16)
                 Text(section.rawValue)
                 Spacer()
                 if count > 0 {
@@ -416,12 +417,18 @@ struct ContentView: View {
                 }
             }
             .contentShape(Rectangle())
-            .padding(.vertical, 3)
+            .padding(.vertical, 4)
+            .padding(.horizontal, 6)
         }
         .buttonStyle(.plain)
-        .foregroundStyle(isSelected ? ORBTheme.accent : Color.primary)
+        .foregroundStyle(isSelected ? Color.white : Color.primary)
         .font(isSelected ? .body.weight(.semibold) : .body)
-        .listRowBackground(isSelected ? ORBTheme.accent.opacity(0.12) : Color.clear)
+        .listRowBackground(
+            RoundedRectangle(cornerRadius: 8)
+                .fill(isSelected ? ORBTheme.accent : Color.clear)
+                .padding(.horizontal, 6)
+        )
+        .listRowSeparator(.hidden)
         .tag(section)
     }
 

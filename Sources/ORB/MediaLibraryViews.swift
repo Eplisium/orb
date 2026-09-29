@@ -48,23 +48,35 @@ struct ModalityModelField: View {
     let title: String
     @Binding var modelID: String
     let choices: ModalityModelChoices
+    @State private var showsManual = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 5) {
-            Text(title).font(.system(size: 9, weight: .bold)).foregroundStyle(.secondary)
+        VStack(alignment: .leading, spacing: 6) {
+            StudioLabel(title)
             if !choices.models.isEmpty {
                 Picker("Discovered models", selection: $modelID) {
                     if !choices.models.contains(where: { $0.id == modelID }) {
                         Text("Custom: \(modelID.isEmpty ? "enter below" : modelID)").tag(modelID)
                     }
                     ForEach(choices.models) { model in
-                        Text("\(model.name) (\(model.id))").tag(model.id)
+                        Text(model.name).tag(model.id)
                     }
                 }
+                .labelsHidden()
             }
-            TextField("Model ID (manual fallback)", text: $modelID)
-                .textFieldStyle(.roundedBorder)
-                .font(.system(size: 12, design: .monospaced))
+            if showsManual || choices.models.isEmpty {
+                TextField("Model ID (manual fallback)", text: $modelID)
+                    .textFieldStyle(.roundedBorder)
+                    .font(.system(size: 12, design: .monospaced))
+            } else {
+                HStack(spacing: 6) {
+                    Text(modelID).font(.system(size: 10, design: .monospaced))
+                        .foregroundStyle(.tertiary).lineLimit(1).truncationMode(.middle)
+                    Spacer(minLength: 0)
+                    Button("Enter ID manually") { showsManual = true }
+                        .buttonStyle(.plain).font(.system(size: 10)).foregroundStyle(.secondary)
+                }
+            }
             if let status = choices.status {
                 Text(status).font(.caption2).foregroundStyle(choices.error == nil ? Color.secondary : Color.orange)
             }
@@ -133,21 +145,14 @@ struct FilesView: View {
 
     private var headerBar: some View {
         HStack(spacing: 12) {
-            ZStack {
-                Circle().fill(accent.opacity(0.13)).frame(width: 34, height: 34)
-                Image(systemName: "folder.fill").foregroundStyle(accent)
-            }
-            VStack(alignment: .leading, spacing: 1) {
-                Text("Files").font(.system(size: 15, weight: .semibold))
-                Text("Remote uploads (load more available) · creations stay on this Mac")
-                    .font(.system(size: 10)).foregroundStyle(.secondary)
-            }
-            Spacer()
+            StudioHeader(title: "Files", subtitle: "Remote uploads · creations stay on this Mac",
+                         icon: "folder.fill", accent: accent)
             Picker("Library", selection: $showingCreations) {
                 Text("Uploaded files").tag(false)
                 Text("Saved creations").tag(true)
             }
             .pickerStyle(.segmented)
+            .labelsHidden()
             .fixedSize()
             if !showingCreations && isFetchingPage {
                 ProgressView().controlSize(.small)
@@ -161,12 +166,8 @@ struct FilesView: View {
             if !showingCreations {
                 Button(action: upload) {
                     Label(isUploading ? "Uploading…" : "Upload", systemImage: "square.and.arrow.up")
-                        .font(.system(size: 11, weight: .semibold))
-                        .padding(.horizontal, 10).padding(.vertical, 6)
-                        .background(accent.opacity(0.12))
-                        .clipShape(Capsule())
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(StudioChipButtonStyle())
                 .disabled(isUploading || !KeychainManager.hasAPIKey)
             }
         }
@@ -176,14 +177,10 @@ struct FilesView: View {
     }
 
     private var emptyState: some View {
-        VStack(spacing: 12) {
-            Image(systemName: "tray")
-                .font(.system(size: 36)).foregroundStyle(.tertiary)
-            Text("No remote uploads yet")
-                .font(.headline).foregroundStyle(.secondary)
-            Text("Upload files (max 100 MiB) to reference them in chat. Uploaded files cannot be downloaded through the OpenRouter Files API; keep your original. Generated media is in Saved creations.")
-                .font(.caption).foregroundStyle(.tertiary)
-                .multilineTextAlignment(.center).frame(maxWidth: 420)
+        VStack(spacing: 14) {
+            StudioEmptyState(icon: "tray", title: "No remote uploads yet",
+                             message: "Upload files (max 100 MiB) to reference them in chat. Uploaded files cannot be downloaded through the OpenRouter Files API; keep your original. Generated media is in Saved creations.",
+                             accent: accent)
             if let errorMessage {
                 PlaygroundErrorBanner(message: errorMessage) { self.errorMessage = nil }
                     .frame(maxWidth: 520)
@@ -192,6 +189,7 @@ struct FilesView: View {
             }
             if hasMore {
                 Button(isFetchingPage ? "Loading…" : "Load more") { Task { await loadMore() } }
+                    .buttonStyle(StudioChipButtonStyle())
                     .disabled(isFetchingPage)
             }
         }
@@ -255,9 +253,9 @@ struct FilesView: View {
             .buttonStyle(.plain)
             .help("Delete file")
         }
-        .padding(10)
-        .background(Color.primary.opacity(0.03))
-        .clipShape(RoundedRectangle(cornerRadius: 9))
+        .padding(12)
+        .background(Color.primary.opacity(0.035), in: RoundedRectangle(cornerRadius: 11))
+        .overlay { RoundedRectangle(cornerRadius: 11).stroke(Color.primary.opacity(0.07), lineWidth: 0.5) }
     }
 
     private func iconName(for file: WorkspaceFile) -> String {
@@ -555,16 +553,8 @@ struct SpeechView: View {
 
     private var headerBar: some View {
         HStack(spacing: 12) {
-            ZStack {
-                Circle().fill(accent.opacity(0.13)).frame(width: 34, height: 34)
-                Image(systemName: "speaker.wave.2.fill").foregroundStyle(accent)
-            }
-            VStack(alignment: .leading, spacing: 1) {
-                Text("Speech").font(.system(size: 15, weight: .semibold))
-                Text("Synthesize voices · transcribe audio")
-                    .font(.system(size: 10)).foregroundStyle(.secondary)
-            }
-            Spacer()
+            StudioHeader(title: "Speech", subtitle: "Synthesize voices · transcribe audio",
+                         icon: "speaker.wave.2.fill", accent: accent)
             Picker("Mode", selection: $mode) {
                 ForEach(Mode.allCases, id: \.self) { Text($0.rawValue).tag($0) }
             }
@@ -584,55 +574,43 @@ struct SpeechView: View {
             VStack(alignment: .leading, spacing: 14) {
                 modelField(choices: speechModels)
                 VStack(alignment: .leading, spacing: 6) {
-                    Text("TEXT").font(.system(size: 9, weight: .bold)).foregroundStyle(.secondary)
-                    TextEditor(text: $text)
-                        .font(.system(size: 12))
-                        .frame(minHeight: 120)
-                        .overlay {
-                            RoundedRectangle(cornerRadius: 6)
-                                .stroke(Color.primary.opacity(0.10), lineWidth: 1)
+                    StudioLabel("Text")
+                    StudioPromptEditor(text: $text, placeholder: "Type what you want spoken…",
+                                       accessibilityLabel: "Speech text", height: 150)
+                }
+                StudioCard(title: "Voice") {
+                    StudioGrid {
+                        StudioField("Format") {
+                            Picker("Format", selection: $audioFormat) {
+                                Text("MP3").tag("mp3")
+                                Text("PCM (raw)").tag("pcm")
+                            }.labelsHidden()
                         }
-                }
-                HStack(spacing: 12) {
-                    Picker("Format", selection: $audioFormat) {
-                        Text("MP3").tag("mp3")
-                        Text("PCM (raw)").tag("pcm")
-                    }.fixedSize()
-                }
-                if let model = selectedSpeechModel, let voices = model.supportedVoices, !voices.isEmpty {
-                    Picker("Voice", selection: $voice) {
-                        Text("Provider default").tag("")
-                        ForEach(voices, id: \.self) { Text($0).tag($0) }
-                    }.fixedSize()
-                } else if CatalogCapability.voice(for: selectedSpeechModel) == .unknown {
-                    Text("Voice support is unknown for this model; using provider default.")
-                        .font(.caption2).foregroundStyle(.secondary)
-                }
-                if selectedSpeechModel?.id.hasPrefix("openai/") == true {
-                    HStack(spacing: 12) {
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text("Speed: \(speed, specifier: "%.2f")").font(.caption).foregroundStyle(.secondary)
-                        Slider(value: $speed, in: 0.25...4.0, step: 0.05).frame(width: 160)
+                        if let model = selectedSpeechModel, let voices = model.supportedVoices, !voices.isEmpty {
+                            StudioField("Voice") {
+                                Picker("Voice", selection: $voice) {
+                                    Text("Provider default").tag("")
+                                    ForEach(voices, id: \.self) { Text($0).tag($0) }
+                                }.labelsHidden()
+                            }
+                        }
                     }
+                    if selectedSpeechModel?.supportedVoices?.isEmpty != false,
+                       CatalogCapability.voice(for: selectedSpeechModel) == .unknown {
+                        StudioNotice(text: "Voice support is unknown for this model; using provider default.")
+                    }
+                    if selectedSpeechModel?.id.hasPrefix("openai/") == true {
+                        StudioField("Speed \(String(format: "%.2f", speed))×") {
+                            Slider(value: $speed, in: 0.25...4.0, step: 0.05)
+                        }
                     }
                 }
                 if let errorMessage {
                     PlaygroundErrorBanner(message: errorMessage) { self.errorMessage = nil }
                 }
-                Button(action: synthesize) {
-                    HStack {
-                        if service.isWorking || isSaving { ProgressView().controlSize(.small).tint(.white) }
-                        Text(service.isWorking ? "Synthesizing…" : isSaving ? "Saving…" : "Synthesize")
-                            .fontWeight(.semibold)
-                    }
-                    .frame(maxWidth: 320)
-                    .padding(.vertical, 9)
-                    .background(canSynthesize ? accent : Color.gray.opacity(0.45))
-                    .foregroundStyle(.white)
-                    .clipShape(RoundedRectangle(cornerRadius: 9))
-                }
-                .buttonStyle(.plain)
-                .disabled(!canSynthesize)
+                StudioPrimaryButton(title: "Synthesize", busyTitle: service.isWorking ? "Synthesizing…" : "Saving…",
+                                    isBusy: service.isWorking || isSaving,
+                                    isEnabled: canSynthesize, accent: accent, action: synthesize)
                 if let lastAudio {
                     HStack {
                         Label("Saved in app", systemImage: "checkmark.circle.fill")
@@ -713,28 +691,33 @@ struct SpeechView: View {
             VStack(alignment: .leading, spacing: 14) {
                 modelField(choices: transcriptionModels)
                 Text("Files above 25 MB use base64 JSON upload; smaller files use multipart.").font(.caption2).foregroundStyle(.secondary)
-                TextField("Language (ISO-639-1, optional; auto-detect if blank)", text: $language)
-                    .textFieldStyle(.roundedBorder)
-                Picker("Response", selection: $transcriptionFormat) {
-                    Text("Text JSON").tag("json")
-                    Text("Verbose JSON (OpenAI-compatible providers)").tag("verbose_json")
-                }.fixedSize()
-                if transcriptionFormat == "verbose_json" {
-                    Picker("Timestamps", selection: $timestampMode) {
-                        Text("Provider default").tag("none")
-                        Text("Segments").tag("segment")
-                        Text("Words and segments").tag("word")
-                    }.fixedSize()
+                StudioCard(title: "Options") {
+                    StudioField("Language (ISO-639-1, optional)") {
+                        TextField("auto-detect", text: $language).textFieldStyle(.roundedBorder)
+                    }
+                    StudioGrid {
+                        StudioField("Response") {
+                            Picker("Response", selection: $transcriptionFormat) {
+                                Text("Text JSON").tag("json")
+                                Text("Verbose JSON").tag("verbose_json")
+                            }.labelsHidden()
+                        }
+                        if transcriptionFormat == "verbose_json" {
+                            StudioField("Timestamps") {
+                                Picker("Timestamps", selection: $timestampMode) {
+                                    Text("Provider default").tag("none")
+                                    Text("Segments").tag("segment")
+                                    Text("Words and segments").tag("word")
+                                }.labelsHidden()
+                            }
+                        }
+                    }
                 }
                 HStack(spacing: 10) {
                     Button(action: chooseAudio) {
                         Label(selectedAudioURL?.lastPathComponent ?? "Choose Audio…", systemImage: "waveform")
-                            .font(.caption)
-                            .padding(.horizontal, 10).padding(.vertical, 6)
-                            .background(Color.primary.opacity(0.05))
-                            .clipShape(Capsule())
                     }
-                    .buttonStyle(.plain)
+                    .buttonStyle(StudioChipButtonStyle())
                     if selectedAudioURL != nil {
                         Button("Clear") { selectedAudioURL = nil }
                             .font(.caption).buttonStyle(.plain).foregroundStyle(.secondary)
@@ -743,23 +726,12 @@ struct SpeechView: View {
                 if let errorMessage {
                     PlaygroundErrorBanner(message: errorMessage) { self.errorMessage = nil }
                 }
-                Button(action: transcribe) {
-                    HStack {
-                        if service.isWorking || isSaving { ProgressView().controlSize(.small).tint(.white) }
-                        Text(service.isWorking ? "Transcribing…" : isSaving ? "Saving…" : "Transcribe")
-                            .fontWeight(.semibold)
-                    }
-                    .frame(maxWidth: 320)
-                    .padding(.vertical, 9)
-                    .background(canTranscribe ? accent : Color.gray.opacity(0.45))
-                    .foregroundStyle(.white)
-                    .clipShape(RoundedRectangle(cornerRadius: 9))
-                }
-                .buttonStyle(.plain)
-                .disabled(!canTranscribe)
+                StudioPrimaryButton(title: "Transcribe", busyTitle: service.isWorking ? "Transcribing…" : "Saving…",
+                                    isBusy: service.isWorking || isSaving,
+                                    isEnabled: canTranscribe, accent: accent, action: transcribe)
                 if !transcript.isEmpty {
                     VStack(alignment: .leading, spacing: 6) {
-                        Text("TRANSCRIPT").font(.system(size: 9, weight: .bold)).foregroundStyle(.secondary)
+                        StudioLabel("Transcript")
                         Text(transcript)
                             .font(.system(size: 12))
                             .textSelection(.enabled)
@@ -987,7 +959,6 @@ struct EmbeddingsView: View {
             VStack(alignment: .leading, spacing: 22) {
                 headerBar
                 embedSection
-                Divider()
                 rerankSection
                 if let errorMessage {
                     PlaygroundErrorBanner(message: errorMessage) { self.errorMessage = nil }
@@ -1008,52 +979,34 @@ struct EmbeddingsView: View {
     }
 
     private var headerBar: some View {
-        HStack(spacing: 10) {
-            ZStack {
-                Circle().fill(accent.opacity(0.13)).frame(width: 34, height: 34)
-                Image(systemName: "chart.dots.scatter").foregroundStyle(accent)
-            }
-            VStack(alignment: .leading, spacing: 1) {
-                Text("Embeddings & Rerank").font(.system(size: 15, weight: .semibold))
-                Text("Vectors for search · ordering for retrieval")
-                    .font(.system(size: 10)).foregroundStyle(.secondary)
-            }
-        }
+        StudioHeader(title: "Embeddings & Rerank", subtitle: "Vectors for search · ordering for retrieval",
+                     icon: "chart.dots.scatter", accent: accent)
     }
 
     private var embedSection: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text("EMBEDDINGS").font(.system(size: 9, weight: .bold)).foregroundStyle(.secondary)
+        StudioCard(title: "Embeddings") {
             ModalityModelField(title: "MODEL", modelID: $modelId, choices: embeddingModels)
-            Text("Inputs to embed (one per line)").font(.caption).foregroundStyle(.secondary)
-            TextEditor(text: $inputText)
-                .font(.system(size: 12))
-                .frame(minHeight: 70)
-                .overlay {
-                    RoundedRectangle(cornerRadius: 6).stroke(Color.primary.opacity(0.10), lineWidth: 1)
+            StudioField("Inputs to embed (one per line)") {
+                StudioPromptEditor(text: $inputText, placeholder: "One input per line…",
+                                   accessibilityLabel: "Embedding inputs", height: 90)
+            }
+            StudioGrid {
+                StudioField("Dimensions (optional)") {
+                    TextField("e.g. 1024", text: $requestedDimensions).textFieldStyle(.roundedBorder)
                 }
-            HStack {
-                TextField("Dimensions (optional positive integer)", text: $requestedDimensions).textFieldStyle(.roundedBorder)
-                Picker("Input type", selection: $inputType) {
-                    Text("Provider default").tag("")
-                    Text("Query").tag("query")
-                    Text("Document").tag("document")
-                }.fixedSize()
+                StudioField("Input type") {
+                    Picker("Input type", selection: $inputType) {
+                        Text("Provider default").tag("")
+                        Text("Query").tag("query")
+                        Text("Document").tag("document")
+                    }.labelsHidden()
+                }
             }
             Text("Float vectors requested. Dimensions and input type depend on provider support.")
                 .font(.caption2).foregroundStyle(.secondary)
-            HStack(spacing: 10) {
-                Button(action: embed) {
-                    Text(service.isWorking ? "Embedding…" : isSaving ? "Saving…" : "Embed")
-                        .fontWeight(.semibold)
-                        .padding(.horizontal, 16).padding(.vertical, 7)
-                        .background(canEmbed ? accent : Color.gray.opacity(0.45))
-                        .foregroundStyle(.white)
-                        .clipShape(RoundedRectangle(cornerRadius: 8))
-                }
-                .buttonStyle(.plain)
-                .disabled(!canEmbed)
-            }
+            StudioPrimaryButton(title: "Embed", busyTitle: service.isWorking ? "Embedding…" : "Saving…",
+                                isBusy: service.isWorking || isSaving,
+                                isEnabled: canEmbed, accent: accent, action: embed)
             if let usage = embedUsage {
                 Text("Usage: \(usage.promptTokens.map { "\($0) input tokens" } ?? "input tokens unavailable") · \(usage.totalTokens.map { "\($0) total tokens" } ?? "total tokens unavailable") · \(usage.cost.map { String(format: "$%.5f", $0) } ?? "cost unavailable")")
                     .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
@@ -1076,29 +1029,20 @@ struct EmbeddingsView: View {
     }
 
     private var rerankSection: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text("RERANK").font(.system(size: 9, weight: .bold)).foregroundStyle(.secondary)
+        StudioCard(title: "Rerank") {
             ModalityModelField(title: "MODEL", modelID: $rerankModelId, choices: rerankModels)
             TextField("Query", text: $rerankQuery)
                 .textFieldStyle(.roundedBorder)
-            Text("Documents (one per line)").font(.caption).foregroundStyle(.secondary)
-            TextEditor(text: $rerankDocs)
-                .font(.system(size: 12))
-                .frame(minHeight: 90)
-                .overlay {
-                    RoundedRectangle(cornerRadius: 6).stroke(Color.primary.opacity(0.10), lineWidth: 1)
-                }
-            TextField("Top N (optional positive integer)", text: $topN).textFieldStyle(.roundedBorder)
-            Button(action: rerank) {
-                Text(service.isWorking ? "Ranking…" : isSaving ? "Saving…" : "Rerank")
-                    .fontWeight(.semibold)
-                    .padding(.horizontal, 16).padding(.vertical, 7)
-                    .background(canRerank ? accent : Color.gray.opacity(0.45))
-                    .foregroundStyle(.white)
-                    .clipShape(RoundedRectangle(cornerRadius: 8))
+            StudioField("Documents (one per line)") {
+                StudioPromptEditor(text: $rerankDocs, placeholder: "One document per line…",
+                                   accessibilityLabel: "Rerank documents", height: 110)
             }
-            .buttonStyle(.plain)
-            .disabled(!canRerank)
+            StudioField("Top N (optional)") {
+                TextField("e.g. 3", text: $topN).textFieldStyle(.roundedBorder)
+            }
+            StudioPrimaryButton(title: "Rerank", busyTitle: service.isWorking ? "Ranking…" : "Saving…",
+                                isBusy: service.isWorking || isSaving,
+                                isEnabled: canRerank, accent: accent, action: rerank)
             if let rerankUsage {
                 Text("Usage: \(rerankUsage.searchUnits.map { "\($0) search units" } ?? "search units unavailable") · \(rerankUsage.totalTokens.map { "\($0) tokens" } ?? "tokens unavailable") · \(rerankUsage.cost.map { String(format: "$%.5f", $0) } ?? "cost unavailable")")
                     .font(.caption).foregroundStyle(.secondary)
