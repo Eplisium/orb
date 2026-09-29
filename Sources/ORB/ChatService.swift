@@ -154,6 +154,33 @@ final class ChatService: ObservableObject {
         }
     }
 
+    /// Deletes several conversations at once. Stops any running one first.
+    /// Returns the number actually removed; failures are reported via `lastError`.
+    @discardableResult
+    func deleteConversations(ids: Set<UUID>) -> Int {
+        guard !ids.isEmpty else { return 0 }
+        let targets = conversations.filter { ids.contains($0.id) }
+        if targets.contains(where: { isRunning(conversationID: $0.id) }) { stopStreaming() }
+        var removed = Set<UUID>()
+        var failure: String?
+        for conversation in targets {
+            do {
+                try store.removeConversation(conversation.id)
+                removed.insert(conversation.id)
+            } catch {
+                failure = "Could not delete some conversations: \(error.localizedDescription)"
+            }
+        }
+        let activeMode = activeConversation?.mode
+        conversations.removeAll { removed.contains($0.id) }
+        for id in removed { agentHistories[id] = nil }
+        if let active = activeConversation, removed.contains(active.id) {
+            activeConversation = conversations.first(where: { $0.mode == activeMode })
+        }
+        if let failure { lastError = failure }
+        return removed.count
+    }
+
     func clearConversations() {
         if runState.isActive { stopStreaming() }
         let ids = conversations.map(\.id)

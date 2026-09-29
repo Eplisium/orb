@@ -15,6 +15,9 @@ struct ConversationSidebarHeader: View {
     let newLabel: String
     let newIcon: String
     let disabled: Bool
+    var isSelecting: Bool = false
+    var canSelect: Bool = false
+    var onToggleSelecting: (() -> Void)?
 
     var body: some View {
         HStack(spacing: 10) {
@@ -41,6 +44,16 @@ struct ConversationSidebarHeader: View {
                     .foregroundStyle(.secondary)
             }
             Spacer()
+            if let onToggleSelecting {
+                Button(isSelecting ? "Done" : "Select") {
+                    onToggleSelecting()
+                }
+                .buttonStyle(.plain)
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(isSelecting ? accent : .secondary)
+                .disabled(!canSelect && !isSelecting)
+                .help(isSelecting ? "Exit selection mode" : "Select multiple sessions")
+            }
             Menu {
                 Button {
                     onNew()
@@ -70,14 +83,22 @@ struct ConversationRow: View {
     let onSelect: () -> Void
     let onDelete: () -> Void
     var onExport: (() -> Void)?
+    var isSelecting: Bool = false
+    var isChecked: Bool = false
+    var onToggleCheck: (() -> Void)?
     @State private var showDeleteConfirmation = false
 
     var body: some View {
         Button {
-            onSelect()
+            if isSelecting { onToggleCheck?() } else { onSelect() }
         } label: {
             VStack(alignment: .leading, spacing: 6) {
                 HStack(spacing: 6) {
+                    if isSelecting {
+                        Image(systemName: isChecked ? "checkmark.circle.fill" : "circle")
+                            .font(.system(size: 12))
+                            .foregroundStyle(isChecked ? accent : .secondary)
+                    }
                     Image(systemName: icon)
                         .font(.system(size: 10, weight: .semibold))
                         .foregroundStyle(isSelected ? accent : .secondary)
@@ -106,10 +127,10 @@ struct ConversationRow: View {
             .padding(.vertical, 9)
             .frame(maxWidth: .infinity, alignment: .leading)
             .contentShape(Rectangle())
-            .background(isSelected ? accent.opacity(0.14) : Color.primary.opacity(0.025))
+            .background((isSelecting ? isChecked : isSelected) ? accent.opacity(0.14) : Color.primary.opacity(0.025))
             .overlay {
                 RoundedRectangle(cornerRadius: 9)
-                    .stroke(isSelected ? accent.opacity(0.34) : Color.primary.opacity(0.04), lineWidth: 1)
+                    .stroke((isSelecting ? isChecked : isSelected) ? accent.opacity(0.34) : Color.primary.opacity(0.04), lineWidth: 1)
             }
             .clipShape(RoundedRectangle(cornerRadius: 9))
         }
@@ -136,6 +157,58 @@ struct ConversationRow: View {
             Button("Cancel", role: .cancel) {}
         } message: {
             Text("This permanently removes the session and all of its messages.")
+        }
+    }
+}
+
+/// Bottom bar shown while multi-selecting sessions: Select All / None and Delete.
+struct ConversationSelectionBar: View {
+    let selectedCount: Int
+    let totalCount: Int
+    let accent: Color
+    let onSelectAll: () -> Void
+    let onClear: () -> Void
+    let onDelete: () -> Void
+    @State private var showConfirm = false
+
+    var body: some View {
+        VStack(spacing: 8) {
+            Rectangle().fill(Color.primary.opacity(0.07)).frame(height: 1)
+            HStack(spacing: 8) {
+                Text("\(selectedCount) selected")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Button(selectedCount == totalCount ? "Select None" : "Select All") {
+                    if selectedCount == totalCount { onClear() } else { onSelectAll() }
+                }
+                .buttonStyle(.plain)
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(accent)
+            }
+            Button(role: .destructive) {
+                showConfirm = true
+            } label: {
+                Label("Delete \(selectedCount)", systemImage: "trash")
+                    .font(.system(size: 12, weight: .semibold))
+                    .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.borderedProminent)
+            .tint(.red)
+            .controlSize(.small)
+            .disabled(selectedCount == 0)
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 8)
+        .confirmationDialog(
+            "Delete \(selectedCount) session\(selectedCount == 1 ? "" : "s")?",
+            isPresented: $showConfirm,
+            titleVisibility: .visible
+        ) {
+            Button("Delete \(selectedCount) Session\(selectedCount == 1 ? "" : "s")", role: .destructive, action: onDelete)
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("This permanently removes the selected sessions and all of their messages.")
         }
     }
 }

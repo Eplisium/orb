@@ -10,6 +10,8 @@ struct AgentView: View {
     @ObservedObject var chatService: ChatService
 
     @State private var messageText = ""
+    @State private var isSelectingSessions = false
+    @State private var selectedSessionIDs = Set<UUID>()
     @State private var selectedModelId = ""
     @AppStorage(PlaygroundModelDefaults.agentKey) private var defaultModelId = ""
     @AppStorage("playground.agentFullComputerAccess") private var fullComputerAccess = false
@@ -101,7 +103,13 @@ struct AgentView: View {
                 onNew: { newConversation() },
                 newLabel: "New Agent Session",
                 newIcon: "wand.and.stars",
-                disabled: chatService.isStreaming
+                disabled: chatService.isStreaming,
+                isSelecting: isSelectingSessions,
+                canSelect: chatService.conversations.contains { $0.mode == .agent },
+                onToggleSelecting: {
+                    isSelectingSessions.toggle()
+                    selectedSessionIDs.removeAll()
+                }
             )
 
             ScrollView {
@@ -124,7 +132,16 @@ struct AgentView: View {
                                         selectedModelId = conversation.modelId
                                     },
                                     onDelete: { chatService.deleteConversation(conversation) },
-                                    onExport: { exportConversation(conversation) }
+                                    onExport: { exportConversation(conversation) },
+                                    isSelecting: isSelectingSessions,
+                                    isChecked: selectedSessionIDs.contains(conversation.id),
+                                    onToggleCheck: {
+                                        if selectedSessionIDs.contains(conversation.id) {
+                                            selectedSessionIDs.remove(conversation.id)
+                                        } else {
+                                            selectedSessionIDs.insert(conversation.id)
+                                        }
+                                    }
                                 )
                             }
                         } header: {
@@ -137,6 +154,21 @@ struct AgentView: View {
             }
 
             Spacer(minLength: 0)
+            if isSelectingSessions {
+                let allIDs = Set(chatService.conversations.filter { $0.mode == .agent }.map(\.id))
+                ConversationSelectionBar(
+                    selectedCount: selectedSessionIDs.count,
+                    totalCount: allIDs.count,
+                    accent: accent,
+                    onSelectAll: { selectedSessionIDs = allIDs },
+                    onClear: { selectedSessionIDs.removeAll() },
+                    onDelete: {
+                        chatService.deleteConversations(ids: selectedSessionIDs)
+                        selectedSessionIDs.removeAll()
+                        isSelectingSessions = false
+                    }
+                )
+            }
             ConversationSidebarFooter(
                 statusColor: agentStatusColor,
                 statusText: agentStatusText,
