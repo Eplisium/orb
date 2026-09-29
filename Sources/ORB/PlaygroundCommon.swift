@@ -309,11 +309,10 @@ struct ToolCallCard: View {
                 }
             }
         }
-        .padding(.leading, 5)
-        .overlay(alignment: .leading) {
-            RoundedRectangle(cornerRadius: 1)
-                .fill(toolCall.isExecuting ? accent.opacity(0.45) : Color.primary.opacity(0.12))
-                .frame(width: 2)
+        .background(Color.primary.opacity(0.03), in: RoundedRectangle(cornerRadius: 9))
+        .overlay {
+            RoundedRectangle(cornerRadius: 9)
+                .stroke(toolCall.isExecuting ? accent.opacity(0.35) : Color.primary.opacity(0.07), lineWidth: 0.5)
         }
     }
 
@@ -581,28 +580,25 @@ struct ReasoningDisclosure: View {
             userToggled = true
         } label: {
             HStack(spacing: 6) {
-                Image(systemName: "sparkles")
-                    .font(.system(size: 9, weight: .semibold))
-                    .foregroundStyle(accent)
-                    .opacity(isStreaming ? (breathe ? 1.0 : 0.45) : 0.8)
                 if isStreaming {
                     TimelineView(.periodic(from: .now, by: 1)) { context in
                         let elapsed = startedAt.map { (duration ?? 0) + max(0, context.date.timeIntervalSince($0)) }
                         Text(elapsed.map(ThoughtDurationFormatter.live) ?? "Thinking…")
-                            .font(.system(size: 12, weight: .medium))
+                            .font(.system(size: 13))
                             .foregroundStyle(.secondary)
+                            .opacity(breathe ? 1.0 : 0.55)
                     }
                 } else {
                     Text(headerTitle)
-                        .font(.system(size: 12, weight: .medium))
+                        .font(.system(size: 13))
                         .foregroundStyle(.secondary)
                 }
                 Image(systemName: "chevron.right")
-                    .font(.system(size: 8, weight: .semibold))
+                    .font(.system(size: 9, weight: .semibold))
                     .foregroundStyle(.tertiary)
                     .rotationEffect(.degrees(effectiveExpansion ? 90 : 0))
             }
-            .padding(.vertical, 3)
+            .padding(.vertical, 2)
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
@@ -615,7 +611,7 @@ struct ReasoningDisclosure: View {
             .lineSpacing(5)
             .textSelection(.enabled)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.leading, 15)
+            .padding(.leading, 14)
             .padding(.vertical, 3)
             .overlay(alignment: .leading) {
                 RoundedRectangle(cornerRadius: 1)
@@ -685,7 +681,7 @@ struct ActivityPulseOrb: View {
 
 extension PlaygroundMessageView {
     private var messageBubble: some View {
-        VStack(alignment: .leading, spacing: 16) {
+        VStack(alignment: .leading, spacing: 12) {
             if isUser {
                 Text(message.content)
                     .font(.system(size: 14))
@@ -717,29 +713,69 @@ extension PlaygroundMessageView {
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
+    /// Consecutive tool segments collapse into one run so a 9-call burst reads
+    /// as a single quiet line instead of nine stacked cards.
+    private enum TranscriptItem: Identifiable {
+        case segment(MessageTranscriptSegment)
+        case tools(id: UUID, calls: [ToolCallDisplay])
+        var id: UUID {
+            switch self {
+            case .segment(let s): return s.id
+            case .tools(let id, _): return id
+            }
+        }
+    }
+
+    private func transcriptItems(_ segments: [MessageTranscriptSegment]) -> [TranscriptItem] {
+        var items: [TranscriptItem] = []
+        for segment in segments {
+            if segment.kind == .tool {
+                guard showToolCalls,
+                      let call = message.toolCalls?.first(where: { $0.id == segment.toolCallID }) else { continue }
+                if case .tools(let id, let calls)? = items.last {
+                    items[items.count - 1] = .tools(id: id, calls: calls + [call])
+                } else {
+                    items.append(.tools(id: segment.id, calls: [call]))
+                }
+            } else {
+                items.append(.segment(segment))
+            }
+        }
+        return items
+    }
+
     private var transcriptBody: some View {
         let segments = message.displayTranscript
-        return VStack(alignment: .leading, spacing: 16) {
-            ForEach(segments) { segment in
-                switch segment.kind {
-                case .reasoning:
-                    ReasoningDisclosure(
-                        text: segment.text,
-                        accent: accent,
-                        isStreaming: isReasoning && segment.id == segments.last?.id,
-                        startedAt: message.reasoningStartedAt,
-                        duration: segments.filter { $0.kind == .reasoning }.count == 1 ? message.reasoningDuration : nil
-                    )
-                case .text:
-                    MarkdownText(content: segment.text, accent: accent,
-                                 showsCursor: isStreaming && !isReasoning && segment.id == segments.last?.id)
-                        .font(.system(size: 14))
-                        .lineSpacing(6)
-                        .textSelection(.enabled)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                case .tool:
-                    if showToolCalls, let call = message.toolCalls?.first(where: { $0.id == segment.toolCallID }) {
-                        ToolCallCard(toolCall: call, accent: accent)
+        let items = transcriptItems(segments)
+        let reasoningCount = segments.filter { $0.kind == .reasoning }.count
+        return VStack(alignment: .leading, spacing: 12) {
+            ForEach(items) { item in
+                switch item {
+                case .segment(let segment):
+                    switch segment.kind {
+                    case .reasoning:
+                        ReasoningDisclosure(
+                            text: segment.text,
+                            accent: accent,
+                            isStreaming: isReasoning && segment.id == segments.last?.id,
+                            startedAt: message.reasoningStartedAt,
+                            duration: reasoningCount == 1 ? message.reasoningDuration : nil
+                        )
+                    case .text:
+                        MarkdownText(content: segment.text, accent: accent,
+                                     showsCursor: isStreaming && !isReasoning && segment.id == segments.last?.id)
+                            .font(.system(size: 14))
+                            .lineSpacing(6)
+                            .textSelection(.enabled)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    case .tool:
+                        EmptyView()
+                    }
+                case .tools(_, let calls):
+                    if calls.count == 1 {
+                        ToolCallCard(toolCall: calls[0], accent: accent)
+                    } else {
+                        ToolCallActivityGroup(toolCalls: calls, accent: accent)
                     }
                 }
             }
