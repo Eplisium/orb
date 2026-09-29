@@ -74,4 +74,32 @@ struct MarkdownParserTests {
             .paragraph("after")
         ])
     }
+
+    @Test("incremental cache matches a full parse at every streamed prefix")
+    @MainActor
+    func incrementalCacheEquivalence() {
+        let doc = "# T\n\nPara one\nstill one.\n\n- a\n  - nested\n- b\n\n```swift\nlet x = 1\n\nlet y = 2\n```\n\n| A | B |\n|---|--:|\n| 1 | 2 |\n\n1. x\n2. y\n\nDone."
+        let cache = MarkdownRenderCache()
+        var prefix = ""
+        for character in doc {
+            prefix.append(character)
+            #expect(cache.blocks(for: prefix) == MarkdownParser.parse(prefix), "prefix: \(prefix.debugDescription)")
+        }
+    }
+
+    @Test("tables parse header, alignment, and rows")
+    func tables() {
+        let blocks = MarkdownParser.parse("| Name | Qty |\n|:--|--:|\n| a | 1 |\n| b \\| c | 2 |")
+        #expect(blocks == [.table(MarkdownTable(
+            header: ["Name", "Qty"], alignments: [.leading, .trailing],
+            rows: [["a", "1"], ["b | c", "2"]]))])
+    }
+
+    @Test("nested lists and task items keep depth and checkbox state")
+    func nestedLists() {
+        let blocks = MarkdownParser.parse("- [x] done\n- [ ] todo\n    - child")
+        guard case .list(let items) = blocks.first else { Issue.record("expected list"); return }
+        #expect(items.map(\.depth) == [0, 0, 1])
+        #expect(items.map(\.checked) == [true, false, nil])
+    }
 }
