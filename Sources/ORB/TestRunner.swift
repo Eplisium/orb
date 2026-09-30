@@ -218,6 +218,7 @@ final class TestRunner: ObservableObject {
             }
             try Task.checkCancellation()
             reportedCostForLastRun = usage?.cost
+            UsageLedger.shared.record(.testSuite, model: modelID, usage: usage)
             let evaluationMode: TestEvaluationMode = projectBuild ? .projectBuild : .textResponse
             let policy: ToolPolicy = projectBuild ? .projectBuild : ToolPolicy(capabilities: [])
             let record = ExperimentEvaluation.record(

@@ -517,6 +517,9 @@ final class ChatService: ObservableObject {
     private func apply(usage: ChatUsage?, to context: PlaygroundRunContext) {
         guard let usage, let index = conversations.firstIndex(where: { $0.id == context.conversationID }) else { return }
         lastUsage = usage
+        UsageLedger.shared.record(context.mode == .agent ? .agent : .chat,
+                                  model: conversations[index].modelId, usage: usage,
+                                  eventID: context.runID.uuidString)
         conversations[index].totalCost += usage.cost ?? 0
         conversations[index].totalTokens += usage.totalTokens ?? 0
         if let completion = usage.completionTokens {

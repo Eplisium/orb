@@ -372,7 +372,25 @@ final class DatabaseManager {
             );
             """)
             try execChecked("CREATE INDEX IF NOT EXISTS idx_experiment_runs_started ON experiment_runs(started_at);")
-            try execChecked("PRAGMA user_version=5;")
+            // Permanent, append-only usage/cost ledger. Rows are never deleted
+            // or rewritten (INSERT OR IGNORE on a stable event id), so lifetime
+            // totals survive conversation/creation deletion. cost is NULL when
+            // the provider did not report one — unknown is never stored as $0.
+            try execChecked("""
+            CREATE TABLE IF NOT EXISTS usage_events (
+                id TEXT PRIMARY KEY,
+                timestamp REAL NOT NULL,
+                feature TEXT NOT NULL,
+                model_id TEXT NOT NULL,
+                cost REAL,
+                prompt_tokens INTEGER,
+                completion_tokens INTEGER,
+                total_tokens INTEGER,
+                requests INTEGER NOT NULL DEFAULT 1
+            );
+            """)
+            try execChecked("CREATE INDEX IF NOT EXISTS idx_usage_events_ts ON usage_events(timestamp);")
+            try execChecked("PRAGMA user_version=6;")
         } catch {
             // A failed migration must never take the app down. Back up the
             // failing file, swap in a fresh in-memory database, and surface
@@ -421,6 +439,64 @@ final class DatabaseManager {
             return nil
         }
         return stmt
+    }
+
+    // MARK: - Usage ledger
+
+    /// Appends one usage event. Duplicate ids are ignored, so a retried or
+    /// re-delivered completion can never double count.
+    @discardableResult
+    func insertUsageEvent(_ event: UsageEvent) -> Bool {
+        let sql = """
+        INSERT OR IGNORE INTO usage_events
+        (id, timestamp, feature, model_id, cost, prompt_tokens, completion_tokens, total_tokens, requests)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);
+        """
+        guard let stmt = prepare(sql) else { return false }
+        defer { sqlite3_finalize(stmt) }
+        let transient = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
+        sqlite3_bind_text(stmt, 1, event.id, -1, transient)
+        sqlite3_bind_double(stmt, 2, event.timestamp.timeIntervalSince1970)
+        sqlite3_bind_text(stmt, 3, event.feature, -1, transient)
+        sqlite3_bind_text(stmt, 4, event.modelID, -1, transient)
+        if let cost = event.cost { sqlite3_bind_double(stmt, 5, cost) } else { sqlite3_bind_null(stmt, 5) }
+        for (index, value) in [event.promptTokens, event.completionTokens, event.totalTokens].enumerated() {
+            if let value { sqlite3_bind_int64(stmt, Int32(6 + index), Int64(value)) } else { sqlite3_bind_null(stmt, Int32(6 + index)) }
+        }
+        sqlite3_bind_int64(stmt, 9, Int64(event.requests))
+        return sqlite3_step(stmt) == SQLITE_DONE
+    }
+
+    /// Aggregates the ledger. `grouping` is a closed enum, never caller SQL.
+    func usageBuckets(_ grouping: UsageGrouping, since: Date? = nil) -> [UsageBucket] {
+        let sql = """
+        SELECT \(grouping.expression) AS k,
+               COALESCE(SUM(cost), 0), SUM(requests),
+               COALESCE(SUM(total_tokens), 0),
+               COALESCE(SUM(CASE WHEN cost IS NULL THEN requests ELSE 0 END), 0)
+        FROM usage_events
+        WHERE timestamp >= ?
+        GROUP BY k ORDER BY \(grouping.order);
+        """
+        guard let stmt = prepare(sql) else { return [] }
+        defer { sqlite3_finalize(stmt) }
+        sqlite3_bind_double(stmt, 1, since?.timeIntervalSince1970 ?? 0)
+        var rows: [UsageBucket] = []
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            let key = sqlite3_column_text(stmt, 0).map { String(cString: $0) } ?? "Unknown"
+            rows.append(UsageBucket(key: key, cost: sqlite3_column_double(stmt, 1),
+                                    requests: Int(sqlite3_column_int64(stmt, 2)),
+                                    tokens: Int(sqlite3_column_int64(stmt, 3)),
+                                    unpricedRequests: Int(sqlite3_column_int64(stmt, 4))))
+        }
+        return rows
+    }
+
+    func usageFirstEventDate() -> Date? {
+        guard let stmt = prepare("SELECT MIN(timestamp) FROM usage_events;") else { return nil }
+        defer { sqlite3_finalize(stmt) }
+        guard sqlite3_step(stmt) == SQLITE_ROW, sqlite3_column_type(stmt, 0) != SQLITE_NULL else { return nil }
+        return Date(timeIntervalSince1970: sqlite3_column_double(stmt, 0))
     }
 
     // MARK: - Favorites

@@ -22,6 +22,7 @@ struct SettingsView: View {
     enum SettingsTab: String, CaseIterable {
         case apiKey = "API Key"
         case credits = "Credits"
+        case usage = "Usage"
         case activity = "Activity"
         case keyInfo = "Key Info"
         case providers = "Providers"
@@ -67,6 +68,7 @@ struct SettingsView: View {
                             securitySection
                         }
                     case .credits: creditsSection
+                    case .usage: UsageSettingsView(accent: ORBTheme.accent)
                     case .activity: activitySection
                     case .keyInfo: keyInfoSection
                     case .providers: providersSection

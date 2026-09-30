@@ -119,9 +119,12 @@ struct ImagesView: View {
     @AppStorage(PlaygroundModelDefaults.agentKey) private var pinnedAgentModelId = ""
     @State private var isEnhancing = false
     @State private var promptBeforeEnhance: String?
-    @State private var generatingCount = 1
+    @State private var pendingImages = 0
 
     private let accent = ORBTheme.accent
+    /// Images per press, and the ceiling of unfinished images across overlapping runs.
+    private static let maxImagesPerRun = 10
+    private static let maxPendingImages = 20
 
     struct GeneratedImage: Identifiable {
         let id = UUID()
@@ -197,8 +200,7 @@ struct ImagesView: View {
             StudioCard(title: "Options") {
                 StudioGrid {
                     StudioField("Count") {
-                        Stepper("\(imageCount)", value: $imageCount, in: 1...maximumCount)
-                            .disabled(maximumCount == 1)
+                        Stepper("\(imageCount)", value: $imageCount, in: 1...Self.maxImagesPerRun)
                     }
                     StudioField("Aspect") {
                         Picker("Aspect", selection: $aspectRatio) {
@@ -253,7 +255,7 @@ struct ImagesView: View {
 
             Spacer()
 
-            StudioPrimaryButton(title: "Generate", busyTitle: "Generating…", isBusy: service.isGenerating,
+            StudioPrimaryButton(title: "Generate", busyTitle: "Generating…", isBusy: pendingImages > 0,
                                 isEnabled: canGenerate, accent: accent, action: generate)
                 .keyboardShortcut(.return, modifiers: .command)
 
@@ -337,13 +339,13 @@ struct ImagesView: View {
 
     private var galleryColumn: some View {
         Group {
-            if results.isEmpty && !service.isGenerating {
+            if results.isEmpty && pendingImages == 0 {
                 emptyGallery
             } else {
                 ScrollView {
                     LazyVGrid(columns: [GridItem(.adaptive(minimum: 260), spacing: 14)], spacing: 14) {
-                        if service.isGenerating {
-                            ForEach(0..<max(1, generatingCount), id: \.self) { _ in
+                        if pendingImages > 0 {
+                            ForEach(0..<pendingImages, id: \.self) { _ in
                                 ImageGeneratingPlaceholder(accent: accent)
                             }
                         }
@@ -448,7 +450,7 @@ struct ImagesView: View {
 
     private var canGenerate: Bool {
         !prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            && !selectedModelId.isEmpty && !service.isGenerating
+            && !selectedModelId.isEmpty && pendingImages + imageCount <= Self.maxPendingImages
             && KeychainManager.hasAPIKey && capabilities.referenceError(count: referenceURLs.count) == nil
             && (referenceURLs.isEmpty || selectedImageModel?.architecture?.takesReferenceImages == true)
     }
@@ -498,39 +500,64 @@ struct ImagesView: View {
             return
         }
         errorMessage = nil
-        generatingCount = imageCount
         let modelId = selectedModelId
         let promptText = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
+        let total = imageCount
+        // Providers cap `n` per request; split into concurrent requests so
+        // any count works. Endpoints without `n` get one image per request.
+        let perRequest = max(1, maximumCount)
+        var chunks: [Int] = []
+        var remaining = total
+        while remaining > 0 { chunks.append(min(perRequest, remaining)); remaining -= chunks.last! }
+        pendingImages += total
         Task {
+            var base: ImageGenRequest
             do {
                 let takesReferences = service.models.first(where: { $0.id == modelId })?.architecture?.takesReferenceImages == true
                 let references = takesReferences ? try referenceDataURLs() : nil
-                var request = ImageGenRequest(model: modelId, prompt: promptText)
-                request.n = imageCount > 1 ? imageCount : nil
-                request.aspectRatio = options("aspect_ratio").contains(aspectRatio) && aspectRatio != "auto" ? aspectRatio : nil
-                request.resolution = options("resolution").contains(resolution) && resolution != "auto" ? resolution : nil
-                request.quality = options("quality").contains(quality) && quality != "auto" ? quality : nil
+                base = ImageGenRequest(model: modelId, prompt: promptText)
+                base.aspectRatio = options("aspect_ratio").contains(aspectRatio) && aspectRatio != "auto" ? aspectRatio : nil
+                base.resolution = options("resolution").contains(resolution) && resolution != "auto" ? resolution : nil
+                base.quality = options("quality").contains(quality) && quality != "auto" ? quality : nil
                 if supports("seed"), !seedText.trimmingCharacters(in: .whitespaces).isEmpty {
                     guard let seed = Int(seedText.trimmingCharacters(in: .whitespaces)) else {
                         throw MediaStudioImageFile.Failure.invalid("Seed must be a whole number.")
                     }
-                    request.seed = seed
+                    base.seed = seed
                 }
                 if let slug = capabilities.pinnedSlug {
-                    request.provider = ImageGenerationProviderPreferences(only: [slug], allowFallbacks: false)
+                    base.provider = ImageGenerationProviderPreferences(only: [slug], allowFallbacks: false)
                 }
-                request.inputReferences = references
-                let attachments = try await service.generate(request)
-                for attachment in attachments {
-                    let result = GeneratedImage(attachment: attachment, modelId: modelId)
-                    results.insert(result, at: 0)
-                    await persist(result.id)
-                }
-                totalCost += service.lastUsage?.cost ?? 0
-            } catch is CancellationError {
-                // User navigated away; leave prior results alone.
+                base.inputReferences = references
             } catch {
+                pendingImages -= total
                 errorMessage = error.localizedDescription
+                return
+            }
+            let template = base
+            await withTaskGroup(of: (Int, Result<(images: [ChatImageAttachment], usage: ImageGenUsage?), Error>).self) { group in
+                for size in chunks {
+                    group.addTask { @MainActor in
+                        var request = template
+                        request.n = size > 1 ? size : nil
+                        do { return (size, .success(try await service.generateWithUsage(request))) }
+                        catch { return (size, .failure(error)) }
+                    }
+                }
+                for await (size, outcome) in group {
+                    pendingImages -= size
+                    switch outcome {
+                    case .success(let output):
+                        totalCost += output.usage?.cost ?? 0
+                        for attachment in output.images {
+                            let result = GeneratedImage(attachment: attachment, modelId: modelId)
+                            results.insert(result, at: 0)
+                            await persist(result.id)
+                        }
+                    case .failure(let error):
+                        if !(error is CancellationError) { errorMessage = error.localizedDescription }
+                    }
+                }
             }
         }
     }

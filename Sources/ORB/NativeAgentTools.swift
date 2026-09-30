@@ -846,10 +846,13 @@ enum NativeAgentTools {
         let request = OpenRouterRequest(apiKey: apiKey, model: visionModel, messages: [message], settings: settings)
         let client = OpenRouterClient()
         var text = ""
+        var visionUsage: ChatUsage?
+        defer { if visionUsage != nil { Task { @MainActor in UsageLedger.shared.record(.agentVision, model: visionModel, usage: visionUsage) } } }
         do {
             let stream = try await client.stream(request)
             for try await event in stream {
                 try Task.checkCancellation()
+                if case .usage(let value) = event { visionUsage = value }
                 if case .contentDelta(let choice, let delta) = event, choice == 0 {
                     text += delta
                 }

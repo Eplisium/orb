@@ -484,7 +484,9 @@ final class ImageGenService: ObservableObject {
     @Published var models: [ImageGenModel] = []
     @Published var isLoadingModels = false
     @Published var modelsError: String?
-    @Published var isGenerating = false
+    /// Number of image requests currently in flight (requests may overlap).
+    @Published private(set) var inFlight = 0
+    var isGenerating: Bool { inFlight > 0 }
     @Published var lastUsage: ImageGenUsage?
 
     private let transport: MediaTransport
@@ -525,6 +527,12 @@ final class ImageGenService: ObservableObject {
     /// Generates images. Returns one `ChatImageAttachment` per image, with
     /// the prompt attached for gallery context.
     func generate(_ request: ImageGenRequest) async throws -> [ChatImageAttachment] {
+        try await generateWithUsage(request).images
+    }
+
+    /// Same as `generate`, but returns this request's own usage so overlapping
+    /// requests can be costed without racing on `lastUsage`.
+    func generateWithUsage(_ request: ImageGenRequest) async throws -> (images: [ChatImageAttachment], usage: ImageGenUsage?) {
         guard (1...10).contains(request.n ?? 1),
               (0...100).contains(request.outputCompression ?? 0),
               request.background != "transparent" || request.outputFormat == "png" || request.outputFormat == "webp",
@@ -534,19 +542,24 @@ final class ImageGenService: ObservableObject {
         guard request.inputReferences.map({ $0.count <= 16 }) ?? true else {
             throw MediaServiceError.invalidUpload("Image generation allows at most 16 reference images.")
         }
-        isGenerating = true
-        defer { isGenerating = false }
+        inFlight += 1
+        defer { inFlight -= 1 }
         let body = try JSONEncoder().encode(request)
         let urlRequest = try transport.request(path: "images", method: "POST", body: body)
         let response: ImageGenResponse = try await transport.send(urlRequest)
         lastUsage = response.usage
-        return response.data.map { item in
+        UsageLedger.shared.record(.images, model: request.model, cost: response.usage?.cost,
+                                  promptTokens: response.usage?.promptTokens,
+                                  completionTokens: response.usage?.completionTokens,
+                                  totalTokens: response.usage?.totalTokens)
+        let images = response.data.map { item -> ChatImageAttachment in
             let mime = item.mediaType ?? "image/png"
             return ChatImageAttachment(
                 dataURL: "data:\(mime);base64,\(item.b64Json)",
                 prompt: request.prompt
             )
         }
+        return (images, response.usage)
     }
 }
 
@@ -736,6 +749,8 @@ final class VideoGenService: ObservableObject {
     @Published var isLoadingModels = false
     @Published var modelsError: String?
     @Published var activeJob: VideoJob?
+    /// Model of the job being polled, for the usage ledger.
+    private var activeModelID = "unknown"
     @Published var jobError: String?
 
     private let transport: MediaTransport
@@ -810,6 +825,7 @@ final class VideoGenService: ObservableObject {
             throw error
         }
         activeJob = job
+        activeModelID = request.model
         // Durable record keyed by the remote job ID, persisted before any
         // poll result is relied upon. A failed write never aborts the flow
         // (JobController surfaces it as lastPersistenceError).
@@ -852,6 +868,7 @@ final class VideoGenService: ObservableObject {
             )
         }
         stopPolling()
+        activeModelID = record.modelID ?? "unknown"
         // Seed the loop from the last known durable state; the first poll
         // goes to the canonical `videos/<remoteID>` route (or the record's
         // stored polling URL after origin validation) exactly like an
@@ -911,6 +928,9 @@ final class VideoGenService: ObservableObject {
         }
         // Terminal: persist the final state and cost regardless of outcome so
         // a completed job keeps its usage and a failure keeps its error.
+        if job.isSuccess || job.cost != nil {
+            UsageLedger.shared.record(.video, model: activeModelID, cost: job.cost, eventID: job.id)
+        }
         jobController.recordTerminal(
             remoteID: job.id, remoteStatus: job.status, error: job.error, cost: job.cost
         )
@@ -1137,7 +1157,10 @@ final class SpeechService: ObservableObject {
         defer { isWorking = false }
         let body = try JSONEncoder().encode(request)
         let urlRequest = try transport.request(path: "audio/speech", method: "POST", body: body)
-        return try await transport.sendRaw(urlRequest)
+        let output = try await transport.sendRaw(urlRequest)
+        // Raw audio bodies carry no usage block, so spend is unknown here.
+        UsageLedger.shared.record(.speech, model: request.model, cost: nil)
+        return output
     }
 
     /// Transcribes audio bytes to text via multipart upload.
@@ -1150,13 +1173,24 @@ final class SpeechService: ObservableObject {
         defer { isWorking = false }
         if TranscriptionRequest.usesJSONInputAudio(byteCount: request.audioData.count) {
             let body = try request.jsonBody()
-            return try await transport.send(transport.request(path: "audio/transcriptions", method: "POST", body: body))
+            let large: TranscriptionResponse = try await transport.send(transport.request(path: "audio/transcriptions", method: "POST", body: body))
+            recordTranscription(large, model: request.model)
+            return large
         }
         let boundary = "ORB-\(UUID().uuidString)"
         var urlRequest = try transport.request(path: "audio/transcriptions", method: "POST")
         urlRequest.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
         urlRequest.httpBody = request.multipartBody(boundary: boundary)
-        return try await transport.send(urlRequest)
+        let response: TranscriptionResponse = try await transport.send(urlRequest)
+        recordTranscription(response, model: request.model)
+        return response
+    }
+
+    private func recordTranscription(_ response: TranscriptionResponse, model: String) {
+        UsageLedger.shared.record(.transcription, model: model, cost: response.usage?.cost,
+                                  promptTokens: response.usage?.inputTokens,
+                                  completionTokens: response.usage?.outputTokens,
+                                  totalTokens: response.usage?.totalTokens)
     }
 }
 
@@ -1310,7 +1344,11 @@ final class EmbeddingService: ObservableObject {
         defer { isWorking = false }
         let body = try JSONEncoder().encode(request)
         let urlRequest = try transport.request(path: "embeddings", method: "POST", body: body)
-        return try await transport.send(urlRequest)
+        let response: EmbeddingResponse = try await transport.send(urlRequest)
+        UsageLedger.shared.record(.embeddings, model: request.model, cost: response.usage?.cost,
+                                  promptTokens: response.usage?.promptTokens,
+                                  totalTokens: response.usage?.totalTokens)
+        return response
     }
 
     func rerank(_ request: RerankRequest) async throws -> RerankResponse {
@@ -1321,7 +1359,10 @@ final class EmbeddingService: ObservableObject {
         defer { isWorking = false }
         let body = try JSONEncoder().encode(request)
         let urlRequest = try transport.request(path: "rerank", method: "POST", body: body)
-        return try await transport.send(urlRequest)
+        let response: RerankResponse = try await transport.send(urlRequest)
+        UsageLedger.shared.record(.rerank, model: request.model, cost: response.usage?.cost,
+                                  totalTokens: response.usage?.totalTokens)
+        return response
     }
 }
 
