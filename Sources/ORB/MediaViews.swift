@@ -116,6 +116,10 @@ struct ImagesView: View {
     @State private var endpointError: String?
     @State private var totalCost = 0.0
     @FocusState private var inputFocused: Bool
+    @AppStorage(PlaygroundModelDefaults.agentKey) private var pinnedAgentModelId = ""
+    @State private var isEnhancing = false
+    @State private var promptBeforeEnhance: String?
+    @State private var generatingCount = 1
 
     private let accent = ORBTheme.accent
 
@@ -187,6 +191,7 @@ struct ImagesView: View {
                 StudioLabel("Prompt")
                 StudioPromptEditor(text: $prompt, placeholder: "Describe the image you want…",
                                    accessibilityLabel: "Image prompt")
+                enhanceRow
             }
 
             StudioCard(title: "Options") {
@@ -332,11 +337,16 @@ struct ImagesView: View {
 
     private var galleryColumn: some View {
         Group {
-            if results.isEmpty {
+            if results.isEmpty && !service.isGenerating {
                 emptyGallery
             } else {
                 ScrollView {
                     LazyVGrid(columns: [GridItem(.adaptive(minimum: 260), spacing: 14)], spacing: 14) {
+                        if service.isGenerating {
+                            ForEach(0..<max(1, generatingCount), id: \.self) { _ in
+                                ImageGeneratingPlaceholder(accent: accent)
+                            }
+                        }
                         ForEach(results) { result in
                             galleryCard(result)
                         }
@@ -349,6 +359,47 @@ struct ImagesView: View {
         .background(Color(nsColor: .windowBackgroundColor))
     }
 
+    private var enhanceRow: some View {
+        HStack(spacing: 8) {
+            Button { Task { await enhancePrompt() } } label: {
+                if isEnhancing {
+                    HStack(spacing: 6) { ProgressView().controlSize(.small); Text("Enhancing…") }
+                } else {
+                    Label("Enhance with AI", systemImage: "wand.and.stars")
+                }
+            }
+            .disabled(isEnhancing || pinnedAgentModelId.isEmpty || !canEnhance)
+            .help(pinnedAgentModelId.isEmpty
+                  ? "Pin a model in Agent to use it for prompt enhancement."
+                  : "Rewrite the prompt with \(shortModelName(pinnedAgentModelId))")
+            if let original = promptBeforeEnhance, !isEnhancing {
+                Button("Undo") { prompt = original; promptBeforeEnhance = nil }
+            }
+            Spacer()
+            Text(pinnedAgentModelId.isEmpty ? "No model pinned in Agent" : shortModelName(pinnedAgentModelId))
+                .font(.caption2).foregroundStyle(.tertiary).lineLimit(1)
+        }
+        .font(.caption)
+    }
+
+    private var canEnhance: Bool {
+        !prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    private func enhancePrompt() async {
+        let original = prompt
+        isEnhancing = true
+        errorMessage = nil
+        defer { isEnhancing = false }
+        do {
+            let improved = try await PromptEnhancer.enhance(original, modelId: pinnedAgentModelId)
+            promptBeforeEnhance = original
+            prompt = improved
+        } catch {
+            errorMessage = "Prompt enhancement failed: \(error.localizedDescription)"
+        }
+    }
+
     private var emptyGallery: some View {
         StudioEmptyState(icon: "photo.on.rectangle.angled", title: "Your image gallery",
                          message: "Pick a model and describe your image. ORB saves generated images here for later; failed saves can be retried or exported.",
@@ -357,7 +408,8 @@ struct ImagesView: View {
 
     private func galleryCard(_ result: GeneratedImage) -> some View {
         VStack(alignment: .leading, spacing: 8) {
-            AssistantImageRow(images: [result.attachment], accent: accent)
+            AssistantImageRow(images: [result.attachment], accent: accent,
+                              onReusePrompt: { prompt = $0 })
             Text(result.modelId)
                 .font(.caption.monospacedDigit()).foregroundStyle(.tertiary)
                 .lineLimit(1)
@@ -369,6 +421,8 @@ struct ImagesView: View {
                     Text(result.saveError ?? "Not saved").foregroundStyle(.orange).lineLimit(2)
                 }
                 Spacer()
+                Button { editImage(result) } label: { Label("Edit", systemImage: "wand.and.stars") }
+                    .help("Use this image as a reference and describe the changes")
                 Button("Export…") { exportImage(result) }
             }.font(.caption)
         }
@@ -444,6 +498,7 @@ struct ImagesView: View {
             return
         }
         errorMessage = nil
+        generatingCount = imageCount
         let modelId = selectedModelId
         let promptText = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
         Task {
@@ -510,6 +565,30 @@ struct ImagesView: View {
         }
     }
 
+    /// Loads an existing image as the reference for an image-to-image edit.
+    private func editImage(_ result: GeneratedImage) {
+        guard let data = result.attachment.inlineData else { errorMessage = "Image bytes are unavailable."; return }
+        // Prefer the model that made it; otherwise any model that accepts references.
+        if selectedImageModel?.architecture?.takesReferenceImages != true {
+            let original = service.models.first { $0.id == result.modelId && $0.architecture?.takesReferenceImages == true }
+            guard let target = original ?? service.models.first(where: { $0.architecture?.takesReferenceImages == true }) else {
+                errorMessage = "No available image model accepts reference images."
+                return
+            }
+            selectedModelId = target.id
+        }
+        do {
+            let dir = FileManager.default.temporaryDirectory.appendingPathComponent("orb-edit-references", isDirectory: true)
+            try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+            let url = dir.appendingPathComponent("edit-\(result.id.uuidString.prefix(8)).\(result.attachment.fileExtension)")
+            try data.write(to: url, options: .atomic)
+            referenceURLs = [url]
+            errorMessage = nil
+        } catch {
+            errorMessage = "Could not prepare the image for editing: \(error.localizedDescription)"
+        }
+    }
+
     private func exportImage(_ result: GeneratedImage) {
         guard let data = result.attachment.inlineData else { errorMessage = "Image bytes are unavailable."; return }
         let panel = NSSavePanel()
@@ -522,6 +601,48 @@ struct ImagesView: View {
         }
     }
 
+}
+
+/// Animated stand-in shown in the gallery while an image is being generated.
+struct ImageGeneratingPlaceholder: View {
+    let accent: Color
+    private let start = Date()
+
+    var body: some View {
+        TimelineView(.animation) { timeline in
+            let t = timeline.date.timeIntervalSince(start)
+            let sweep = CGFloat((t.truncatingRemainder(dividingBy: 1.8)) / 1.8)
+            let pulse = 0.5 + 0.5 * sin(t * 2.6)
+            VStack(spacing: 12) {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 12)
+                        .fill(accent.opacity(0.06 + 0.04 * pulse))
+                    GeometryReader { geo in
+                        LinearGradient(colors: [.clear, accent.opacity(0.28), .clear],
+                                       startPoint: .leading, endPoint: .trailing)
+                            .frame(width: geo.size.width * 0.5)
+                            .offset(x: -geo.size.width * 0.5 + sweep * geo.size.width * 1.5)
+                    }
+                    .clipShape(RoundedRectangle(cornerRadius: 12))
+                    VStack(spacing: 8) {
+                        Image(systemName: "sparkles")
+                            .font(.system(size: 28, weight: .medium))
+                            .foregroundStyle(accent)
+                            .scaleEffect(0.9 + 0.2 * pulse)
+                            .opacity(0.6 + 0.4 * pulse)
+                        Text("Generating…")
+                            .font(.caption.weight(.medium))
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .aspectRatio(1, contentMode: .fit)
+                .overlay { RoundedRectangle(cornerRadius: 12).stroke(accent.opacity(0.25 + 0.2 * pulse), lineWidth: 1) }
+            }
+            .padding(12)
+            .background(Color.primary.opacity(0.035), in: RoundedRectangle(cornerRadius: 14))
+        }
+        .accessibilityLabel("Generating image")
+    }
 }
 
 // MARK: - Video studio

@@ -30,11 +30,12 @@ enum AssistantImageLoader {
 struct AssistantImageRow: View {
     let images: [ChatImageAttachment]
     let accent: Color
+    var onReusePrompt: ((String) -> Void)? = nil
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             ForEach(images) { image in
-                AssistantImageCard(image: image, accent: accent)
+                AssistantImageCard(image: image, accent: accent, onReusePrompt: onReusePrompt)
             }
         }
     }
@@ -43,10 +44,13 @@ struct AssistantImageRow: View {
 private struct AssistantImageCard: View {
     let image: ChatImageAttachment
     let accent: Color
+    var onReusePrompt: ((String) -> Void)? = nil
 
     @State private var nsImage: NSImage?
     @State private var isLoading = true
     @State private var showSaved = false
+    @State private var promptExpanded = false
+    @State private var promptCopied = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -57,6 +61,12 @@ private struct AssistantImageCard: View {
                         .aspectRatio(contentMode: .fit)
                         .frame(maxWidth: 480, maxHeight: 360)
                         .clipShape(RoundedRectangle(cornerRadius: 10))
+                        .contentShape(RoundedRectangle(cornerRadius: 10))
+                        .onTapGesture { FullScreenImageViewer.shared.show(nsImage) }
+                        .onHover { inside in
+                            if inside { NSCursor.pointingHand.push() } else { NSCursor.pop() }
+                        }
+                        .help("Click to view full screen")
                 } else if isLoading {
                     RoundedRectangle(cornerRadius: 10)
                         .fill(Color.primary.opacity(0.05))
@@ -74,13 +84,40 @@ private struct AssistantImageCard: View {
                 isLoading = false
             }
 
-            HStack(spacing: 8) {
-                if let prompt = image.prompt, !prompt.isEmpty {
+            if let prompt = image.prompt, !prompt.isEmpty {
+                VStack(alignment: .leading, spacing: 4) {
                     Text(prompt)
                         .font(.caption)
                         .foregroundStyle(.secondary)
-                        .lineLimit(2)
+                        .lineLimit(promptExpanded ? nil : 2)
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .contentShape(Rectangle())
+                        .onTapGesture { withAnimation(.easeInOut(duration: 0.15)) { promptExpanded.toggle() } }
+                        .help(promptExpanded ? "Click to collapse" : "Click to show the full prompt")
+                    HStack(spacing: 10) {
+                        Button {
+                            NSPasteboard.general.clearContents()
+                            NSPasteboard.general.setString(prompt, forType: .string)
+                            promptCopied = true
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 2) { promptCopied = false }
+                        } label: {
+                            Label(promptCopied ? "Copied" : "Copy prompt",
+                                  systemImage: promptCopied ? "checkmark" : "doc.on.doc")
+                                .font(.caption2)
+                        }
+                        .buttonStyle(.plain)
+                        .foregroundStyle(promptCopied ? .green : accent)
+                        if let onReusePrompt {
+                            Button { onReusePrompt(prompt) } label: {
+                                Label("Use prompt", systemImage: "arrow.uturn.left").font(.caption2)
+                            }
+                            .buttonStyle(.plain).foregroundStyle(accent)
+                        }
+                    }
                 }
+            }
+            HStack(spacing: 8) {
                 Spacer()
                 Button {
                     saveImage()
@@ -109,6 +146,68 @@ private struct AssistantImageCard: View {
             showSaved = true
             DispatchQueue.main.asyncAfter(deadline: .now() + 2) { showSaved = false }
         }
+    }
+}
+
+// MARK: - Full-screen viewer
+
+/// Opens an image in a native full-screen window. Click or press Esc to close.
+@MainActor
+final class FullScreenImageViewer: NSObject, NSWindowDelegate {
+    static let shared = FullScreenImageViewer()
+    private var window: NSWindow?
+
+    func show(_ image: NSImage) {
+        if let window { window.close() }
+        let win = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1000, height: 700),
+                           styleMask: [.titled, .closable, .resizable, .fullSizeContentView],
+                           backing: .buffered, defer: false)
+        win.titlebarAppearsTransparent = true
+        win.titleVisibility = .hidden
+        win.backgroundColor = .black
+        win.isReleasedWhenClosed = false
+        win.collectionBehavior = [.fullScreenPrimary]
+        win.delegate = self
+        win.contentView = NSHostingView(rootView: FullScreenImageContent(image: image) { [weak self] in
+            self?.dismiss()
+        })
+        win.center()
+        window = win
+        win.makeKeyAndOrderFront(nil)
+        win.toggleFullScreen(nil)
+    }
+
+    private func dismiss() {
+        guard let window else { return }
+        if window.styleMask.contains(.fullScreen) { window.toggleFullScreen(nil) } else { window.close() }
+    }
+
+    func windowDidExitFullScreen(_ notification: Notification) {
+        window?.close()
+    }
+
+    func windowWillClose(_ notification: Notification) {
+        window?.delegate = nil
+        window = nil
+    }
+}
+
+private struct FullScreenImageContent: View {
+    let image: NSImage
+    let onClose: () -> Void
+
+    var body: some View {
+        ZStack {
+            Color.black
+            Image(nsImage: image)
+                .resizable()
+                .aspectRatio(contentMode: .fit)
+                .padding(24)
+        }
+        .ignoresSafeArea()
+        .contentShape(Rectangle())
+        .onTapGesture { onClose() }
+        .onExitCommand { onClose() }
     }
 }
 
