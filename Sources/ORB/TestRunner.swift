@@ -148,6 +148,7 @@ final class TestRunner: ObservableObject {
             self.activityLabel = ""
             self.isRunning = false
             self.activeTask = nil
+            StudioNotifier.shared.finished(section: SidebarSection.testSuite.rawValue, title: "Test run finished", body: "\(self.batchCompleted) of \(self.batchTotal) model run\(self.batchTotal == 1 ? "" : "s") completed.")
         }
     }
 

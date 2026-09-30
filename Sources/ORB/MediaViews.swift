@@ -99,27 +99,28 @@ enum MediaStudioImageFile {
 // knobs, reference images, gallery with save, and cost tracking.
 
 struct ImagesView: View {
-    @StateObject private var service = ImageGenService()
+    @ObservedObject private var service = StudioServices.shared.images
     @StateObject private var saved = SavedCreationsStore.shared
-    @State private var prompt = ""
-    @State private var selectedModelId = ""
-    @State private var imageCount = 1
-    @State private var aspectRatio = "auto"
-    @State private var resolution = "auto"
-    @State private var quality = "auto"
-    @State private var seedText = ""
-    @State private var referenceURLs: [URL] = []
-    @State private var selectedProviderSlug = ""
-    @State private var errorMessage: String?
-    @State private var results: [GeneratedImage] = []
-    @State private var endpoints: [ImageModelEndpoint] = []
-    @State private var endpointError: String?
-    @State private var totalCost = 0.0
+    @StudioState("ImagesView.prompt") private var prompt = ""
+    @StudioState("ImagesView.selectedModelId") private var selectedModelId = ""
+    @StudioState("ImagesView.imageCount") private var imageCount = 1
+    @StudioState("ImagesView.aspectRatio") private var aspectRatio = "auto"
+    @StudioState("ImagesView.resolution") private var resolution = "auto"
+    @StudioState("ImagesView.quality") private var quality = "auto"
+    @StudioState("ImagesView.seedText") private var seedText = ""
+    @StudioState("ImagesView.referenceURLs") private var referenceURLs: [URL] = []
+    @StudioState("ImagesView.selectedProviderSlug") private var selectedProviderSlug = ""
+    @StudioState("ImagesView.errorMessage") private var errorMessage: String? = nil
+    @StudioState("ImagesView.results") private var results: [GeneratedImage] = []
+    @StudioState("ImagesView.endpoints") private var endpoints: [ImageModelEndpoint] = []
+    @StudioState("ImagesView.endpointError") private var endpointError: String? = nil
+    @StudioState("ImagesView.totalCost") private var totalCost = 0.0
     @FocusState private var inputFocused: Bool
     @AppStorage(PlaygroundModelDefaults.agentKey) private var pinnedAgentModelId = ""
-    @State private var isEnhancing = false
-    @State private var promptBeforeEnhance: String?
-    @State private var pendingImages = 0
+    @StudioState("ImagesView.isEnhancing") private var isEnhancing = false
+    @StudioState("ImagesView.promptBeforeEnhance") private var promptBeforeEnhance: String? = nil
+    @StudioState("ImagesView.pendingImages") private var pendingImages = 0
+    @StudioState("ImagesView.configuredModelId") private var configuredModelId = ""
 
     private let accent = ORBTheme.accent
     /// Images per press, and the ceiling of unfinished images across overlapping runs.
@@ -146,6 +147,10 @@ struct ImagesView: View {
             if selectedModelId.isEmpty { selectedModelId = service.models.first?.id ?? "" }
         }
         .task(id: selectedModelId) {
+            // Returning to the page re-runs this task; only reset the options
+            // when the model actually changed, so settings survive navigation.
+            if configuredModelId == selectedModelId, !endpoints.isEmpty { return }
+            configuredModelId = selectedModelId
             endpoints = []
             endpointError = nil
             aspectRatio = "auto"
@@ -544,11 +549,13 @@ struct ImagesView: View {
                         catch { return (size, .failure(error)) }
                     }
                 }
+                var delivered = 0
                 for await (size, outcome) in group {
                     pendingImages -= size
                     switch outcome {
                     case .success(let output):
                         totalCost += output.usage?.cost ?? 0
+                        delivered += output.images.count
                         for attachment in output.images {
                             let result = GeneratedImage(attachment: attachment, modelId: modelId)
                             results.insert(result, at: 0)
@@ -557,6 +564,10 @@ struct ImagesView: View {
                     case .failure(let error):
                         if !(error is CancellationError) { errorMessage = error.localizedDescription }
                     }
+                }
+                if delivered > 0 {
+                    StudioNotifier.shared.finished(section: SidebarSection.images.rawValue,
+                        title: "Images ready", body: "\(delivered) image\(delivered == 1 ? "" : "s") generated with \(shortModelName(modelId)).")
                 }
             }
         }
@@ -675,30 +686,30 @@ struct ImageGeneratingPlaceholder: View {
 // MARK: - Video studio
 
 struct VideoView: View {
-    @StateObject private var service = VideoGenService()
+    @ObservedObject private var service = StudioServices.shared.video
     @StateObject private var saved = SavedCreationsStore.shared
-    @State private var prompt = ""
-    @State private var selectedModelId = ""
-    @State private var aspectRatio = "auto"
-    @State private var resolution = "auto"
-    @State private var durationText = ""
-    @State private var size = "auto"
-    @State private var seedText = ""
-    @State private var firstFrameURL: URL?
-    @State private var lastFrameURL: URL?
-    @State private var generateAudio = false
-    @State private var errorMessage: String?
-    @State private var jobs: [VideoJobRecord] = []
-    @State private var totalCost = 0.0
-    @State private var videoBytes: [String: Data] = [:]
-    @State private var videoMIMEs: [String: String] = [:]
-    @State private var savedVideos: [String: SavedCreation] = [:]
-    @State private var downloadErrors: [String: String] = [:]
-    @State private var downloading: Set<String> = []
-    @State private var isSubmitting = false
+    @StudioState("VideoView.prompt") private var prompt = ""
+    @StudioState("VideoView.selectedModelId") private var selectedModelId = ""
+    @StudioState("VideoView.aspectRatio") private var aspectRatio = "auto"
+    @StudioState("VideoView.resolution") private var resolution = "auto"
+    @StudioState("VideoView.durationText") private var durationText = ""
+    @StudioState("VideoView.size") private var size = "auto"
+    @StudioState("VideoView.seedText") private var seedText = ""
+    @StudioState("VideoView.firstFrameURL") private var firstFrameURL: URL? = nil
+    @StudioState("VideoView.lastFrameURL") private var lastFrameURL: URL? = nil
+    @StudioState("VideoView.generateAudio") private var generateAudio = false
+    @StudioState("VideoView.errorMessage") private var errorMessage: String? = nil
+    @StudioState("VideoView.jobs") private var jobs: [VideoJobRecord] = []
+    @StudioState("VideoView.totalCost") private var totalCost = 0.0
+    @StudioState("VideoView.videoBytes") private var videoBytes: [String: Data] = [:]
+    @StudioState("VideoView.videoMIMEs") private var videoMIMEs: [String: String] = [:]
+    @StudioState("VideoView.savedVideos") private var savedVideos: [String: SavedCreation] = [:]
+    @StudioState("VideoView.downloadErrors") private var downloadErrors: [String: String] = [:]
+    @StudioState("VideoView.downloading") private var downloading: Set<String> = []
+    @StudioState("VideoView.isSubmitting") private var isSubmitting = false
     // Durable jobs that can be resumed (W09 step 3). Refreshed on appear and
     // whenever the service's active job changes (poll ticks, terminal states).
-    @State private var resumableRecords: [JobRecord] = []
+    @StudioState("VideoView.resumableRecords") private var resumableRecords: [JobRecord] = []
 
     private let accent = ORBTheme.accent
 
@@ -1048,6 +1059,7 @@ struct VideoView: View {
                 totalCost += finished.cost ?? 0
                 if let index = jobs.firstIndex(where: { $0.id == rowID }) { jobs[index].job = finished }
                 await keepVideo(rowID)
+                StudioNotifier.shared.finished(section: SidebarSection.video.rawValue, title: "Video ready", body: "Your video finished and was saved in ORB.")
             } catch is CancellationError {
                 // Local stop or navigation: the record stays resumable.
                 jobs.removeAll { $0.id == rowID }
@@ -1185,6 +1197,7 @@ struct VideoView: View {
                 totalCost += finished.cost ?? 0
                 if let index = jobs.firstIndex(where: { $0.id == recordId }) { jobs[index].job = finished }
                 await keepVideo(recordId)
+                StudioNotifier.shared.finished(section: SidebarSection.video.rawValue, title: "Video ready", body: "Your video finished and was saved in ORB.")
             } catch is CancellationError {
                 // Stopping local polling does not cancel the remote paid job.
                 // Keep the durable resumable record instead of a fake cancelled state.

@@ -4,23 +4,23 @@ import SwiftUI
 /// Text-only models receive a response check; tool models build projects.
 struct TestSuiteView: View {
     @ObservedObject var viewModel: BrowserViewModel
-    @StateObject private var testRunner = TestRunner()
+    @ObservedObject private var testRunner = StudioServices.shared.testRunner
 
-    @State private var selectedCategory: TestCategory?
-    @State private var selectedScenario: TestScenario?
-    @State private var selectedModelId = ""
+    @StudioState("TestSuiteView.selectedCategory") private var selectedCategory: TestCategory? = nil
+    @StudioState("TestSuiteView.selectedScenario") private var selectedScenario: TestScenario? = nil
+    @StudioState("TestSuiteView.selectedModelId") private var selectedModelId = ""
     @State private var showModelPicker = false
-    @State private var modelSearchText = ""
+    @StudioState("TestSuiteView.modelSearchText") private var modelSearchText = ""
     @State private var showCreateTest = false
-    @State private var customTests: [CustomTest] = []
+    @StudioState("TestSuiteView.customTests") private var customTests: [CustomTest] = []
     @State private var showSavedResults = false
-    @State private var userInstructions = ""
-    @State private var toolCapableOnly = false
+    @StudioState("TestSuiteView.userInstructions") private var userInstructions = ""
+    @StudioState("TestSuiteView.toolCapableOnly") private var toolCapableOnly = false
     @State private var showBatchPicker = false
     @State private var showBatchConfirmation = false
-    @State private var batchSelectedIDs: Set<String> = []
-    @State private var batchSearch = ""
-    @State private var batchCeiling = "1.00"
+    @StudioState("TestSuiteView.batchSelectedIDs") private var batchSelectedIDs: Set<String> = []
+    @StudioState("TestSuiteView.batchSearch") private var batchSearch = ""
+    @StudioState("TestSuiteView.batchCeiling") private var batchCeiling = "1.00"
 
     private let accent = PlaygroundTheme.testAccent
 

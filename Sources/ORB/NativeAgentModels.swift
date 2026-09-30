@@ -366,6 +366,8 @@ enum NativeAgentEvent: Sendable, Equatable {
     case turnFinished(reason: String?)
     /// The turn budget is spent; the agent is composing a final tool-free answer.
     case finalizing
+    /// A turn failed transiently and is being re-sent; carries the status text.
+    case retrying(String)
     case runCompleted
 }
 

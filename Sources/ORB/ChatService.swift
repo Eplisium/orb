@@ -554,6 +554,10 @@ final class ChatService: ObservableObject {
         streamingContent = ""
         activityLabel = ""
         streamTask = nil
+        StudioNotifier.shared.finished(
+            section: context.mode.rawValue,
+            title: "\(context.mode.rawValue) finished",
+            body: conversations.first(where: { $0.id == context.conversationID })?.title ?? "Your run is complete.")
     }
 
     func stopStreaming() {
@@ -795,6 +799,10 @@ final class ChatService: ObservableObject {
             agentNeedsTurnSeparator = !agentPendingContent.isEmpty
             if runState.phase != .streaming { runState.phase = .streaming }
             activityLabel = "Wrapping up — summarizing results…"
+        case .retrying(let label):
+            flushAgentStreams()
+            activityLabel = label
+            if runState.phase != .connecting { runState.phase = .connecting }
         default: break
         }
     }
@@ -893,11 +901,14 @@ final class ChatService: ObservableObject {
                         function: .init(name: call.name, arguments: call.arguments ?? call.argumentsSummary)
                     )
                 }
+                // Reasoning blocks are stored per *message* (merged across every
+                // model turn of the run), so replaying them here would splice
+                // unrelated, partly unsigned blocks into one turn and the
+                // provider answers HTTP 400. They are a continuity hint only.
                 history.append(.init(
                     role: "assistant",
                     content: nil,
-                    toolCalls: apiCalls,
-                    reasoningDetails: message.reasoningDetails
+                    toolCalls: apiCalls
                 ))
                 for call in pairedCalls {
                     guard let result = toolResults[call.id] else { continue }
@@ -907,8 +918,7 @@ final class ChatService: ObservableObject {
             if !message.content.isEmpty {
                 history.append(.init(
                     role: "assistant",
-                    content: message.content,
-                    reasoningDetails: message.reasoningDetails
+                    content: message.content
                 ))
             }
         }

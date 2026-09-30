@@ -20,6 +20,8 @@ enum NativeAgentRunner {
         /// budget exists only as a runaway-loop backstop, and reaching it now
         /// force-summarizes instead of discarding the run.
         maximumTurns: Int = 100,
+        /// Injectable so tests do not really wait between recovery attempts.
+        recoverySleep: @escaping @Sendable (Duration) async throws -> Void = { try await Task.sleep(for: $0) },
         toolExecutor: ToolExecutor? = nil,
         policy: ToolPolicy? = nil,
         approvals: ApprovalCoordinator? = nil,
@@ -81,12 +83,13 @@ enum NativeAgentRunner {
         for turn in 0..<maximumTurns {
             try Task.checkCancellation()
             await onEvent(.modelTurnStarted(turn))
-            let request = OpenRouterRequest(
+            var request = OpenRouterRequest(
                 apiKey: apiKey, model: modelId, messages: messages,
                 tools: definitions.isEmpty ? nil : definitions,
                 toolChoice: definitions.isEmpty ? nil : "auto", temperature: 0.3
             )
-            let stream = try await client.stream(request)
+            var transientAttempts = 0
+            var strippedAlready = false
             var text = ""
             var reasoning = ""
             // Structured reasoning blocks returned this turn. Attached to the
@@ -97,6 +100,9 @@ enum NativeAgentRunner {
             var turnUsage: ChatUsage?
             var fragments: [Int: ToolBuilder] = [:]
 
+            turnAttempt: while true {
+            do {
+            let stream = try await client.stream(request)
             for try await event in stream {
                 try Task.checkCancellation()
                 switch event {
@@ -126,6 +132,30 @@ enum NativeAgentRunner {
                 case .apiError(let error): throw NativeAgentError.api(error.message)
                 default: break
                 }
+            }
+            break turnAttempt
+            } catch {
+                let action = AgentTurnRecovery.action(
+                    for: error, transientAttempts: transientAttempts, strippedAlready: strippedAlready,
+                    canStrip: request.messages.contains { $0.reasoningDetails != nil },
+                    hasVisibleOutput: !text.isEmpty)
+                switch action {
+                case .fail: throw error
+                case .stripReasoning:
+                    strippedAlready = true
+                    messages = AgentTurnRecovery.strippingReasoning(messages)
+                    request = OpenRouterRequest(
+                        apiKey: request.apiKey, model: request.model, messages: messages,
+                        tools: request.tools, toolChoice: request.toolChoice, temperature: 0.3)
+                case .retry(let delay):
+                    transientAttempts += 1
+                    await onEvent(.retrying(AgentTurnRecovery.label(for: error, attempt: transientAttempts)))
+                    try await recoverySleep(delay)
+                }
+                // Discard whatever this failed attempt produced before re-sending.
+                reasoning = ""; turnReasoningDetails = []; finishReason = nil; turnUsage = nil; fragments = [:]
+                try Task.checkCancellation()
+            }
             }
 
             aggregateUsage = sum(aggregateUsage, turnUsage)

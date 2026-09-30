@@ -316,6 +316,9 @@ struct ContentView: View {
             }
         }
         .navigationSplitViewStyle(.balanced)
+        .onChange(of: selectedSection, initial: true) { _, section in
+            StudioNotifier.shared.currentSection = section.rawValue
+        }
         .task {
             AppLockMonitor.shared.start(lock: appLock)
             // With the lock disabled there is no onChange edge — set the
@@ -422,6 +425,13 @@ struct ContentView: View {
                 Text(section.title)
                     .lineLimit(1)
                 Spacer(minLength: 4)
+                if section == .agent {
+                    ChatActivityBadge(service: agentService, tint: isSelected ? .white : ORBTheme.accent)
+                } else if section == .chat {
+                    ChatActivityBadge(service: chatService, tint: isSelected ? .white : ORBTheme.accent)
+                } else {
+                    SidebarActivityBadge(section: section, tint: isSelected ? .white : ORBTheme.accent)
+                }
                 if count > 0 {
                     Text("\(count)")
                         .font(.system(size: 11, weight: .medium))

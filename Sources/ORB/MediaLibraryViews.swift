@@ -89,15 +89,15 @@ struct ModalityModelField: View {
 // Remote workspace uploads are separate from locally saved creations.
 
 struct FilesView: View {
-    @StateObject private var service = FileService()
-    @State private var remoteFiles: [WorkspaceFile] = []
-    @State private var nextCursor: String?
-    @State private var hasMore = false
-    @State private var isFetchingPage = false
-    @State private var pageError: String?
-    @State private var errorMessage: String?
+    @ObservedObject private var service = StudioServices.shared.files
+    @StudioState("FilesView.remoteFiles") private var remoteFiles: [WorkspaceFile] = []
+    @StudioState("FilesView.nextCursor") private var nextCursor: String? = nil
+    @StudioState("FilesView.hasMore") private var hasMore = false
+    @StudioState("FilesView.isFetchingPage") private var isFetchingPage = false
+    @StudioState("FilesView.pageError") private var pageError: String? = nil
+    @StudioState("FilesView.errorMessage") private var errorMessage: String? = nil
     @State private var showingCreations = false
-    @State private var isUploading = false
+    @StudioState("FilesView.isUploading") private var isUploading = false
     /// The file awaiting delete confirmation. The service layer refuses an
     /// unconfirmed delete, so the confirmation dialog is the only way the
     /// destructive call is ever issued.
@@ -507,32 +507,32 @@ struct SavedCreationsLibraryView: View {
 // MARK: - Speech studio (TTS + STT)
 
 struct SpeechView: View {
-    @StateObject private var service = SpeechService()
-    @State private var speechModels = ModalityModelChoices()
-    @State private var transcriptionModels = ModalityModelChoices()
+    @ObservedObject private var service = StudioServices.shared.speech
+    @StudioState("SpeechView.speechModels") private var speechModels = ModalityModelChoices()
+    @StudioState("SpeechView.transcriptionModels") private var transcriptionModels = ModalityModelChoices()
     @ObservedObject private var creations = SavedCreationsStore.shared
-    @State private var mode: Mode = .tts
-    @State private var text = ""
-    @State private var voice = ""
-    @State private var speed = 1.0
-    @State private var audioFormat = "mp3"
-    @State private var language = ""
-    @State private var transcriptionFormat = "json"
-    @State private var timestampMode = "none"
-    @State private var lastTranscription: TranscriptionResponse?
-    @State private var pendingTranscript: (data: Data, mime: String, model: String, filename: String)?
-    @State private var errorMessage: String?
-    @State private var transcript = ""
-    @State private var selectedAudioURL: URL?
-    @State private var lastAudio: SavedCreation?
-    @State private var pendingAudio: (data: Data, mimeType: String, modelID: String, prompt: String)?
-    @State private var audioPlayer: AVAudioPlayer?
-    @State private var isSaving = false
+    @StudioState("SpeechView.mode") private var mode: Mode = .tts
+    @StudioState("SpeechView.text") private var text = ""
+    @StudioState("SpeechView.voice") private var voice = ""
+    @StudioState("SpeechView.speed") private var speed = 1.0
+    @StudioState("SpeechView.audioFormat") private var audioFormat = "mp3"
+    @StudioState("SpeechView.language") private var language = ""
+    @StudioState("SpeechView.transcriptionFormat") private var transcriptionFormat = "json"
+    @StudioState("SpeechView.timestampMode") private var timestampMode = "none"
+    @StudioState("SpeechView.lastTranscription") private var lastTranscription: TranscriptionResponse? = nil
+    @StudioState("SpeechView.pendingTranscript") private var pendingTranscript: (data: Data, mime: String, model: String, filename: String)? = nil
+    @StudioState("SpeechView.errorMessage") private var errorMessage: String? = nil
+    @StudioState("SpeechView.transcript") private var transcript = ""
+    @StudioState("SpeechView.selectedAudioURL") private var selectedAudioURL: URL? = nil
+    @StudioState("SpeechView.lastAudio") private var lastAudio: SavedCreation? = nil
+    @StudioState("SpeechView.pendingAudio") private var pendingAudio: (data: Data, mimeType: String, modelID: String, prompt: String)? = nil
+    @StudioState("SpeechView.audioPlayer") private var audioPlayer: AVAudioPlayer? = nil
+    @StudioState("SpeechView.isSaving") private var isSaving = false
 
     enum Mode: String, CaseIterable { case tts = "Text → Speech", stt = "Speech → Text" }
 
     private let accent = ORBTheme.accent
-    @State private var modelId = ""
+    @StudioState("SpeechView.modelId") private var modelId = ""
 
     var body: some View {
         VStack(spacing: 0) {
@@ -676,6 +676,7 @@ struct SpeechView: View {
                     ?? (request.responseFormat == "pcm" ? "audio/pcm" : "audio/mpeg")
                 pendingAudio = (data, mime, request.model, request.input)
                 await savePendingAudio()
+                StudioNotifier.shared.finished(section: SidebarSection.speech.rawValue, title: "Speech ready", body: "Your audio was generated.")
             } catch is CancellationError {
                 // Leave prior state alone on cancellation.
             } catch {
@@ -858,6 +859,7 @@ struct SpeechView: View {
                                model: request.model, filename: url.lastPathComponent)
                 pendingTranscript = pending
                 await saveTranscript(pending)
+                StudioNotifier.shared.finished(section: SidebarSection.speech.rawValue, title: "Transcription ready", body: "Your transcript is done.")
             } catch is CancellationError {
                 // Leave prior transcript alone on cancellation.
             } catch {
@@ -930,27 +932,27 @@ struct SpeechView: View {
 // MARK: - Embeddings + rerank lab
 
 struct EmbeddingsView: View {
-    @StateObject private var service = EmbeddingService()
-    @State private var embeddingModels = ModalityModelChoices()
-    @State private var rerankModels = ModalityModelChoices()
+    @ObservedObject private var service = StudioServices.shared.embeddings
+    @StudioState("EmbeddingsView.embeddingModels") private var embeddingModels = ModalityModelChoices()
+    @StudioState("EmbeddingsView.rerankModels") private var rerankModels = ModalityModelChoices()
     @ObservedObject private var creations = SavedCreationsStore.shared
-    @State private var modelId = ""
-    @State private var rerankModelId = ""
-    @State private var inputText = ""
-    @State private var vectors: [(input: String, embedding: [Double])] = []
-    @State private var requestedDimensions = ""
-    @State private var inputType = ""
-    @State private var embedUsage: ImageGenUsage?
-    @State private var pendingEmbedding: (payload: Data, model: String, prompt: String)?
-    @State private var rerankQuery = ""
-    @State private var rerankDocs = ""
-    @State private var rerankResults: [RerankResponse.Item] = []
-    @State private var rankedDocuments: [String] = []
-    @State private var topN = ""
-    @State private var rerankUsage: RerankResponse.Usage?
-    @State private var rerankProvider: String?
-    @State private var isSaving = false
-    @State private var errorMessage: String?
+    @StudioState("EmbeddingsView.modelId") private var modelId = ""
+    @StudioState("EmbeddingsView.rerankModelId") private var rerankModelId = ""
+    @StudioState("EmbeddingsView.inputText") private var inputText = ""
+    @StudioState("EmbeddingsView.vectors") private var vectors: [(input: String, embedding: [Double])] = []
+    @StudioState("EmbeddingsView.requestedDimensions") private var requestedDimensions = ""
+    @StudioState("EmbeddingsView.inputType") private var inputType = ""
+    @StudioState("EmbeddingsView.embedUsage") private var embedUsage: ImageGenUsage? = nil
+    @StudioState("EmbeddingsView.pendingEmbedding") private var pendingEmbedding: (payload: Data, model: String, prompt: String)? = nil
+    @StudioState("EmbeddingsView.rerankQuery") private var rerankQuery = ""
+    @StudioState("EmbeddingsView.rerankDocs") private var rerankDocs = ""
+    @StudioState("EmbeddingsView.rerankResults") private var rerankResults: [RerankResponse.Item] = []
+    @StudioState("EmbeddingsView.rankedDocuments") private var rankedDocuments: [String] = []
+    @StudioState("EmbeddingsView.topN") private var topN = ""
+    @StudioState("EmbeddingsView.rerankUsage") private var rerankUsage: RerankResponse.Usage? = nil
+    @StudioState("EmbeddingsView.rerankProvider") private var rerankProvider: String? = nil
+    @StudioState("EmbeddingsView.isSaving") private var isSaving = false
+    @StudioState("EmbeddingsView.errorMessage") private var errorMessage: String? = nil
 
     private let accent = ORBTheme.accent
 
@@ -1115,6 +1117,7 @@ struct EmbeddingsView: View {
                 let pending = (payload: payload, model: model, prompt: inputs.joined(separator: " · "))
                 pendingEmbedding = pending
                 await saveEmbedding(pending)
+                StudioNotifier.shared.finished(section: SidebarSection.embeddings.rawValue, title: "Embeddings ready", body: "Your embeddings finished.")
             } catch is CancellationError { }
             catch { errorMessage = error.localizedDescription }
         }

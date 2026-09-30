@@ -765,7 +765,9 @@ final class VideoGenService: ObservableObject {
     /// Remote ID of the job the owned poll loop is currently running for, if
     /// any. Distinct from `activeJob`, which deliberately keeps the last known
     /// state after a local stop — a stopped job is not an in-flight run.
-    private var inFlightRemoteID: String?
+    private var inFlightRemoteID: String? { didSet { isPolling = inFlightRemoteID != nil } }
+    /// True while a job is being polled (drives the sidebar activity badge).
+    @Published private(set) var isPolling = false
 
     init(transport: MediaTransport = MediaTransport(), jobController: JobController? = nil) {
         self.transport = transport
