@@ -470,8 +470,7 @@ private struct MarkdownTableView: View {
     let accent: Color
 
     var body: some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            Grid(alignment: .leading, horizontalSpacing: 0, verticalSpacing: 0) {
+        Grid(alignment: .leading, horizontalSpacing: 0, verticalSpacing: 0) {
                 GridRow {
                     ForEach(Array(table.header.enumerated()), id: \.offset) { column, cell in
                         cellView(cell, column: column, isHeader: true)
@@ -485,9 +484,8 @@ private struct MarkdownTableView: View {
                             cellView(column < row.count ? row[column] : "", column: column, isHeader: false)
                         }
                     }
-                    .background(rowIndex.isMultiple(of: 2) ? Color.clear : Color.primary.opacity(0.03))
+                    .background(rowIndex.isMultiple(of: 2) ? Color.clear : Color.primary.opacity(0.035))
                 }
-            }
         }
         .clipShape(RoundedRectangle(cornerRadius: 8))
         .overlay { RoundedRectangle(cornerRadius: 8).stroke(Color.primary.opacity(0.10), lineWidth: 0.5) }
@@ -499,8 +497,9 @@ private struct MarkdownTableView: View {
             .font(.system(size: 12, weight: isHeader ? .semibold : .regular))
             .multilineTextAlignment(alignment == .trailing ? .trailing : alignment == .center ? .center : .leading)
             .frame(maxWidth: .infinity, alignment: alignment == .trailing ? .trailing : alignment == .center ? .center : .leading)
-            .padding(.horizontal, 10)
-            .padding(.vertical, 6)
+            .fixedSize(horizontal: false, vertical: true)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
             .textSelection(.enabled)
     }
 }

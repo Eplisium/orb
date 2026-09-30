@@ -117,7 +117,7 @@ struct ImagesView: View {
     @State private var totalCost = 0.0
     @FocusState private var inputFocused: Bool
 
-    private let accent = Color.pink
+    private let accent = ORBTheme.accent
 
     struct GeneratedImage: Identifiable {
         let id = UUID()
@@ -552,7 +552,7 @@ struct VideoView: View {
     // whenever the service's active job changes (poll ticks, terminal states).
     @State private var resumableRecords: [JobRecord] = []
 
-    private let accent = Color.indigo
+    private let accent = ORBTheme.accent
 
     struct VideoJobRecord: Identifiable {
         let id: String

@@ -2,99 +2,95 @@ import SwiftUI
 
 // MARK: - Model Row
 
+/// Compact price text: at least two decimals, trailing zeros trimmed
+/// beyond that ("$2.00", "$2.50", "$0.15", "$0.0375") so columns read evenly.
+enum PriceFormat {
+    static func perMillion(_ value: Double) -> String {
+        var text = String(format: "%.4f", value)
+        while text.hasSuffix("0"), let dot = text.firstIndex(of: "."),
+              text.distance(from: dot, to: text.endIndex) > 3 {
+            text.removeLast()
+        }
+        return "$" + text
+    }
+}
+
 struct ModelRowView: View {
     let model: ModelInfo
     @ObservedObject var viewModel: BrowserViewModel
+    @State private var isHovered = false
+
+    private static let badgeWidth: CGFloat = 76
+    private static let maxCapabilityIcons = 3
 
     var body: some View {
-        HStack(spacing: 10) {
-            // Provider badge
+        HStack(spacing: 12) {
+            // Fixed-width provider column keeps every name on one grid line.
             Text(model.provider.uppercased())
-                .font(.system(size: 9, weight: .bold, design: .monospaced))
-                .foregroundStyle(.white)
-                .padding(.horizontal, 5)
-                .padding(.vertical, 3)
-                .background(providerColor)
-                .clipShape(RoundedRectangle(cornerRadius: 4))
+                .font(.system(size: 10, weight: .semibold, design: .rounded))
+                .tracking(0.4)
+                .foregroundStyle(providerColor)
+                .lineLimit(1)
+                .minimumScaleFactor(0.8)
+                .frame(width: Self.badgeWidth, height: 22)
+                .background(providerColor.opacity(0.14), in: RoundedRectangle(cornerRadius: 6))
 
-            VStack(alignment: .leading, spacing: 2) {
+            VStack(alignment: .leading, spacing: 3) {
                 Text(model.modelSlug)
                     .font(.system(size: 13, weight: .medium))
                     .lineLimit(1)
 
-                HStack(spacing: 8) {
-                    Label(model.contextLengthFormatted, systemImage: "arrow.left.arrow.right")
-                    if let cost = model.promptCostPer1M, !model.isFree {
-                        Text("$\(cost, specifier: "%.3f")/1M")
-                            .foregroundStyle(.orange)
-                    }
+                HStack(spacing: 10) {
+                    Text(model.contextLengthFormatted + " ctx")
+                        .monospacedDigit()
                     if model.isFree {
                         Text("FREE")
-                            .font(.system(size: 10, weight: .bold))
+                            .font(.system(size: 11, weight: .bold))
                             .foregroundStyle(.green)
-                    }
-                    if model.supportsImages {
-                        Image(systemName: "photo")
-                            .foregroundStyle(.blue)
-                    }
-                    if model.supportsImageOutput {
-                        Image(systemName: "paintbrush")
-                            .foregroundStyle(.pink)
-                    }
-                    if model.supportsVideoInput {
-                        Image(systemName: "video")
-                            .foregroundStyle(.indigo)
-                    }
-                    if model.supportsAudioInput || model.supportsAudioOutput {
-                        Image(systemName: "waveform")
-                            .foregroundStyle(.mint)
-                    }
-                    if model.supportsFileInput {
-                        Image(systemName: "doc")
-                            .foregroundStyle(.cyan)
-                    }
-                    if model.supportsTools {
-                        Image(systemName: "wrench.and.screwdriver")
-                            .foregroundStyle(.orange)
-                    }
-                    if model.supportsReasoning {
-                        Image(systemName: "brain")
-                            .foregroundStyle(.purple)
+                    } else if let cost = model.promptCostPer1M {
+                        Text("\(PriceFormat.perMillion(cost)) / 1M")
+                            .monospacedDigit()
+                    } else {
+                        Text("Variable price")
                     }
                     if let elo = model.bestDesignElo {
                         Text("Elo \(Int(elo))")
-                            .foregroundStyle(.teal)
                     }
+                    capabilityIcons
                 }
-                .font(.system(size: 10))
+                .font(.system(size: 11))
                 .foregroundStyle(.secondary)
             }
 
-            Spacer()
+            Spacer(minLength: 8)
 
-            // Copy button
-            Button {
-                viewModel.copyModelId(model)
-            } label: {
-                Image(systemName: viewModel.copiedModelId == model.id ? "checkmark" : "doc.on.doc")
-                    .font(.system(size: 12))
-                    .foregroundStyle(viewModel.copiedModelId == model.id ? .green : .secondary)
-            }
-            .buttonStyle(.plain)
-            .help("Copy model ID")
+            HStack(spacing: 10) {
+                Button {
+                    viewModel.copyModelId(model)
+                } label: {
+                    Image(systemName: viewModel.copiedModelId == model.id ? "checkmark" : "doc.on.doc")
+                        .font(.system(size: 12))
+                        .foregroundStyle(viewModel.copiedModelId == model.id ? Color.green : Color.secondary)
+                }
+                .buttonStyle(.plain)
+                .help("Copy model ID")
+                .opacity(isHovered || viewModel.copiedModelId == model.id ? 1 : 0)
 
-            // Favorite button
-            Button {
-                viewModel.toggleFavorite(model)
-            } label: {
                 let isFav = viewModel.favoriteIds.contains(model.id)
-                Image(systemName: isFav ? "star.fill" : "star")
-                    .font(.system(size: 13))
-                    .foregroundStyle(isFav ? .yellow : Color.gray.opacity(0.4))
+                Button {
+                    viewModel.toggleFavorite(model)
+                } label: {
+                    Image(systemName: isFav ? "star.fill" : "star")
+                        .font(.system(size: 13))
+                        .foregroundStyle(isFav ? Color.yellow : Color.secondary.opacity(0.55))
+                }
+                .buttonStyle(.plain)
+                .help(isFav ? "Remove from favorites" : "Add to favorites")
             }
-            .buttonStyle(.plain)
         }
-        .padding(.vertical, 3)
+        .padding(.vertical, 5)
+        .contentShape(Rectangle())
+        .onHover { isHovered = $0 }
         .contextMenu {
             Button {
                 viewModel.copyModelId(model)
@@ -114,6 +110,40 @@ struct ModelRowView: View {
                 Label("Open on OpenRouter", systemImage: "safari")
             }
         }
+    }
+
+    /// Neutral glyphs, capped, with the full list in the tooltip — color is
+    /// reserved for the provider badge and price state.
+    @ViewBuilder
+    private var capabilityIcons: some View {
+        let caps = capabilities
+        if !caps.isEmpty {
+            HStack(spacing: 5) {
+                ForEach(Array(caps.prefix(Self.maxCapabilityIcons).enumerated()), id: \.offset) { _, cap in
+                    Image(systemName: cap.icon).font(.system(size: 10))
+                }
+                if caps.count > Self.maxCapabilityIcons {
+                    Text("+\(caps.count - Self.maxCapabilityIcons)")
+                        .font(.system(size: 10, weight: .semibold))
+                        .lineLimit(1)
+                }
+            }
+            .fixedSize()
+            .foregroundStyle(.secondary.opacity(0.75))
+            .help(caps.map(\.name).joined(separator: ", "))
+        }
+    }
+
+    private var capabilities: [(icon: String, name: String)] {
+        var list: [(String, String)] = []
+        if model.supportsReasoning { list.append(("brain", "Reasoning")) }
+        if model.supportsTools { list.append(("wrench.and.screwdriver", "Tools")) }
+        if model.supportsImages { list.append(("photo", "Image input")) }
+        if model.supportsImageOutput { list.append(("paintbrush", "Image output")) }
+        if model.supportsVideoInput { list.append(("video", "Video input")) }
+        if model.supportsAudioInput || model.supportsAudioOutput { list.append(("waveform", "Audio")) }
+        if model.supportsFileInput { list.append(("doc", "File input")) }
+        return list
     }
 
     var providerColor: Color {
@@ -184,8 +214,9 @@ struct ModelDetailView: View {
         HStack(alignment: .top) {
             VStack(alignment: .leading, spacing: 6) {
                 HStack(spacing: 6) {
-                    Text(model.provider)
-                        .font(.system(size: 12, weight: .bold, design: .monospaced))
+                    Text(model.provider.uppercased())
+                        .font(.system(size: 11, weight: .semibold, design: .rounded))
+                        .tracking(0.6)
                         .foregroundStyle(.secondary)
                     if model.isUnofficial {
                         Text("UNOFFICIAL")
@@ -208,7 +239,7 @@ struct ModelDetailView: View {
                     }
                 }
                 Text(model.modelSlug)
-                    .font(.system(size: 26, weight: .bold))
+                    .font(.system(size: 26, weight: .semibold))
                 Text(model.id)
                     .font(.system(size: 13, design: .monospaced))
                     .foregroundStyle(.secondary)
@@ -226,7 +257,8 @@ struct ModelDetailView: View {
                     .font(.system(size: 13, weight: .medium))
                     .padding(.horizontal, 14)
                     .padding(.vertical, 7)
-                    .background(.blue.opacity(0.15))
+                    .background(ORBTheme.accent.opacity(0.16))
+                    .foregroundStyle(ORBTheme.accentLink.opacity(1))
                     .clipShape(RoundedRectangle(cornerRadius: 8))
                 }
                 .buttonStyle(.plain)
@@ -297,14 +329,14 @@ struct ModelDetailView: View {
                 StatCard(title: "Price", value: "Free", icon: "gift", color: .green)
             } else {
                 if let p = model.promptCostPer1M {
-                    StatCard(title: "Input $/1M", value: String(format: "$%.3f", p), icon: "arrow.down.circle", color: .orange)
+                    StatCard(title: "Input $/1M", value: PriceFormat.perMillion(p), icon: "arrow.down.circle", color: .orange)
                 }
                 if let c = model.completionCostPer1M {
-                    StatCard(title: "Output $/1M", value: String(format: "$%.3f", c), icon: "arrow.up.circle", color: .red)
+                    StatCard(title: "Output $/1M", value: PriceFormat.perMillion(c), icon: "arrow.up.circle", color: .red)
                 }
             }
             if let cr = model.cacheReadCostPer1M {
-                StatCard(title: "Cached In $/1M", value: String(format: "$%.3f", cr), icon: "bolt", color: .yellow)
+                StatCard(title: "Cached In $/1M", value: PriceFormat.perMillion(cr), icon: "bolt", color: .yellow)
             }
 
             StatCard(title: "Added", value: model.createdFormatted, icon: "calendar", color: .teal)
@@ -521,8 +553,8 @@ struct ProviderRow: View {
 
             VStack(alignment: .trailing, spacing: 2) {
                 if let p = endpoint.promptCostPer1M, let c = endpoint.completionCostPer1M {
-                    Text("$\(p, specifier: "%.4f") in")
-                    Text("$\(c, specifier: "%.4f") out")
+                    Text("\(PriceFormat.perMillion(p)) in")
+                    Text("\(PriceFormat.perMillion(c)) out")
                 } else {
                     Text("—")
                 }
@@ -561,13 +593,14 @@ struct StatCard: View {
                     .foregroundStyle(.secondary)
             }
             Text(value)
-                .font(.system(size: 16, weight: .semibold))
+                .font(.system(size: 17, weight: .semibold))
+                .monospacedDigit()
                 .lineLimit(1)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(12)
-        .background(color.opacity(0.08))
-        .clipShape(RoundedRectangle(cornerRadius: 10))
+        .background(Color.primary.opacity(0.04), in: RoundedRectangle(cornerRadius: ORBMetrics.cardRadius))
+        .overlay { RoundedRectangle(cornerRadius: ORBMetrics.cardRadius).stroke(Color.primary.opacity(0.07), lineWidth: 0.5) }
     }
 }
 

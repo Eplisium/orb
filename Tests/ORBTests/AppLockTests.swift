@@ -85,3 +85,37 @@ struct AppLockTests {
         #expect(!lock.isUnlocked)
     }
 }
+
+@Suite("App lock idle policy")
+struct AppLockPolicyTests {
+    @Test("idle limit locks only at or past the limit; zero never locks")
+    func idleRule() {
+        #expect(!AppLockPolicy.shouldLock(idleSeconds: 899, limitMinutes: 15))
+        #expect(AppLockPolicy.shouldLock(idleSeconds: 900, limitMinutes: 15))
+        #expect(!AppLockPolicy.shouldLock(idleSeconds: 86_400, limitMinutes: 0))
+    }
+
+    @Test("stored value defaults to 15 and rejects unoffered values")
+    func storedValue() {
+        let d = UserDefaults(suiteName: "AppLockPolicy-\(UUID().uuidString)")!
+        #expect(AppLockPolicy.idleMinutes(in: d) == 15)
+        d.set(5, forKey: AppLockPolicy.idleMinutesKey)
+        #expect(AppLockPolicy.idleMinutes(in: d) == 5)
+        d.set(7, forKey: AppLockPolicy.idleMinutesKey)
+        #expect(AppLockPolicy.idleMinutes(in: d) == 15)
+        d.set(0, forKey: AppLockPolicy.idleMinutesKey)
+        #expect(AppLockPolicy.idleMinutes(in: d) == 0)
+    }
+}
+
+@Suite("Price formatting")
+struct PriceFormatTests {
+    @Test("prices keep two decimals, trim beyond, never show 2.500 vs 2.00 drift")
+    func format() {
+        #expect(PriceFormat.perMillion(2) == "$2.00")
+        #expect(PriceFormat.perMillion(2.5) == "$2.50")
+        #expect(PriceFormat.perMillion(0.15) == "$0.15")
+        #expect(PriceFormat.perMillion(0.0375) == "$0.0375")
+        #expect(PriceFormat.perMillion(0.95) == "$0.95")
+    }
+}

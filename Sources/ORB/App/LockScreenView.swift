@@ -32,14 +32,12 @@ struct LockScreenView: View {
                         .font(.system(size: 22, weight: .semibold))
                         .foregroundStyle(.white)
 
-                    VStack(spacing: 4) {
+                    VStack(spacing: 6) {
                         Text("Unlock with \(lock.biometricLabel) or your Mac password.")
-                            .foregroundStyle(.white.opacity(0.78))
-                        Text("Stays unlocked until you quit:")
-                            .foregroundStyle(.white.opacity(0.78))
-                        Text("anyone using this Mac has full access to your keys and sessions.")
-                            .font(.system(size: 13, weight: .semibold))
-                            .foregroundStyle(.white.opacity(0.92))
+                            .foregroundStyle(.white.opacity(0.85))
+                        Text("Your API keys and sessions stay protected. ORB locks again when your Mac sleeps or locks, or after a period of inactivity.")
+                            .font(.system(size: 12))
+                            .foregroundStyle(.white.opacity(0.6))
                     }
                     .font(.system(size: 13))
                     .multilineTextAlignment(.center)
@@ -86,7 +84,7 @@ struct LockScreenView: View {
                                 if lock.isUnlocked { onOpenSettings() }
                             }
                         } label: {
-                            Text("Change lock settings: Account → API Key → Security")
+                            Label("Lock settings", systemImage: "gearshape")
                                 .font(.system(size: 12, weight: .medium))
                                 .foregroundStyle(accent)
                                 .padding(.horizontal, 10)

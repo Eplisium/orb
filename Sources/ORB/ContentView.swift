@@ -218,6 +218,8 @@ enum SidebarSection: String, CaseIterable, Identifiable {
     case account = "Account"
 
     var id: String { rawValue }
+    /// Sidebar label — short enough never to truncate next to a count badge.
+    var title: String { self == .newThisWeek ? "New Models" : rawValue }
     var icon: String {
         switch self {
         case .allModels: return "square.grid.2x2"
@@ -231,7 +233,7 @@ enum SidebarSection: String, CaseIterable, Identifiable {
         case .speech: return "speaker.wave.2.fill"
         case .embeddings: return "chart.dots.scatter"
         case .testSuite: return "checkmark.seal.fill"
-        case .account: return "gearshape.fill"
+        case .account: return "person.crop.circle.fill"
         }
     }
 
@@ -255,7 +257,10 @@ struct ContentView: View {
     // view disappearing and does not prevent a simultaneous direct Chat run.
     @StateObject private var agentService = ChatService()
     @StateObject private var chatService = ChatService()
-    @State private var selectedSection: SidebarSection = .allModels
+    // `-orb.startSection Chat` (launch argument / defaults override) opens a
+    // given section directly; used for screenshot review. Default: All Models.
+    @State private var selectedSection: SidebarSection =
+        UserDefaults.standard.string(forKey: "orb.startSection").flatMap(SidebarSection.init(rawValue:)) ?? .allModels
     @State private var databaseFailure: DatabaseLaunchFailure?
     @EnvironmentObject private var focusManager: FocusManager
     // Application-owned dependencies (W07). Declared now so the injection
@@ -265,6 +270,8 @@ struct ContentView: View {
     @FocusState private var searchFocused: Bool
     @ObservedObject private var appLock = AppLock.shared
     @State private var startedPostUnlockWork = false
+    /// `-orb.reviewMode YES`: screenshot review — never touch legacy Keychain items.
+    private static let reviewMode = UserDefaults.standard.bool(forKey: "orb.reviewMode")
 
     var body: some View {
         Group {
@@ -310,9 +317,10 @@ struct ContentView: View {
         }
         .navigationSplitViewStyle(.balanced)
         .task {
+            AppLockMonitor.shared.start(lock: appLock)
             // With the lock disabled there is no onChange edge — set the
             // legacy-read gate from the initial state too.
-            KeychainGate.allowsLegacyReads = appLock.isUnlocked
+            KeychainGate.allowsLegacyReads = appLock.isUnlocked && !Self.reviewMode
             if let failure = DatabaseManager.lastLaunchFailure {
                 databaseFailure = failure
                 DatabaseManager.lastLaunchFailure = nil
@@ -323,7 +331,8 @@ struct ContentView: View {
         .onChange(of: appLock.isUnlocked) { _, unlocked in
             // Legacy keychain reads (the one prompt-capable operation) are
             // allowed only while unlocked — see KeychainGate.
-            KeychainGate.allowsLegacyReads = unlocked
+            KeychainGate.allowsLegacyReads = unlocked && !Self.reviewMode
+            if unlocked { AppLockMonitor.shared.noteActivity() }
             if unlocked {
                 Task { await startPostUnlockWorkIfNeeded() }
             }
@@ -357,7 +366,7 @@ struct ContentView: View {
     private func startPostUnlockWorkIfNeeded() async {
         guard appLock.isUnlocked, !startedPostUnlockWork else { return }
         startedPostUnlockWork = true
-        KeychainSecrets.migrateAllLegacy()
+        if !Self.reviewMode { KeychainSecrets.migrateAllLegacy() }
         await MCPRegistry.shared.startEnabledServers()
     }
 
@@ -374,7 +383,6 @@ struct ContentView: View {
                 sidebarRow(.agent)
                 sidebarRow(.chat)
                 sidebarRow(.testSuite)
-                sidebarRow(.account)
             }
             // Generate
             Section("Generate") {
@@ -384,9 +392,12 @@ struct ContentView: View {
                 sidebarRow(.speech)
                 sidebarRow(.embeddings)
             }
+            Section("Settings") {
+                sidebarRow(.account)
+            }
         }
         .listStyle(.sidebar)
-        .navigationSplitViewColumnWidth(min: 160, ideal: 180, max: 220)
+        .navigationSplitViewColumnWidth(min: 196, ideal: 208, max: 250)
         .onChange(of: selectedSection) { _, newValue in
             let effects = AppRouter.filterEffects(for: newValue)
             vm.showFavoritesOnly = effects.showFavoritesOnly
@@ -404,29 +415,32 @@ struct ContentView: View {
             vm.showFavoritesOnly = effects.showFavoritesOnly
             vm.showNewThisWeek = effects.showNewThisWeek
         } label: {
-            HStack(spacing: 8) {
+            HStack(spacing: 10) {
                 Image(systemName: section.icon)
-                    .font(.system(size: 12, weight: .medium))
-                    .frame(width: 16)
-                Text(section.rawValue)
-                Spacer()
+                    .font(.system(size: 13, weight: .medium))
+                    .frame(width: 18)
+                Text(section.title)
+                    .lineLimit(1)
+                Spacer(minLength: 4)
                 if count > 0 {
                     Text("\(count)")
-                        .font(.system(size: 11, design: .monospaced))
-                        .foregroundStyle(.secondary)
+                        .font(.system(size: 11, weight: .medium))
+                        .monospacedDigit()
+                        .foregroundStyle(isSelected ? Color.white.opacity(0.85) : Color.secondary)
                 }
             }
             .contentShape(Rectangle())
-            .padding(.vertical, 4)
-            .padding(.horizontal, 6)
+            .padding(.vertical, 5)
+            .padding(.horizontal, 8)
         }
         .buttonStyle(.plain)
         .foregroundStyle(isSelected ? Color.white : Color.primary)
-        .font(isSelected ? .body.weight(.semibold) : .body)
+        .font(.system(size: 13, weight: isSelected ? .semibold : .regular))
         .listRowBackground(
             RoundedRectangle(cornerRadius: 8)
                 .fill(isSelected ? ORBTheme.accent : Color.clear)
-                .padding(.horizontal, 6)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 1)
         )
         .listRowSeparator(.hidden)
         .tag(section)
@@ -470,12 +484,14 @@ struct ContentView: View {
                 .buttonStyle(.plain)
             }
         }
-        .padding(8)
-        .background(.quaternary.opacity(0.5))
-        .clipShape(RoundedRectangle(cornerRadius: 8))
-        .padding(.horizontal, 12)
-        .padding(.top, 10)
-        .padding(.bottom, 6)
+        .font(.system(size: 13))
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
+        .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 9))
+        .overlay { RoundedRectangle(cornerRadius: 9).stroke(Color.primary.opacity(0.08), lineWidth: 0.5) }
+        .padding(.horizontal, 14)
+        .padding(.top, 12)
+        .padding(.bottom, 8)
     }
 
     private var filterBar: some View {
@@ -550,8 +566,8 @@ struct ContentView: View {
                 .fixedSize()
             }
         }
-        .padding(.horizontal, 12)
-        .padding(.bottom, 6)
+        .padding(.horizontal, 14)
+        .padding(.bottom, 8)
     }
 
     private func filterChip(_ filter: ModalityFilter) -> some View {
@@ -560,9 +576,9 @@ struct ContentView: View {
             vm.modalityFilter = filter
         } label: {
             Text(filter.rawValue)
-                .font(.system(size: 11, weight: isSelected ? .semibold : .regular))
-                .padding(.horizontal, 9)
-                .padding(.vertical, 4)
+                .font(.system(size: 12, weight: isSelected ? .semibold : .regular))
+                .padding(.horizontal, 10)
+                .padding(.vertical, 5)
                 .background(isSelected ? ORBTheme.accent.opacity(0.18) : Color.primary.opacity(0.08))
                 .foregroundStyle(isSelected ? ORBTheme.accent : Color.primary)
                 .clipShape(Capsule())
@@ -574,7 +590,7 @@ struct ContentView: View {
     private var statusBar: some View {
         HStack {
             Text("\(vm.filteredModels.count) models")
-                .font(.caption)
+                .font(.system(size: 12, weight: .medium))
                 .foregroundStyle(.secondary)
             Spacer()
             if vm.api.isLoading {
@@ -590,12 +606,12 @@ struct ContentView: View {
             }
             if let ts = vm.api.lastRefresh {
                 Text("Updated \(ts.formatted(.relative(presentation: .named)))")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
+                    .font(.system(size: 11))
+                    .foregroundStyle(.tertiary)
             }
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 4)
+        .padding(.horizontal, 14)
+        .padding(.vertical, 6)
     }
 
     @ViewBuilder
@@ -669,14 +685,15 @@ struct ContentView: View {
                         .fill(ORBTheme.accent.opacity(0.08))
                         .frame(width: 84, height: 84)
                     Image(systemName: "cpu")
-                        .font(.system(size: 34))
-                        .foregroundStyle(ORBTheme.accent.opacity(0.75))
+                        .font(.system(size: 34, weight: .light))
+                        .foregroundStyle(ORBTheme.accent)
                 }
                 Text("Select a model")
                     .font(.title2.weight(.semibold))
-                Text("Browse hundreds of models across " +
-                     "\(vm.providerOptions.count - 1) providers on OpenRouter")
-                    .font(.callout)
+                Text(vm.api.models.isEmpty
+                     ? "Loading the OpenRouter catalog…"
+                     : "\(vm.api.models.count) models across \(max(vm.providerOptions.count - 1, 0)) providers")
+                    .font(.system(size: 13))
                     .foregroundStyle(.secondary)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)

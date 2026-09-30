@@ -17,6 +17,7 @@ struct SettingsView: View {
     @State private var management = ManagementKeyPanel()
     @State private var showRemoveManagementKeyConfirmation = false
     @ObservedObject private var appLock = AppLock.shared
+    @AppStorage(AppLockPolicy.idleMinutesKey) private var idleMinutes = AppLockPolicy.defaultIdleMinutes
 
     enum SettingsTab: String, CaseIterable {
         case apiKey = "API Key"
@@ -30,14 +31,26 @@ struct SettingsView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            // Tab bar
-            Picker("Section", selection: $selectedTab) {
-                ForEach(SettingsTab.allCases, id: \.self) { tab in
-                    Text(tab.rawValue).tag(tab)
+            // Tab bar — compact chips, left-aligned, same look as the model filters.
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 6) {
+                    ForEach(SettingsTab.allCases, id: \.self) { tab in
+                        let selected = selectedTab == tab
+                        Button { selectedTab = tab } label: {
+                            Text(tab.rawValue)
+                                .font(.system(size: 12, weight: selected ? .semibold : .regular))
+                                .padding(.horizontal, 12)
+                                .padding(.vertical, 6)
+                                .background(selected ? ORBTheme.accent.opacity(0.18) : Color.primary.opacity(0.06), in: Capsule())
+                                .foregroundStyle(selected ? ORBTheme.accentLink : Color.primary)
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityAddTraits(selected ? .isSelected : [])
+                    }
                 }
+                .padding(.horizontal, 24)
+                .padding(.vertical, 14)
             }
-            .pickerStyle(.segmented)
-            .padding(16)
 
             Divider()
 
@@ -61,7 +74,9 @@ struct SettingsView: View {
                     case .advanced: NetworkTimeoutsView(accent: .accentColor)
                     }
                 }
-                .padding(20)
+                .padding(24)
+                .frame(maxWidth: 760, alignment: .leading)
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
         }
         .frame(minWidth: 500, minHeight: 400)
@@ -113,7 +128,7 @@ struct SettingsView: View {
             Label("Security", systemImage: "lock.fill")
                 .font(.title3.weight(.semibold))
 
-            Text("When enabled, ORB asks for \(appLock.biometricLabel) or your Mac password at launch — one \"allow all access\" gesture instead of repeated Keychain dialogs.")
+            Text("ORB asks for \(appLock.biometricLabel) or your Mac password at launch and locks again when your Mac sleeps or locks. Keys are stored in the Keychain for this Mac only, readable by ORB alone — no Keychain password prompts.")
                 .font(.callout)
                 .foregroundStyle(.secondary)
 
@@ -123,18 +138,30 @@ struct SettingsView: View {
             ))
             .toggleStyle(.switch)
 
+            Picker("Auto-lock when idle", selection: $idleMinutes) {
+                ForEach(AppLockPolicy.idleChoices, id: \.self) { m in
+                    Text(AppLockPolicy.label(forMinutes: m)).tag(m)
+                }
+            }
+            .frame(maxWidth: 300)
+            .disabled(!appLock.isEnabled)
+
             if pendingLegacyCount > 0 {
-                Button("Move \(pendingLegacyCount) stored key\(pendingLegacyCount == 1 ? "" : "s") to prompt-free storage") {
-                    KeychainSecrets.migrateAllLegacy()
+                Button("Move \(pendingLegacyCount) older key\(pendingLegacyCount == 1 ? "" : "s") to secure storage") {
+                    KeychainSecrets.migrateAllLegacy(force: true)
                 }
                 .buttonStyle(.bordered)
                 .font(.callout)
             }
 
-            Button("Lock ORB Now") {
+            Button {
                 appLock.lock()
+            } label: {
+                Label("Lock ORB Now", systemImage: "lock")
             }
+            .buttonStyle(.bordered)
             .disabled(!appLock.isEnabled)
+            .help(appLock.isEnabled ? "Lock immediately" : "Turn on \"Require unlock at launch\" to use the lock")
         }
     }
 
@@ -147,7 +174,7 @@ struct SettingsView: View {
     private var apiKeySection: some View {
         VStack(alignment: .leading, spacing: 16) {
             Label("API Key", systemImage: "key.fill")
-                .font(.title2.weight(.semibold))
+                .font(.system(size: 17, weight: .semibold))
 
             Text("Your OpenRouter API key is stored securely in the macOS Keychain. It's used for authenticated features like checking credits and sending chat messages.")
                 .font(.callout)
@@ -157,9 +184,8 @@ struct SettingsView: View {
 
             // Current key status
             HStack {
-                Circle()
-                    .fill(KeychainManager.hasAPIKey ? Color.green : Color.red)
-                    .frame(width: 10, height: 10)
+                Image(systemName: KeychainManager.hasAPIKey ? "checkmark.circle.fill" : "exclamationmark.circle.fill")
+                    .foregroundStyle(KeychainManager.hasAPIKey ? Color.green : Color.red)
                 Text(KeychainManager.hasAPIKey ? "API key configured" : "No API key set")
                     .font(.subheadline.weight(.medium))
 
@@ -172,8 +198,8 @@ struct SettingsView: View {
                 }
             }
             .padding(12)
-            .background(.quaternary.opacity(0.3))
-            .clipShape(RoundedRectangle(cornerRadius: 8))
+            .background(Color.primary.opacity(0.04), in: RoundedRectangle(cornerRadius: 10))
+            .overlay { RoundedRectangle(cornerRadius: 10).stroke(Color.primary.opacity(0.07), lineWidth: 0.5) }
 
             // Key input
             VStack(alignment: .leading, spacing: 8) {
@@ -229,10 +255,10 @@ struct SettingsView: View {
                     Spacer()
 
                     if KeychainManager.hasAPIKey {
-                        Button("Remove Key") {
+                        Button("Remove Key", role: .destructive) {
                             showRemoveKeyConfirmation = true
                         }
-                        .foregroundStyle(.red)
+                        .buttonStyle(.bordered)
 
                         if showKeyDeleted {
                             Label("Removed", systemImage: "trash.fill")
@@ -265,7 +291,7 @@ struct SettingsView: View {
     private var managementKeySection: some View {
         VStack(alignment: .leading, spacing: 16) {
             Label("Management Key", systemImage: "lock.shield")
-                .font(.title2.weight(.semibold))
+                .font(.system(size: 17, weight: .semibold))
 
             Text(ManagementKeyPanel.explanation)
                 .font(.callout)
@@ -273,9 +299,8 @@ struct SettingsView: View {
 
             // Current configured state, read from the service.
             HStack {
-                Circle()
-                    .fill(account.hasManagementKey ? Color.green : Color.orange)
-                    .frame(width: 10, height: 10)
+                Image(systemName: account.hasManagementKey ? "checkmark.circle.fill" : "minus.circle")
+                    .foregroundStyle(account.hasManagementKey ? Color.green : Color.orange)
                 Text(account.hasManagementKey
                     ? "Management key configured"
                     : "No management key set")
@@ -283,8 +308,8 @@ struct SettingsView: View {
                 Spacer()
             }
             .padding(12)
-            .background(.quaternary.opacity(0.3))
-            .clipShape(RoundedRectangle(cornerRadius: 8))
+            .background(Color.primary.opacity(0.04), in: RoundedRectangle(cornerRadius: 10))
+            .overlay { RoundedRectangle(cornerRadius: 10).stroke(Color.primary.opacity(0.07), lineWidth: 0.5) }
 
             VStack(alignment: .leading, spacing: 8) {
                 Text(account.hasManagementKey ? "Replace Management Key" : "Enter Management Key")
@@ -345,7 +370,7 @@ struct SettingsView: View {
         VStack(alignment: .leading, spacing: 16) {
             HStack {
                 Label("Account Credits", systemImage: "dollarsign.circle.fill")
-                    .font(.title2.weight(.semibold))
+                    .font(.system(size: 17, weight: .semibold))
                 Spacer()
                 if account.isLoadingCredits {
                     ProgressView().scaleEffect(0.7)
@@ -411,7 +436,7 @@ struct SettingsView: View {
         VStack(alignment: .leading, spacing: 16) {
             HStack {
                 Label("Usage Activity", systemImage: "chart.bar.fill")
-                    .font(.title2.weight(.semibold))
+                    .font(.system(size: 17, weight: .semibold))
                 Spacer()
                 if account.isLoadingActivity {
                     ProgressView().scaleEffect(0.7)
@@ -524,7 +549,7 @@ struct SettingsView: View {
         VStack(alignment: .leading, spacing: 16) {
             HStack {
                 Label("Current Key", systemImage: "key.fill")
-                    .font(.title2.weight(.semibold))
+                    .font(.system(size: 17, weight: .semibold))
                 Spacer()
                 Button {
                     Task { await directory.fetchKeyInfo() }
@@ -596,7 +621,7 @@ struct SettingsView: View {
         VStack(alignment: .leading, spacing: 16) {
             HStack {
                 Label("Providers", systemImage: "building.2.fill")
-                    .font(.title2.weight(.semibold))
+                    .font(.system(size: 17, weight: .semibold))
                 Spacer()
                 Button {
                     Task { await directory.fetchProviders() }

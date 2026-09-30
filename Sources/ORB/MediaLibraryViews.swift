@@ -103,7 +103,7 @@ struct FilesView: View {
     /// destructive call is ever issued.
     @State private var pendingDelete: WorkspaceFile?
 
-    private let accent = Color.teal
+    private let accent = ORBTheme.accent
 
     var body: some View {
         VStack(spacing: 0) {
@@ -531,7 +531,7 @@ struct SpeechView: View {
 
     enum Mode: String, CaseIterable { case tts = "Text → Speech", stt = "Speech → Text" }
 
-    private let accent = Color.orange
+    private let accent = ORBTheme.accent
     @State private var modelId = ""
 
     var body: some View {
@@ -952,7 +952,7 @@ struct EmbeddingsView: View {
     @State private var isSaving = false
     @State private var errorMessage: String?
 
-    private let accent = Color.purple
+    private let accent = ORBTheme.accent
 
     var body: some View {
         ScrollView {

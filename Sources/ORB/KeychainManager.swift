@@ -38,8 +38,8 @@ enum KeychainManager {
     /// Masked version of the key for display (e.g. "sk-or-v1-abc...xyz").
     static var maskedKey: String? {
         guard let key = getAPIKey(), key.count > 12 else { return nil }
-        let prefix = key.prefix(12)
-        let suffix = key.suffix(4)
-        return "\(prefix)...\(suffix)"
+        // Reveal only the well-known prefix and last 4 characters.
+        let prefix = key.hasPrefix("sk-or-v1-") ? "sk-or-v1-" : String(key.prefix(4))
+        return "\(prefix)••••••••\(key.suffix(4))"
     }
 }

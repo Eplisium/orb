@@ -5,11 +5,12 @@ import SwiftUI
 
 enum PlaygroundTheme {
     // One purple for the whole app: the restrained ORB accent from the
-    // shared theme. Feature accents stay distinct (chat blue, test coral).
+    // shared theme; every feature uses it. Red/green/orange stay reserved for
+    // status (failed / passed / warning), never for selection or branding.
     static let accent = ORBTheme.accent
     static let agentAccent = ORBTheme.accent
-    static let chatAccent = Color(red: 0.30, green: 0.58, blue: 0.94)
-    static let testAccent = Color(red: 0.94, green: 0.42, blue: 0.50)
+    static let chatAccent = ORBTheme.accent
+    static let testAccent = ORBTheme.accent
 }
 
 // MARK: - Shared helpers

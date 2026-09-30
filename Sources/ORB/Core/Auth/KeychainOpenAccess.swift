@@ -17,21 +17,26 @@ import Security
 // user's login session (FileVault) and ORB's own Touch ID / password unlock.
 
 enum KeychainOpenAccess {
+    /// Access object for a NEW item: exactly one trusted application — this
+    /// running ORB, matched by its code-signing designated requirement
+    /// (`identifier … and certificate leaf = H"…"`). Because rebuilds are
+    /// signed with the same stable certificate, the requirement keeps
+    /// matching and reads never prompt; any *other* process (a script, a
+    /// different app) is not trusted and macOS asks before releasing the
+    /// secret. Every ACL entry is stripped of prompt selectors so ORB itself
+    /// is never interrupted, and the "change permissions" entries are limited
+    /// to the same trusted list.
+    ///
+    /// Falls back to `nil` (system default ACL, which also trusts only the
+    /// creating app) if the trusted-application object can't be built —
+    /// never to an allow-everything ACL.
     static func makeAccess(label: String = "ORB credentials") -> SecAccess? {
+        var trusted: SecTrustedApplication?
+        guard SecTrustedApplicationCreateFromPath(nil, &trusted) == errSecSuccess,
+              let trusted else { return nil }
         var access: SecAccess?
-        // Empty trusted list: create the access object with no default ACL,
-        // then add exactly one explicit "allow all applications" entry below.
-        guard SecAccessCreate(label as CFString, [] as CFArray, &access) == errSecSuccess,
+        guard SecAccessCreate(label as CFString, [trusted] as CFArray, &access) == errSecSuccess,
               let access else { return nil }
-        var acl: SecACL?
-        let status = SecACLCreateWithSimpleContents(
-            access,
-            nil, // NULL trusted-application list = trust every application
-            "Allow ORB to use this item" as CFString,
-            SecKeychainPromptSelector(rawValue: 0), // never prompt
-            &acl
-        )
-        guard status == errSecSuccess else { return nil }
         return access
     }
 }
@@ -54,43 +59,71 @@ enum KeychainGate {
 //    permissions of the 'ORB credentials' item" dialog, and that dialog can
 //    never be satisfied without the login keychain password — an old
 //    migration looped on exactly this.
-// 2. Legacy items are READ at most once each: the first read may show the
-//    "use your confidential information" dialog (click Allow once), the
-//    value is mirrored into the v2 service with an open-access ACL, and the
-//    legacy item goes permanently dormant — never queried again.
+// 2. Dormant (v1/v2) items are READ at most once each: the first read may show
+//    one system dialog (click "Always Allow"), the value is mirrored into the
+//    v3 service (ORB-only ACL, this-device-only), and the old item goes
+//    permanently dormant.
 
 enum KeychainSecrets {
-    static let legacyService = "com.eplisium.orb"
+    /// Current store: ORB-only ACL (see `KeychainOpenAccess`).
+    static let currentService = "com.eplisium.orb.v3"
+    /// Dormant sources, newest first. v2 used an allow-all ACL that was
+    /// unreliable on some Macs (re-prompting); v1 is the original store.
     static let v2Service = "com.eplisium.orb.v2"
+    static let legacyService = "com.eplisium.orb"
+    static let dormantServices = [v2Service, legacyService]
 
-    static func read(_ account: String) -> String? {
-        if let (data, present) = readItem(service: v2Service, account: account) {
-            // Present-but-empty is a deletion tombstone; the dormant legacy
-            // item must never resurrect a deleted secret.
-            return (present && !data.isEmpty) ? String(data: data, encoding: .utf8) : nil
-        }
-        guard KeychainGate.allowsLegacyReads,
-              let (data, present) = readItem(service: legacyService, account: account),
-              present, !data.isEmpty,
-              let value = String(data: data, encoding: .utf8) else { return nil }
-        save(account, value) // mirror once — the legacy item is never touched again
-        return value
+    /// Accounts whose dormant copies were already attempted this install
+    /// (whether allowed or denied). Prevents a denied prompt from returning
+    /// on every launch; the Settings button clears it for a manual retry.
+    private static let attemptedKey = "orb.keychain.migrationAttempted"
+    private static var attempted: Set<String> {
+        get { Set(UserDefaults.standard.stringArray(forKey: attemptedKey) ?? []) }
+        set { UserDefaults.standard.set(Array(newValue).sorted(), forKey: attemptedKey) }
     }
 
-    /// Save or replace. Returns nil on success. Writes only to v2, so saving
-    /// is prompt-free regardless of what legacy items exist.
+    static func read(_ account: String) -> String? {
+        if let (data, present) = readItem(service: currentService, account: account) {
+            // Present-but-empty is a deletion tombstone; dormant copies must
+            // never resurrect a deleted secret.
+            return (present && !data.isEmpty) ? String(data: data, encoding: .utf8) : nil
+        }
+        guard KeychainGate.allowsLegacyReads, !attempted.contains(account) else { return nil }
+        return mirrorFromDormant(account)
+    }
+
+    /// Reads each dormant copy at most once (the only operation that can
+    /// raise a system dialog — "Always Allow" once), then writes the value
+    /// into v3. Dormant items are never modified or deleted.
+    private static func mirrorFromDormant(_ account: String) -> String? {
+        var seen = attempted
+        seen.insert(account)
+        attempted = seen // record BEFORE the read: a crash/deny can't loop
+        for service in dormantServices {
+            guard let (data, present) = readItem(service: service, account: account),
+                  present, !data.isEmpty,
+                  let value = String(data: data, encoding: .utf8) else { continue }
+            if save(account, value) == nil { return value }
+        }
+        return nil
+    }
+
+    /// Save or replace in v3. Never touches dormant items.
     static func save(_ account: String, _ value: String) -> String? {
         guard let data = value.data(using: .utf8) else { return "Could not encode key as UTF-8." }
-        _ = deleteItem(service: v2Service, account: account) // ours — silent
+        _ = deleteItem(service: currentService, account: account) // ours — silent
         var add: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: v2Service,
+            kSecAttrService as String: currentService,
             kSecAttrAccount as String: account,
             kSecValueData as String: data,
-            kSecAttrAccessible as String: kSecAttrAccessibleWhenUnlocked,
+            // Never leaves this Mac (no iCloud Keychain sync, no backups
+            // restored to another device) and only readable while unlocked.
+            kSecAttrAccessible as String: kSecAttrAccessibleWhenUnlockedThisDeviceOnly,
+            kSecAttrSynchronizable as String: false,
         ]
-        // Open access is stamped on ADD only — touching an existing item's
-        // ACL is what raises the "change access permissions" dialog.
+        // ACL is stamped on ADD only — touching an existing item's ACL is
+        // what raises the "change access permissions" dialog.
         if let access = KeychainOpenAccess.makeAccess() {
             add[kSecAttrAccess as String] = access
         }
@@ -98,66 +131,72 @@ enum KeychainSecrets {
         return status == errSecSuccess ? nil : "Keychain error \(status)."
     }
 
-    /// Delete and leave a tombstone. Legacy items are left in place — deleting
-    /// them is an ACL mutation and would prompt.
+    /// Delete and leave a tombstone so a dormant copy can't resurrect it.
     static func delete(_ account: String) {
-        _ = deleteItem(service: v2Service, account: account)
+        _ = deleteItem(service: currentService, account: account)
         let tombstone: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: v2Service,
+            kSecAttrService as String: currentService,
             kSecAttrAccount as String: account,
             kSecValueData as String: Data(),
         ]
         SecItemAdd(tombstone as CFDictionary, nil)
     }
 
-    /// Prompt-free existence check (metadata-only against legacy items).
+    /// Prompt-free existence check (metadata-only; never reads secret data).
     static func exists(_ account: String) -> Bool {
-        if let (data, present) = readItem(service: v2Service, account: account) {
+        if let (data, present) = readItem(service: currentService, account: account) {
             return present && !data.isEmpty
         }
+        return dormantServices.contains { dormantExists(service: $0, account: account) }
+    }
+
+    private static func dormantExists(service: String, account: String) -> Bool {
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: legacyService,
+            kSecAttrService as String: service,
             kSecAttrAccount as String: account,
         ]
         return SecItemCopyMatching(query as CFDictionary, nil) == errSecSuccess
     }
 
-    // MARK: One-shot legacy migration
+    // MARK: One-shot migration
 
-    /// Account names of legacy items. Metadata-only — never prompts.
+    /// Account names in dormant stores. Metadata-only — never prompts.
     static func legacyAccounts() -> [String] {
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: legacyService,
-            kSecMatchLimit as String: kSecMatchLimitAll,
-            kSecReturnAttributes as String: true,
-        ]
-        var result: AnyObject?
-        guard SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess,
-              let items = result as? [[String: Any]] else { return [] }
-        return items.compactMap { $0[kSecAttrAccount as String] as? String }
-    }
-
-    /// Accounts with a legacy item but no v2 copy yet (tombstones count as
-    /// migrated — a deleted secret must stay deleted). Prompt-free.
-    static func pendingLegacyAccounts() -> [String] {
-        legacyAccounts().filter { readItem(service: v2Service, account: $0) == nil }
-    }
-
-    /// Batch migration: reads every unmigrated legacy item — the one
-    /// operation that can prompt, exactly once per item ("Allow" is enough;
-    /// the value is mirrored immediately) — and returns the migrated
-    /// accounts. Run while unlocked.
-    @discardableResult
-    static func migrateAllLegacy() -> [String] {
-        guard KeychainGate.allowsLegacyReads else { return [] }
-        var migrated: [String] = []
-        for account in pendingLegacyAccounts() {
-            if read(account) != nil {
-                migrated.append(account)
+        var names = Set<String>()
+        for service in dormantServices {
+            let query: [String: Any] = [
+                kSecClass as String: kSecClassGenericPassword,
+                kSecAttrService as String: service,
+                kSecMatchLimit as String: kSecMatchLimitAll,
+                kSecReturnAttributes as String: true,
+            ]
+            var result: AnyObject?
+            guard SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess,
+                  let items = result as? [[String: Any]] else { continue }
+            for item in items {
+                if let a = item[kSecAttrAccount as String] as? String { names.insert(a) }
             }
+        }
+        return names.sorted()
+    }
+
+    /// Accounts with a dormant copy but no v3 item yet (tombstones count as
+    /// migrated). Prompt-free.
+    static func pendingLegacyAccounts() -> [String] {
+        legacyAccounts().filter { readItem(service: currentService, account: $0) == nil }
+    }
+
+    /// Batch migration. `force` (the Settings button) ignores the
+    /// already-attempted memory so a previously denied prompt can be retried.
+    @discardableResult
+    static func migrateAllLegacy(force: Bool = false) -> [String] {
+        guard KeychainGate.allowsLegacyReads else { return [] }
+        if force { attempted = [] }
+        var migrated: [String] = []
+        for account in pendingLegacyAccounts() where force || !attempted.contains(account) {
+            if mirrorFromDormant(account) != nil { migrated.append(account) }
         }
         return migrated
     }
