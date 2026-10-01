@@ -30,12 +30,45 @@ struct ORBStatusPresentation: Equatable, Sendable {
 }
 
 enum ORBTheme {
-    // MARK: Accent — the restrained ORB purple, plus a deeper text/link
-    // variant with enough contrast for body-size type. The supervised visual
-    // session may move these into an asset catalog for dynamic appearance.
+    // MARK: Accent — user-selected (`AccentChoice`, key `orb.accent`),
+    // default ORB purple. Resolved when drawn, so existing call sites
+    // follow the choice whenever their view re-renders.
 
-    static let accent = Color(red: 0.45, green: 0.36, blue: 0.82)
-    static let accentLink = Color(red: 0.36, green: 0.28, blue: 0.72)
+    static var accent: Color {
+        Color(nsColor: NSColor(name: nil) { appearance in
+            let pair = AccentChoice.current().palette
+            return (appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua ? pair.dark : pair.light).nsColor
+        })
+    }
+
+    /// Deeper variant for accent-coloured text/links.
+    static var accentLink: Color {
+        Color(nsColor: NSColor(name: nil) { appearance in
+            let pair = AccentChoice.current().linkPalette
+            return (appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua ? pair.dark : pair.light).nsColor
+        })
+    }
+
+    /// Tinted background for accent-coloured chips and selections.
+    static var accentSubtle: Color { accent.opacity(ORBPalette.subtleFillAlpha) }
+    /// Foreground for content on a solid accent fill.
+    static let onAccent = ORBPalette.onAccent.color
+
+    // MARK: Semantic colour tokens (light/dark pairs in `ORBPalette`)
+
+    static let surface = ORBPalette.surface.color
+    static let surfaceRaised = ORBPalette.surfaceRaised.color
+    static let surfaceSunken = ORBPalette.surfaceSunken.color
+    static let textPrimary = ORBPalette.textPrimary.color
+    static let textSecondary = ORBPalette.textSecondary.color
+    static let textTertiary = ORBPalette.textTertiary.color
+    static let success = ORBPalette.success.color
+    static let warning = ORBPalette.warning.color
+    static let danger = ORBPalette.danger.color
+    static let info = ORBPalette.info.color
+    /// Hairline borders; adapts via the primary label colour.
+    static let stroke = Color.primary.opacity(0.10)
+    static let strokeStrong = Color.primary.opacity(0.18)
 
     // MARK: Status presentation
 
@@ -76,7 +109,7 @@ struct ORBStatusBadge: View {
             Image(systemName: presentation.symbolName)
             Text(presentation.label)
         }
-        .font(.system(size: ORBMetrics.captionLargeSize))
+        .font(ORBFont.footnote)
         .foregroundStyle(presentation.color)
         .accessibilityElement(children: .combine)
     }

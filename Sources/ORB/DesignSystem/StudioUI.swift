@@ -12,19 +12,16 @@ struct StudioHeader: View {
     let accent: Color
 
     var body: some View {
-        HStack(spacing: 12) {
+        HStack(spacing: ORBMetrics.spacingSM) {
             Image(systemName: icon)
-                .font(.system(size: 15, weight: .semibold))
-                .foregroundStyle(.white)
+                .font(ORBFont.body.weight(.semibold))
+                .foregroundStyle(ORBTheme.onAccent)
                 .frame(width: 36, height: 36)
-                .background(
-                    LinearGradient(colors: [accent, accent.opacity(0.7)],
-                                   startPoint: .topLeading, endPoint: .bottomTrailing),
-                    in: RoundedRectangle(cornerRadius: 10)
-                )
+                .background(accent, in: RoundedRectangle(cornerRadius: ORBMetrics.radiusMD))
+                .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: 2) {
-                Text(title).font(.system(size: 16, weight: .semibold))
-                Text(subtitle).font(.system(size: 11)).foregroundStyle(.secondary)
+                Text(title).font(ORBFont.title3.weight(.semibold)).accessibilityAddTraits(.isHeader)
+                Text(subtitle).font(ORBFont.caption).foregroundStyle(ORBTheme.textSecondary)
             }
             Spacer(minLength: 0)
         }
@@ -37,9 +34,9 @@ struct StudioLabel: View {
 
     var body: some View {
         Text(text.uppercased())
-            .font(.system(size: 10, weight: .semibold))
+            .font(ORBFont.caption.weight(.semibold))
             .tracking(0.6)
-            .foregroundStyle(.secondary)
+            .foregroundStyle(ORBTheme.textSecondary)
     }
 }
 
@@ -55,7 +52,7 @@ struct StudioField<Content: View>: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 5) {
-            Text(title).font(.system(size: 11, weight: .medium)).foregroundStyle(.secondary)
+            Text(title).font(ORBFont.caption.weight(.medium)).foregroundStyle(ORBTheme.textSecondary)
             content().frame(maxWidth: .infinity, alignment: .leading)
         }
     }
@@ -66,9 +63,9 @@ struct StudioGrid<Content: View>: View {
     @ViewBuilder var content: () -> Content
 
     var body: some View {
-        LazyVGrid(columns: [GridItem(.flexible(), spacing: 12, alignment: .top),
-                            GridItem(.flexible(), spacing: 12, alignment: .top)],
-                  alignment: .leading, spacing: 12) {
+        LazyVGrid(columns: [GridItem(.flexible(), spacing: ORBMetrics.spacingSM, alignment: .top),
+                            GridItem(.flexible(), spacing: ORBMetrics.spacingSM, alignment: .top)],
+                  alignment: .leading, spacing: ORBMetrics.spacingSM) {
             content()
         }
     }
@@ -80,14 +77,7 @@ struct StudioCard<Content: View>: View {
     @ViewBuilder var content: () -> Content
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            if let title { StudioLabel(title) }
-            content()
-        }
-        .padding(14)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Color.primary.opacity(0.035), in: RoundedRectangle(cornerRadius: 12))
-        .overlay { RoundedRectangle(cornerRadius: 12).stroke(Color.primary.opacity(0.07), lineWidth: 0.5) }
+        ORBCard(title: title, content: content)
     }
 }
 
@@ -100,21 +90,21 @@ struct StudioPromptEditor: View {
     var body: some View {
         ZStack(alignment: .topLeading) {
             TextEditor(text: $text)
-                .font(.system(size: 13))
+                .font(ORBFont.body)
                 .scrollContentBackground(.hidden)
                 .padding(6)
                 .accessibilityLabel(accessibilityLabel)
             if text.isEmpty {
                 Text(placeholder)
-                    .font(.system(size: 13))
-                    .foregroundStyle(.tertiary)
+                    .font(ORBFont.body)
+                    .foregroundStyle(ORBTheme.textTertiary)
                     .padding(.horizontal, 11).padding(.vertical, 14)
                     .allowsHitTesting(false)
             }
         }
         .frame(height: height)
-        .background(Color.primary.opacity(0.04), in: RoundedRectangle(cornerRadius: 10))
-        .overlay { RoundedRectangle(cornerRadius: 10).stroke(Color.primary.opacity(0.10), lineWidth: 0.5) }
+        .background(ORBTheme.surfaceSunken, in: RoundedRectangle(cornerRadius: ORBMetrics.radiusMD))
+        .overlay { RoundedRectangle(cornerRadius: ORBMetrics.radiusMD).stroke(ORBTheme.stroke, lineWidth: 0.5) }
     }
 }
 
@@ -128,19 +118,16 @@ struct StudioPrimaryButton: View {
 
     var body: some View {
         Button(action: action) {
-            HStack(spacing: 8) {
-                if isBusy { ProgressView().controlSize(.small).tint(.white) }
-                Text(isBusy ? (busyTitle ?? title) : title).fontWeight(.semibold)
+            HStack(spacing: ORBMetrics.spacingXS) {
+                if isBusy { ProgressView().controlSize(.small) }
+                Text(isBusy ? (busyTitle ?? title) : title).font(ORBFont.body.weight(.semibold))
             }
             .frame(maxWidth: .infinity)
             .padding(.vertical, 10)
-            .foregroundStyle(.white)
+            .foregroundStyle(isEnabled ? ORBTheme.onAccent : ORBTheme.textSecondary)
             .background(
-                isEnabled
-                    ? AnyShapeStyle(LinearGradient(colors: [accent, accent.opacity(0.8)],
-                                                   startPoint: .top, endPoint: .bottom))
-                    : AnyShapeStyle(Color.gray.opacity(0.4)),
-                in: RoundedRectangle(cornerRadius: 10)
+                isEnabled ? AnyShapeStyle(accent) : AnyShapeStyle(Color.gray.opacity(0.25)),
+                in: RoundedRectangle(cornerRadius: ORBMetrics.radiusMD)
             )
             .shadow(color: isEnabled ? accent.opacity(0.25) : .clear, radius: 6, y: 2)
         }
@@ -153,7 +140,8 @@ struct StudioPrimaryButton: View {
 struct StudioChipButtonStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
-            .font(.system(size: 11, weight: .medium))
+            .font(ORBFont.caption.weight(.medium))
+            .foregroundStyle(ORBTheme.textPrimary)
             .padding(.horizontal, 10).padding(.vertical, 5)
             .background(Color.primary.opacity(configuration.isPressed ? 0.12 : 0.06), in: Capsule())
     }
@@ -167,15 +155,16 @@ struct StudioEmptyState: View {
     let accent: Color
 
     var body: some View {
-        VStack(spacing: 14) {
+        VStack(spacing: ORBMetrics.spacingSM) {
             Image(systemName: icon)
-                .font(.system(size: 30, weight: .light))
+                .font(.system(.largeTitle, weight: .light))
                 .foregroundStyle(accent)
                 .frame(width: 84, height: 84)
-                .background(accent.opacity(0.10), in: Circle())
-            Text(title).font(.system(size: 20, weight: .semibold, design: .rounded))
+                .background(accent.opacity(ORBPalette.subtleFillAlpha), in: Circle())
+                .accessibilityHidden(true)
+            Text(title).font(ORBFont.title2.weight(.semibold)).accessibilityAddTraits(.isHeader)
             Text(message)
-                .font(.system(size: 13)).foregroundStyle(.secondary)
+                .font(ORBFont.body).foregroundStyle(ORBTheme.textSecondary)
                 .multilineTextAlignment(.center).frame(maxWidth: 420)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -188,12 +177,14 @@ struct StudioNotice: View {
     var tone: Tone = .info
 
     var body: some View {
-        HStack(alignment: .top, spacing: 6) {
+        let tint = tone == .warning ? ORBTheme.warning : ORBTheme.textSecondary
+        HStack(alignment: .top, spacing: ORBMetrics.spacingXXS + 2) {
             Image(systemName: tone == .warning ? "exclamationmark.triangle.fill" : "info.circle")
-                .font(.system(size: 10))
-                .foregroundStyle(tone == .warning ? Color.orange : Color.secondary)
+                .font(ORBFont.caption)
+                .foregroundStyle(tint)
                 .padding(.top, 1)
-            Text(text).font(.system(size: 11)).foregroundStyle(tone == .warning ? Color.orange : Color.secondary)
+                .accessibilityHidden(true)
+            Text(text).font(ORBFont.caption).foregroundStyle(tint)
                 .fixedSize(horizontal: false, vertical: true)
         }
     }

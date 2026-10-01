@@ -24,6 +24,16 @@ enum ORBMetrics {
         spacingXXS, spacingXS, spacingSM, spacingMD, spacingLG, spacingXL,
     ]
 
+    // MARK: Corner radii scale (Phase 1): 6 / 10 / 14
+
+    static let radiusSM: CGFloat = 6
+    static let radiusMD: CGFloat = 10
+    static let radiusLG: CGFloat = 14
+    static let radiusScale: [CGFloat] = [radiusSM, radiusMD, radiusLG]
+
+    /// Minimum interactive hit target.
+    static let minHitTarget: CGFloat = 28
+
     // MARK: Corner radii (pt). Panels/cards stay in the documented 10–12
     // band; controls keep their native shape.
 
