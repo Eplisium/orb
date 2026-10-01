@@ -9,3 +9,4 @@ ORB.app/
 .windop/
 .windop-backups/
 codesign/
+.hermes/
