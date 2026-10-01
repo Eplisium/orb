@@ -257,21 +257,47 @@ struct ContentView: View {
     // view disappearing and does not prevent a simultaneous direct Chat run.
     @StateObject private var agentService = ChatService()
     @StateObject private var chatService = ChatService()
-    // `-orb.startSection Chat` (launch argument / defaults override) opens a
-    // given section directly; used for screenshot review. Default: All Models.
-    @State private var selectedSection: SidebarSection =
-        UserDefaults.standard.string(forKey: "orb.startSection").flatMap(SidebarSection.init(rawValue:)) ?? .allModels
+    /// Last section, restored per window scene. `-orb.startSection <name>`
+    /// (launch argument / defaults override) still wins on first appearance.
+    @SceneStorage(ORBShell.sectionStorageKey) private var storedSection = ""
+    @SceneStorage(ORBShell.sidebarHiddenStorageKey) private var sidebarHidden = false
+    @State private var launchOverrideApplied = false
+    @State private var columnVisibility: NavigationSplitViewVisibility = .all
     @State private var databaseFailure: DatabaseLaunchFailure?
+    @State private var activeSheet: ShellSheet?
     @EnvironmentObject private var focusManager: FocusManager
-    // Application-owned dependencies (W07). Declared now so the injection
-    // path is live; consumers keep their current initializers until the
-    // supervised shell session migrates them additively.
+    @EnvironmentObject private var shell: ShellController
+    // Application-owned dependencies (W07).
     @EnvironmentObject private var environment: AppEnvironment
+    @Environment(\.openSettings) private var openSettings
     @FocusState private var searchFocused: Bool
     @ObservedObject private var appLock = AppLock.shared
     @State private var startedPostUnlockWork = false
     /// `-orb.reviewMode YES`: screenshot review — never touch legacy Keychain items.
     private static let reviewMode = UserDefaults.standard.bool(forKey: "orb.reviewMode")
+
+    private static var startOverride: String? {
+        UserDefaults.standard.string(forKey: ORBShell.startSectionDefaultsKey)
+    }
+
+    enum ShellSheet: String, Identifiable {
+        case palette, shortcuts
+        var id: String { rawValue }
+    }
+
+    private var selectedSection: SidebarSection {
+        ShellRestore.resolve(
+            startOverride: launchOverrideApplied ? nil : Self.startOverride,
+            stored: storedSection
+        )
+    }
+
+    private var sectionBinding: Binding<SidebarSection?> {
+        Binding(
+            get: { selectedSection },
+            set: { if let new = $0 { select(new) } }
+        )
+    }
 
     var body: some View {
         Group {
@@ -279,43 +305,12 @@ struct ContentView: View {
                 LockScreenView(
                     lock: appLock,
                     accent: ORBTheme.accent,
-                    onOpenSettings: { selectedSection = .account }
+                    onOpenSettings: { openSettings() }
                 )
-            } else if selectedSection.isBrowser {
-                NavigationSplitView {
-                    sidebar
-                } content: {
-                    modelListColumn
-                } detail: {
-                    detailColumn
-                }
             } else {
-                NavigationSplitView {
-                    sidebar
-                } detail: {
-                    if selectedSection == .agent {
-                        AgentView(viewModel: vm, chatService: agentService)
-                    } else if selectedSection == .chat {
-                        ChatView(viewModel: vm, chatService: chatService)
-                    } else if selectedSection == .images {
-                        ImagesView()
-                    } else if selectedSection == .video {
-                        VideoView()
-                    } else if selectedSection == .files {
-                        FilesView()
-                    } else if selectedSection == .speech {
-                        SpeechView()
-                    } else if selectedSection == .embeddings {
-                        EmbeddingsView()
-                    } else if selectedSection == .testSuite {
-                        TestSuiteView(viewModel: vm)
-                    } else if selectedSection == .account {
-                        SettingsView()
-                    }
-                }
+                shellView
             }
         }
-        .navigationSplitViewStyle(.balanced)
         .onChange(of: selectedSection, initial: true) { _, section in
             StudioNotifier.shared.currentSection = section.rawValue
         }
@@ -353,14 +348,175 @@ struct ContentView: View {
         }
         .onChange(of: focusManager.searchFocused) { _, newValue in
             if newValue {
-                selectedSection = .allModels
+                select(.allModels)
                 searchFocused = true
                 focusManager.searchFocused = false
             }
         }
+        .onChange(of: shell.pending) { _, request in
+            guard let request else { return }
+            shell.pending = nil
+            guard appLock.isUnlocked else { return }
+            perform(request.action)
+        }
     }
 
-    // MARK: Sidebar
+    // MARK: Shell
+
+    /// One NavigationSplitView for every section: the sidebar is never
+    /// rebuilt; only the detail changes. Browser sections lay out the model
+    /// list and model detail side by side inside the detail column.
+    private var shellView: some View {
+        NavigationSplitView(columnVisibility: $columnVisibility) {
+            sidebar
+        } detail: {
+            detailContent
+                .navigationTitle(selectedSection.title)
+        }
+        .navigationSplitViewStyle(.balanced)
+        .toolbar {
+            ToolbarItemGroup(placement: .primaryAction) {
+                Button {
+                    perform(.refreshModels)
+                } label: {
+                    Label("Refresh Models", systemImage: "arrow.clockwise")
+                }
+                .help("Refresh models from OpenRouter (⌘R)")
+                .disabled(vm.api.isLoading)
+                .accessibilityLabel("Refresh models")
+
+                Button {
+                    perform(.showPalette)
+                } label: {
+                    Label("Command Palette", systemImage: "command")
+                }
+                .help("Command palette (⌘K)")
+                .accessibilityLabel("Open command palette")
+            }
+        }
+        .sheet(item: $activeSheet) { sheet in
+            switch sheet {
+            case .palette:
+                CommandPaletteView(index: paletteIndex) { action in
+                    activeSheet = nil
+                    perform(action)
+                }
+            case .shortcuts:
+                ShortcutCheatSheet { activeSheet = nil }
+            }
+        }
+        .onAppear {
+            if !launchOverrideApplied {
+                storedSection = selectedSection.rawValue
+                launchOverrideApplied = true
+            }
+            columnVisibility = sidebarHidden ? .detailOnly : .all
+            applyFilterEffects(for: selectedSection)
+        }
+        .onChange(of: columnVisibility) { _, visibility in
+            sidebarHidden = (visibility == .detailOnly)
+        }
+    }
+
+    @ViewBuilder
+    private var detailContent: some View {
+        switch selectedSection {
+        case .allModels, .favorites, .newThisWeek:
+            HSplitView {
+                modelListColumn
+                    .frame(minWidth: 340, idealWidth: 440, maxWidth: 560)
+                detailColumn
+                    .frame(minWidth: 320, maxWidth: .infinity)
+            }
+        case .agent: AgentView(viewModel: vm, chatService: agentService)
+        case .chat: ChatView(viewModel: vm, chatService: chatService)
+        case .images: ImagesView()
+        case .video: VideoView()
+        case .files: FilesView()
+        case .speech: SpeechView()
+        case .embeddings: EmbeddingsView()
+        case .testSuite: TestSuiteView(viewModel: vm)
+        case .account:
+            // Retired from the sidebar; kept only so persisted values decode.
+            SettingsView()
+        }
+    }
+
+    // MARK: Actions
+
+    private func select(_ section: SidebarSection) {
+        guard section != .account else { openSettings(); return }
+        storedSection = section.rawValue
+        launchOverrideApplied = true
+        applyFilterEffects(for: section)
+    }
+
+    private func applyFilterEffects(for section: SidebarSection) {
+        let effects = AppRouter.filterEffects(for: section)
+        vm.showFavoritesOnly = effects.showFavoritesOnly
+        vm.showNewThisWeek = effects.showNewThisWeek
+    }
+
+    private func perform(_ action: ShellAction) {
+        switch action {
+        case .section(let section):
+            select(section)
+        case .newChat:
+            select(.chat)
+            _ = chatService.newConversation(modelId: preferredModelId(for: .chat), mode: .chat)
+        case .newAgent:
+            select(.agent)
+            _ = agentService.newConversation(modelId: preferredModelId(for: .agent), mode: .agent)
+        case .refreshModels:
+            Task { await vm.refresh() }
+        case .toggleSidebar:
+            columnVisibility = (columnVisibility == .detailOnly) ? .all : .detailOnly
+        case .openSettings:
+            openSettings()
+        case .showShortcuts:
+            activeSheet = .shortcuts
+        case .showPalette:
+            activeSheet = .palette
+        case .selectModel(let id):
+            select(.allModels)
+            vm.searchText = ""
+            vm.modalityFilter = .all
+            vm.providerFilter = "All Providers"
+            if let model = vm.api.models.first(where: { $0.id == id }) {
+                vm.selectModel(model)
+            }
+        case .openConversation(let id, let mode):
+            let service = (mode == .chat) ? chatService : agentService
+            select(mode == .chat ? .chat : .agent)
+            if let conversation = service.conversations.first(where: { $0.id == id }) {
+                service.selectConversation(conversation)
+            }
+        }
+    }
+
+    /// Mirrors ChatView/AgentView's own default-model resolution so ⌘N and
+    /// the in-view New button create sessions with the same model.
+    private func preferredModelId(for mode: PlaygroundMode) -> String {
+        let key = (mode == .chat) ? PlaygroundModelDefaults.chatKey : PlaygroundModelDefaults.agentKey
+        let fallback = vm.selectedModel?.id ?? vm.api.models.first?.id ?? "openai/gpt-4o"
+        return PlaygroundModelDefaults.resolve(
+            storedModelId: UserDefaults.standard.string(forKey: key) ?? "",
+            availableModelIds: vm.api.models.map(\.id),
+            fallbackModelId: fallback
+        )
+    }
+
+    private var paletteIndex: PaletteIndex {
+        let favorites = vm.api.models
+            .filter { vm.favoriteIds.contains($0.id) }
+            .map { PaletteModel(id: $0.id, name: $0.name) }
+        let chats = chatService.conversations.filter { $0.mode == .chat }
+        let agents = agentService.conversations.filter { $0.mode == .agent }
+        let conversations = (chats + agents).map {
+            PaletteConversation(id: $0.id, title: $0.title, mode: $0.mode, createdAt: $0.createdAt)
+        }
+        return PaletteIndex(favoriteModels: favorites, conversations: conversations)
+    }
 
     /// One-time post-unlock side effects: batch-migrate any remaining legacy
     /// keychain items (each prompts once — "Allow" — then the value lives in
@@ -373,87 +529,55 @@ struct ContentView: View {
         await MCPRegistry.shared.startEnabledServers()
     }
 
+    // MARK: Sidebar
+
     private var sidebar: some View {
-        List(selection: $selectedSection) {
-            // Browser sections
-            Section("Browse") {
-                sidebarRow(.allModels)
-                sidebarRow(.favorites)
-                sidebarRow(.newThisWeek)
-            }
-            // Tools
-            Section("Tools") {
-                sidebarRow(.agent)
-                sidebarRow(.chat)
-                sidebarRow(.testSuite)
-            }
-            // Generate
-            Section("Generate") {
-                sidebarRow(.images)
-                sidebarRow(.video)
-                sidebarRow(.files)
-                sidebarRow(.speech)
-                sidebarRow(.embeddings)
-            }
-            Section("Settings") {
-                sidebarRow(.account)
+        List(selection: sectionBinding) {
+            ForEach(SidebarGroup.allCases) { group in
+                Section(group.title) {
+                    ForEach(group.sections) { section in
+                        sidebarRow(section)
+                    }
+                }
             }
         }
         .listStyle(.sidebar)
+        .tint(ORBTheme.accent)
         .navigationSplitViewColumnWidth(min: 196, ideal: 208, max: 250)
-        .onChange(of: selectedSection) { _, newValue in
-            let effects = AppRouter.filterEffects(for: newValue)
-            vm.showFavoritesOnly = effects.showFavoritesOnly
-            vm.showNewThisWeek = effects.showNewThisWeek
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+            SidebarAccountChip()
         }
     }
 
-    @ViewBuilder
     private func sidebarRow(_ section: SidebarSection) -> some View {
-        let count = sidebarCount(section)
-        let isSelected = (selectedSection == section)
-        Button {
-            selectedSection = section
-            let effects = AppRouter.filterEffects(for: section)
-            vm.showFavoritesOnly = effects.showFavoritesOnly
-            vm.showNewThisWeek = effects.showNewThisWeek
-        } label: {
-            HStack(spacing: 10) {
-                Image(systemName: section.icon)
-                    .font(.system(size: 13, weight: .medium))
-                    .frame(width: 18)
-                Text(section.title)
-                    .lineLimit(1)
+        Label {
+            HStack(spacing: 6) {
+                Text(section.title).lineLimit(1)
                 Spacer(minLength: 4)
-                if section == .agent {
-                    ChatActivityBadge(service: agentService, tint: isSelected ? .white : ORBTheme.accent)
-                } else if section == .chat {
-                    ChatActivityBadge(service: chatService, tint: isSelected ? .white : ORBTheme.accent)
-                } else {
-                    SidebarActivityBadge(section: section, tint: isSelected ? .white : ORBTheme.accent)
-                }
-                if count > 0 {
-                    Text("\(count)")
-                        .font(.system(size: 11, weight: .medium))
-                        .monospacedDigit()
-                        .foregroundStyle(isSelected ? Color.white.opacity(0.85) : Color.secondary)
-                }
+                activityBadge(for: section)
             }
-            .contentShape(Rectangle())
-            .padding(.vertical, 5)
-            .padding(.horizontal, 8)
+        } icon: {
+            Image(systemName: section.icon)
         }
-        .buttonStyle(.plain)
-        .foregroundStyle(isSelected ? Color.white : Color.primary)
-        .font(.system(size: 13, weight: isSelected ? .semibold : .regular))
-        .listRowBackground(
-            RoundedRectangle(cornerRadius: 8)
-                .fill(isSelected ? ORBTheme.accent : Color.clear)
-                .padding(.horizontal, 8)
-                .padding(.vertical, 1)
-        )
-        .listRowSeparator(.hidden)
+        .badge(sidebarCount(section))
         .tag(section)
+        .help(sidebarHelp(section))
+    }
+
+    @ViewBuilder
+    private func activityBadge(for section: SidebarSection) -> some View {
+        if section == .agent {
+            ChatActivityBadge(service: agentService, tint: .secondary)
+        } else if section == .chat {
+            ChatActivityBadge(service: chatService, tint: .secondary)
+        } else {
+            SidebarActivityBadge(section: section, tint: .secondary)
+        }
+    }
+
+    private func sidebarHelp(_ section: SidebarSection) -> String {
+        guard let digit = ShellShortcuts.digit(for: section) else { return section.title }
+        return "\(section.title) (⌘\(digit))"
     }
 
     private func sidebarCount(_ section: SidebarSection) -> Int {
@@ -461,8 +585,7 @@ struct ContentView: View {
         case .allModels: return vm.api.models.count
         case .favorites: return vm.favoriteIds.count
         case .newThisWeek: return vm.newThisWeekCount
-        case .agent, .chat, .testSuite, .account: return 0
-        case .images, .video, .files, .speech, .embeddings: return 0
+        default: return 0
         }
     }
 
@@ -476,7 +599,6 @@ struct ContentView: View {
             Divider()
             modelList
         }
-        .navigationSplitViewColumnWidth(min: 380, ideal: 460, max: 580)
     }
 
     private var searchBar: some View {
