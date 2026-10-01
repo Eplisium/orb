@@ -8,7 +8,7 @@ import Testing
 @Suite(.serialized)
 struct MCPCapabilityTests {
     private static func serverConfig() -> MCPServerConfig? {
-        let candidates = ["/Users/rueearth/.local/bin/node", "/usr/local/bin/node", "/opt/homebrew/bin/node"]
+        let candidates = [NSHomeDirectory() + "/.local/bin/node", "/usr/local/bin/node", "/opt/homebrew/bin/node"]
         guard let node = candidates.first(where: { FileManager.default.isExecutableFile(atPath: $0) })
             ?? ProcessInfo.processInfo.environment["NODE_BINARY"] else { return nil }
         guard let script = Bundle.module.url(

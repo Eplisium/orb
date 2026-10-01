@@ -350,7 +350,7 @@ Honest state of the implementation (audit baseline commit `5403ea9` → present)
 
 ## License
 
-MIT License. See `LICENSE` when present in the distribution for the complete license text.
+MIT License. See [LICENSE](LICENSE) for the complete text.
 
 <p align="center">
   <sub>Built with SwiftUI and OpenRouter.</sub>
