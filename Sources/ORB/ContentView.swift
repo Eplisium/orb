@@ -273,6 +273,7 @@ struct ContentView: View {
     @FocusState private var searchFocused: Bool
     @ObservedObject private var appLock = AppLock.shared
     @State private var startedPostUnlockWork = false
+    @State private var showOnboarding = false
     /// `-orb.reviewMode YES`: screenshot review — never touch legacy Keychain items.
     private static let reviewMode = UserDefaults.standard.bool(forKey: "orb.reviewMode")
 
@@ -313,6 +314,17 @@ struct ContentView: View {
         }
         .onChange(of: selectedSection, initial: true) { _, section in
             StudioNotifier.shared.currentSection = section.rawValue
+        }
+        .onChange(of: appLock.isUnlocked, initial: true) { _, unlocked in
+            guard unlocked, !showOnboarding else { return }
+            showOnboarding = OnboardingGate.shouldPresent(
+                outcome: UserDefaultsOnboardingStore().outcome,
+                reviewMode: Self.reviewMode,
+                forced: OnboardingGate.isForced()
+            )
+        }
+        .sheet(isPresented: $showOnboarding) {
+            OnboardingView { showOnboarding = false }
         }
         .task {
             AppLockMonitor.shared.start(lock: appLock)
@@ -428,13 +440,13 @@ struct ContentView: View {
                 detailColumn
                     .frame(minWidth: 320, maxWidth: .infinity)
             }
-        case .agent: AgentView(viewModel: vm, chatService: agentService)
-        case .chat: ChatView(viewModel: vm, chatService: chatService)
-        case .images: ImagesView()
-        case .video: VideoView()
-        case .files: FilesView()
-        case .speech: SpeechView()
-        case .embeddings: EmbeddingsView()
+        case .agent: NeedsKeyGate(studio: .agent) { AgentView(viewModel: vm, chatService: agentService) }
+        case .chat: NeedsKeyGate(studio: .chat) { ChatView(viewModel: vm, chatService: chatService) }
+        case .images: NeedsKeyGate(studio: .generate) { ImagesView() }
+        case .video: NeedsKeyGate(studio: .generate) { VideoView() }
+        case .files: NeedsKeyGate(studio: .generate) { FilesView() }
+        case .speech: NeedsKeyGate(studio: .generate) { SpeechView() }
+        case .embeddings: NeedsKeyGate(studio: .generate) { EmbeddingsView() }
         case .testSuite: TestSuiteView(viewModel: vm)
         case .account:
             // Retired from the sidebar; kept only so persisted values decode.

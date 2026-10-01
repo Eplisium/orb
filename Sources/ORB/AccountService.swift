@@ -142,6 +142,14 @@ final class AccountService: ObservableObject {
 
     // MARK: - Management key lifecycle
 
+    /// Re-reads (existence-only, prompt-free) whether a management key is
+    /// stored, e.g. after it was saved from another window.
+    func refreshManagementKeyPresence() {
+        let present = profile.managementKeyReference.map { secretStore.hasSecret(forReference: $0) } ?? false
+        if present != hasManagementKey { hasManagementKey = present }
+        if !present { credits = nil }
+    }
+
     /// Saves a management key. A failed save leaves the previous key intact.
     @discardableResult
     func setManagementKey(_ key: String) -> String? {

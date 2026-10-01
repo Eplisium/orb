@@ -131,6 +131,10 @@ struct AccountChipState: Equatable {
     var subtitle: String
     var isLow: Bool
 
+    /// Low balance changes the symbol and wording too, never colour alone.
+    var systemImage: String { isLow ? "exclamationmark.triangle.fill" : "person.crop.circle.fill" }
+    var accessibilityValue: String { "\(title), \(subtitle)" }
+
     static let lowBalanceThreshold = 1.0
 
     static func make(hasManagementKey: Bool, remaining: Double?, isLoading: Bool, hasError: Bool) -> AccountChipState {

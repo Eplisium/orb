@@ -24,8 +24,15 @@ struct SettingsSceneView: View {
 /// Sidebar footer: credits at a glance, opens Settings. Neutral when no
 /// management key is configured (no network is attempted then).
 struct SidebarAccountChip: View {
-    @StateObject private var account = AccountService()
+    @StateObject private var account: AccountService
     @Environment(\.openSettings) private var openSettings
+
+    init() {
+        // Review mode must never consult the Keychain: use an empty store.
+        _account = StateObject(wrappedValue: OnboardingGate.isReviewMode()
+            ? AccountService(secretStore: InMemoryCredentialStore())
+            : AccountService())
+    }
 
     private var state: AccountChipState {
         AccountChipState.make(
@@ -41,7 +48,7 @@ struct SidebarAccountChip: View {
             openSettings()
         } label: {
             HStack(spacing: 8) {
-                Image(systemName: state.isLow ? "exclamationmark.triangle.fill" : "person.crop.circle.fill")
+                Image(systemName: state.systemImage)
                     .foregroundStyle(state.isLow ? ORBTheme.warning : ORBTheme.accent)
                     .font(.title3)
                 VStack(alignment: .leading, spacing: 1) {
@@ -60,9 +67,18 @@ struct SidebarAccountChip: View {
         .overlay(alignment: .top) { Divider() }
         .help("Account and settings (⌘,)")
         .accessibilityLabel("Account and settings")
-        .accessibilityValue("\(state.title), \(state.subtitle)")
+        .accessibilityValue(state.accessibilityValue)
         .task {
             if account.hasManagementKey { await account.fetchCredits() }
+        }
+        // Keys are saved in the onboarding sheet or the Settings window;
+        // pick the change up when any window of the app becomes key.
+        .onReceive(NotificationCenter.default.publisher(for: NSWindow.didBecomeKeyNotification)) { _ in
+            let had = account.hasManagementKey
+            account.refreshManagementKeyPresence()
+            if account.hasManagementKey && (!had || account.credits == nil) {
+                Task { await account.fetchCredits() }
+            }
         }
     }
 }
