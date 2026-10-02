@@ -87,6 +87,7 @@ struct ChatView: View {
             messageArea
             composer
         }
+        .inspector(isPresented: $showSettings) { settingsPopover.inspectorColumnWidth(min: 280, ideal: 320, max: 420) }
         .overlay(alignment: .bottom) {
             if let snapshot = undoSnapshot {
                 UndoToastView(
@@ -290,7 +291,6 @@ struct ChatView: View {
             }
             .buttonStyle(.plain)
             .accessibilityLabel("Session settings")
-            .inspector(isPresented: $showSettings) { settingsPopover.inspectorColumnWidth(min: 280, ideal: 320, max: 420) }
             .sheet(isPresented: $showAdvancedSettings) {
                 AdvancedSettingsView(accent: accent, settings: $settings)
             }

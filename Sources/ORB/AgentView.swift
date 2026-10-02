@@ -92,6 +92,7 @@ struct AgentView: View {
             messageArea
             composer
         }
+        .inspector(isPresented: $showSettings) { settingsPopover.inspectorColumnWidth(min: 280, ideal: 320, max: 420) }
         .modifier(ApprovalSheetModifier(presenter: chatService.approvalPresenter))
         .overlay(alignment: .bottom) {
             if let snapshot = undoSnapshot {
@@ -287,7 +288,6 @@ struct AgentView: View {
             }
             .buttonStyle(.plain)
             .accessibilityLabel("Session settings")
-            .inspector(isPresented: $showSettings) { settingsPopover.inspectorColumnWidth(min: 280, ideal: 320, max: 420) }
             .sheet(isPresented: $showMCPSettings) { MCPSettingsView(accent: accent, isEmbedded: false) }
         }
         .padding(.horizontal, 18)

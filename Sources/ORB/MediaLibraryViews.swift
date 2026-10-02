@@ -403,6 +403,7 @@ struct SavedCreationsLibraryView: View {
         }
         .padding(16)
         .focusable()
+        .focusEffectDisabled()
         .focused($focused)
         .onKeyPress(.space) {
             guard let target = LibraryPreview.target(selection: selection.ids, visible: visible) else { return .ignored }
@@ -513,9 +514,10 @@ struct SavedCreationsLibraryView: View {
         } else {
             ScrollView {
                 if isGrid {
-                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 150, maximum: 220), spacing: 10)], spacing: 10) {
+                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 150, maximum: 220), spacing: 10, alignment: .top)], alignment: .leading, spacing: 10) {
                         ForEach(visible) { cell($0) }
                     }
+                    .padding(.trailing, 2)
                 } else {
                     LazyVStack(spacing: 6) { ForEach(visible) { row($0) } }
                 }
@@ -548,7 +550,9 @@ struct SavedCreationsLibraryView: View {
                 .background(.orbSurface(0.06))
                 .clipShape(RoundedRectangle(cornerRadius: 8))
             Text(label(c)).font(ORBFont.footnote).lineLimit(2)
+                .frame(maxWidth: .infinity, minHeight: 32, alignment: .topLeading)
             Text(subtitle).font(ORBFont.caption).foregroundStyle(.secondary).lineLimit(1)
+                .frame(maxWidth: .infinity, alignment: .leading)
         }
         .padding(8)
         .background(fill, in: shape)
@@ -697,20 +701,23 @@ struct LibraryThumbnail: View {
     @State private var image: NSImage?
 
     var body: some View {
-        ZStack {
-            if let image {
-                Image(nsImage: image).resizable().scaledToFill()
-            } else {
-                Image(systemName: creation.kind.symbol).font(.system(size: 28)).foregroundStyle(.secondary)
+        // Color.clear defines the size; the image is only an overlay, so a
+        // scaledToFill image can never widen its grid cell.
+        Color.clear
+            .overlay {
+                if let image {
+                    Image(nsImage: image).resizable().scaledToFill()
+                } else {
+                    Image(systemName: creation.kind.symbol).font(.system(size: 28)).foregroundStyle(.secondary)
+                }
             }
-        }
-        .clipped()
-        .accessibilityHidden(true)
-        .task(id: creation.id) {
-            guard creation.kind == .image, image == nil,
-                  let data = try? await store.data(for: creation) else { return }
-            image = NSImage(data: data)
-        }
+            .clipped()
+            .accessibilityHidden(true)
+            .task(id: creation.id) {
+                guard creation.kind == .image, image == nil,
+                      let data = try? await store.data(for: creation) else { return }
+                image = NSImage(data: data)
+            }
     }
 }
 

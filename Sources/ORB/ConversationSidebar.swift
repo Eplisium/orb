@@ -42,8 +42,10 @@ struct ConversationSidebarHeader: View {
                 Text(subtitle)
                     .orbFont(size: 11, weight: .medium)
                     .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
             }
-            Spacer()
+            Spacer(minLength: 4)
             if let onToggleSelecting {
                 Button(isSelecting ? "Done" : "Select") {
                     onToggleSelecting()
@@ -51,6 +53,7 @@ struct ConversationSidebarHeader: View {
                 .buttonStyle(.plain)
                 .orbFont(size: 11, weight: .semibold)
                 .foregroundStyle(isSelecting ? accent : .secondary)
+                .fixedSize()
                 .disabled(!canSelect && !isSelecting)
                 .help(isSelecting ? "Exit selection mode" : "Select multiple sessions")
             }
