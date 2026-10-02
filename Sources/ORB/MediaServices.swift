@@ -983,6 +983,9 @@ final class VideoGenService: ObservableObject {
     /// tests and alternate hosts stay isolated from shared state.
     var resumableRecords: [JobRecord] { jobController.resumableJobs() }
 
+    /// Every durable job (active, finished, failed) for the tray.
+    var allJobRecords: [JobRecord] { jobController.allJobs() }
+
     /// Last persistence failure from the durable store, surfaced beside the
     /// resume affordance so a failed write is visible, never silent.
     var durablePersistenceError: String? { jobController.lastPersistenceError }

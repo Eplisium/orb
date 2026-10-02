@@ -502,9 +502,19 @@ struct TestSuiteView: View {
             Text("Older saved passes may predate artifact checks; rerun to verify them. — cost means zero or unreported; totals are lower bounds.")
                 .font(.system(size: 10)).foregroundStyle(.secondary)
 
-            ForEach(testRunner.results.prefix(8)) { result in
-                savedResultRow(result)
-            }
+            TestResultsTableView(
+                results: testRunner.results,
+                onOpen: { result in
+                    if let scenario = TestCatalog.scenario(id: result.scenarioId) {
+                        selectedScenario = scenario
+                        selectedModelId = result.modelId
+                    }
+                },
+                onDelete: { result in
+                    DatabaseManager.shared.deleteTestResult(result.id)
+                    testRunner.loadSavedResults()
+                }
+            )
         }
         .frame(maxWidth: 880, alignment: .leading)
     }

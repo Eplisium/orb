@@ -997,36 +997,39 @@ struct VideoView: View {
     }
 
     private func resumableRow(_ record: JobRecord) -> some View {
-        HStack(spacing: 8) {
-            VStack(alignment: .leading, spacing: 2) {
-                Text(record.modelID ?? "video")
-                    .font(.caption.monospacedDigit())
-                    .lineLimit(1)
-                // The durable record's last known remote status, preserved
-                // verbatim across local stops.
-                Text("Last status: \(record.lastRemoteStatus ?? "unknown")")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
+        let p = JobPresentation.make(record)
+        return HStack(alignment: .top, spacing: 8) {
+            VStack(alignment: .leading, spacing: 3) {
+                HStack(spacing: 6) {
+                    ORBStatusPill(status: p.status)
+                    Text(record.modelID ?? "video").font(.caption.monospacedDigit()).lineLimit(1)
+                }
+                Text(p.detail).font(.caption2).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                Text("Last status: \(record.lastRemoteStatus ?? "unknown") · \(JobTray.ageText(from: record.createdAt))")
+                    .font(.caption2).foregroundStyle(.tertiary)
             }
             Spacer()
-            Button {
-                resumeDurable(record)
-            } label: {
-                Label("Resume", systemImage: "arrow.clockwise")
-                    .font(.caption.weight(.medium))
+            if p.actions.contains(.resume) {
+                Button {
+                    resumeDurable(record)
+                } label: {
+                    Label("Resume", systemImage: "arrow.clockwise").font(.caption.weight(.medium))
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                // Double-resume guard: disabled while this service's poll loop is
+                // already running for this record's remote job.
+                .disabled(service.isRunInFlight(for: record) || !KeychainManager.hasAPIKey)
+                .help(service.isRunInFlight(for: record)
+                    ? "Already polling this job"
+                    : "Resume polling without submitting a new job")
             }
-            .buttonStyle(.bordered)
-            .controlSize(.small)
-            // Double-resume guard: disabled while this service's poll loop is
-            // already running for this record's remote job.
-            .disabled(service.isRunInFlight(for: record) || !KeychainManager.hasAPIKey)
-            .help(service.isRunInFlight(for: record)
-                ? "Already polling this job"
-                : "Resume polling without submitting a new job")
         }
         .padding(10)
         .background(Color.primary.opacity(0.03))
         .clipShape(RoundedRectangle(cornerRadius: 10))
+        .accessibilityElement(children: .combine)
     }
 
     /// Resumes a durable record through the service, routing poll updates into
