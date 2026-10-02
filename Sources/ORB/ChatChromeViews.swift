@@ -305,3 +305,67 @@ extension View {
         }
     }
 }
+
+/// Modal prompt for one risky tool call. Deny is the default action; Escape denies.
+struct ApprovalSheet: View {
+    let request: ApprovalCoordinator.Request
+    let waiting: Int
+    let decide: (ApprovalCoordinator.Decision) -> Void
+
+    var body: some View {
+        let p = ApprovalPresentation.make(toolName: request.toolName, server: request.server, summary: request.summary)
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(spacing: 10) {
+                Image(systemName: p.symbol).font(.system(size: 26)).foregroundStyle(p.risk == .high ? .red : ORBTheme.warning)
+                    .accessibilityHidden(true)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(p.title).font(ORBFont.headline)
+                    Label(p.riskWord, systemImage: p.risk == .high ? "exclamationmark.triangle.fill" : "exclamationmark.circle")
+                        .font(ORBFont.caption.weight(.semibold))
+                        .foregroundStyle(p.risk == .high ? .red : ORBTheme.warning)
+                }
+            }
+            Text("The agent wants to use \(request.toolName).")
+                .font(ORBFont.footnote).foregroundStyle(.secondary)
+            ScrollView {
+                Text(p.displaySummary)
+                    .font(.system(size: 12, design: .monospaced))
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(8)
+            }
+            .frame(maxHeight: 140)
+            .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 8))
+            if waiting > 0 {
+                Text("\(waiting) more waiting").font(ORBFont.caption).foregroundStyle(.secondary)
+            }
+            HStack {
+                Spacer()
+                Button("Deny") { decide(.denied) }
+                    .keyboardShortcut(.cancelAction)
+                Button("Approve once") { decide(.approved) }
+                    .keyboardShortcut(.defaultAction)
+                    .disabled(false)
+            }
+        }
+        .padding(20)
+        .frame(width: 440)
+        .interactiveDismissDisabled()
+        .accessibilityElement(children: .contain)
+    }
+}
+
+/// Observes the presenter directly so the sheet appears the moment a request is queued.
+struct ApprovalSheetModifier: ViewModifier {
+    @ObservedObject var presenter: ApprovalPresenter
+
+    func body(content: Content) -> some View {
+        content.sheet(item: Binding(
+            get: { presenter.queue.current },
+            // Any dismissal that is not an explicit button press is a denial.
+            set: { if $0 == nil, let id = presenter.queue.current?.id { presenter.decide(id, .denied) } }
+        )) { request in
+            ApprovalSheet(request: request, waiting: presenter.queue.waiting) { presenter.decide(request.id, $0) }
+        }
+    }
+}

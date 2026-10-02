@@ -371,7 +371,11 @@ struct ChatView: View {
                 }
                 .font(.subheadline)
 
-                Divider()
+                Toggle("Require ⌘↩ to send", isOn: $requireCommandToSend)
+                .font(.caption)
+                .help("When on, Return inserts a new line and ⌘↩ sends.")
+
+            Divider()
 
                 VStack(alignment: .leading, spacing: 7) {
                 Button {

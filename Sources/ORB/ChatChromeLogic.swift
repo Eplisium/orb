@@ -375,3 +375,34 @@ enum ComposerKeyPolicy {
         requireCommand ? "⌘↩ send · ↩ new line" : "↩ send · ⇧↩ new line"
     }
 }
+
+// MARK: Approval presenter
+
+/// Bridges `ApprovalCoordinator` (an actor) to the UI. The coordinator's
+/// handler awaits `present`; the sheet calls `decide`. Anything still open
+/// when a run stops is denied, so nothing is ever approved by default.
+@MainActor
+final class ApprovalPresenter: ObservableObject {
+    @Published private(set) var queue = ApprovalQueue()
+    private var waiting: [UUID: CheckedContinuation<ApprovalCoordinator.Decision, Never>] = [:]
+
+    func present(_ request: ApprovalCoordinator.Request) async -> ApprovalCoordinator.Decision {
+        await withCheckedContinuation { continuation in
+            waiting[request.id] = continuation
+            queue.enqueue(request)
+        }
+    }
+
+    func decide(_ id: UUID, _ decision: ApprovalCoordinator.Decision) {
+        guard let continuation = waiting.removeValue(forKey: id) else { return }
+        queue.resolve(id)
+        continuation.resume(returning: decision)
+    }
+
+    func denyAll() {
+        let pending = waiting
+        waiting.removeAll()
+        queue = ApprovalQueue()
+        for continuation in pending.values { continuation.resume(returning: .denied) }
+    }
+}

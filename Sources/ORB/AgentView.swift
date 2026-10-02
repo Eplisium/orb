@@ -92,6 +92,7 @@ struct AgentView: View {
             messageArea
             composer
         }
+        .modifier(ApprovalSheetModifier(presenter: chatService.approvalPresenter))
         .overlay(alignment: .bottom) {
             if let snapshot = undoSnapshot {
                 UndoToastView(
@@ -364,6 +365,10 @@ struct AgentView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
+
+            Toggle("Require ⌘↩ to send", isOn: $requireCommandToSend)
+                .font(.caption)
+                .help("When on, Return inserts a new line and ⌘↩ sends.")
 
             Divider()
 

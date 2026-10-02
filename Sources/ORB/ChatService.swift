@@ -68,6 +68,9 @@ final class ChatService: ObservableObject {
     private let store: any ConversationStore
     private let apiKeyProvider: () -> String?
     private let agentMaximumTurns: Int
+    /// Risky agent tools (terminal, computer control, MCP) wait here for the user.
+    let approvalPresenter = ApprovalPresenter()
+    private let approvals = ApprovalCoordinator()
     private var streamTask: Task<Void, Never>?
     private var agentHistories: [UUID: [AgentAPIMessage]] = [:]
     private var agentPendingContent = ""
@@ -97,6 +100,7 @@ final class ChatService: ObservableObject {
         self.store = store
         self.apiKeyProvider = apiKeyProvider
         self.agentMaximumTurns = agentMaximumTurns
+        installApprovalHandler()
         loadPersistedConversations()
     }
 
@@ -643,6 +647,7 @@ final class ChatService: ObservableObject {
     }
 
     private func terminalCleanup(_ context: PlaygroundRunContext) {
+        denyPendingApprovals()
         reasoningActiveRunID = nil
         regenerationBackups[context.runID] = nil
         agentContentCoalescer?.cancel()
@@ -665,10 +670,28 @@ final class ChatService: ObservableObject {
             body: conversations.first(where: { $0.id == context.conversationID })?.title ?? "Your run is complete.")
     }
 
+    private func installApprovalHandler() {
+        let presenter = approvalPresenter
+        let approvals = approvals
+        Task {
+            await approvals.setHandler { request in
+                await presenter.present(request)
+            }
+        }
+    }
+
+    /// A cancelled or finished run never leaves a prompt behind, and a cancelled prompt is a denial.
+    private func denyPendingApprovals() {
+        approvalPresenter.denyAll()
+        let approvals = approvals
+        Task { await approvals.cancelPending() }
+    }
+
     func stopStreaming() {
         guard let context = runState.context, runState.isActive else { return }
         runState.phase = .stopping
         activityLabel = "Stopping…"
+        denyPendingApprovals()
         streamTask?.cancel()
         // The task owns the final interrupted transition and persistence.
         if streamTask == nil { finish(context: context, status: .interrupted, finishReason: "cancelled", usage: nil) }
@@ -771,6 +794,7 @@ final class ChatService: ObservableObject {
                     systemPromptOverride: customPrompt.isEmpty ? nil : customPrompt,
                     client: self.client,
                     maximumTurns: self.agentMaximumTurns,
+                    approvals: self.approvals,
                     onEvent: { event in await self.receiveAgent(event, context: context) }
                 )
                 guard self.owns(context.runID) else { return }
