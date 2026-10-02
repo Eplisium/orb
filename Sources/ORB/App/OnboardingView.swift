@@ -474,7 +474,7 @@ struct OnboardingView: View {
     private var welcomeStep: some View {
         VStack(alignment: .leading, spacing: ORBMetrics.spacingMD) {
             Image(systemName: "sparkles")
-                .font(.system(size: 36))
+                .orbFont(size: 36)
                 .foregroundStyle(ORBTheme.accent)
                 .accessibilityHidden(true)
             Text(OnboardingCopy.welcomeTitle).font(ORBFont.title2.weight(.semibold))

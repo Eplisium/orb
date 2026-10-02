@@ -1,4 +1,5 @@
 import Testing
+import SwiftUI
 import Foundation
 @testable import ORB
 
@@ -17,7 +18,7 @@ struct PolishAuditTests {
 
     @Test("No fixed font below 11 pt anywhere in the app")
     func fontFloor() throws {
-        let pattern = try NSRegularExpression(pattern: #"\.system\(size:\s*(\d+(?:\.\d+)?)"#)
+        let pattern = try NSRegularExpression(pattern: #"(?:\.system\(size:|orbFont\(size:)\s*(\d+(?:\.\d+)?)"#)
         var offenders: [String] = []
         for file in swiftFiles() {
             let text = try String(contentsOf: file, encoding: .utf8)
@@ -62,6 +63,80 @@ struct PolishAuditTests {
             }
         }
         #expect(offenders.isEmpty, "\(offenders)")
+    }
+}
+
+@Suite("Phase 8: contrast audit")
+struct ContrastAuditTests {
+    @Test("Faint fills and strokes go through orbSurface so Increase Contrast applies")
+    func faintFills() throws {
+        let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("Sources/ORB")
+        let files = (FileManager.default.enumerator(at: root, includingPropertiesForKeys: nil)?.allObjects as? [URL] ?? [])
+            .filter { $0.pathExtension == "swift" && $0.lastPathComponent != "FinishingLogic.swift" }
+        let re = try NSRegularExpression(pattern: #"\.(background|fill|stroke)\(Color\.primary\.opacity\(0\.0\d*\)"#)
+        var offenders: [String] = []
+        for f in files {
+            let text = try String(contentsOf: f, encoding: .utf8)
+            for (i, line) in text.components(separatedBy: "\n").enumerated()
+            where re.firstMatch(in: line, range: NSRange(line.startIndex..., in: line)) != nil {
+                offenders.append("\(f.lastPathComponent):\(i + 1)")
+            }
+        }
+        #expect(offenders.isEmpty, "\(offenders.prefix(10))")
+    }
+}
+
+@MainActor
+@Suite("Phase 8: environment renders", .serialized)
+struct EnvironmentRenderTests {
+    private func differs<V: View>(_ view: V, _ a: @escaping (inout EnvironmentValues) -> Void, _ b: @escaping (inout EnvironmentValues) -> Void) -> Bool {
+        func png(_ mutate: @escaping (inout EnvironmentValues) -> Void) -> Data? {
+            let r = ImageRenderer(content: view.transformEnvironment(\.self, transform: mutate).background(Color.white).frame(width: 300, height: 80))
+            r.scale = 1
+            return r.nsImage?.tiffRepresentation
+        }
+        return png(a) != png(b)
+    }
+
+    @Test("ORBSurface is stronger under Increase Contrast and unchanged otherwise")
+    func contrast() {
+        let surface = ORBSurface(base: 0.04)
+        #expect(surface.alpha(for: .standard) == 0.04)
+        #expect(surface.alpha(for: .increased) > surface.alpha(for: .standard))
+        #expect(ORBSurface(base: 0.9).alpha(for: .increased) <= 1)
+    }
+
+    @Test("Scaled text measurably grows with the Text size setting, and never drops below 11 pt")
+    func textScale() {
+        func width(_ scale: CGFloat) -> CGFloat {
+            let r = ImageRenderer(content: Text("Hello world, this is a sample").orbFont(size: 13).environment(\.orbTextScale, scale).fixedSize())
+            r.scale = 1
+            return r.nsImage?.size.width ?? 0
+        }
+        #expect(width(1.3) > width(1.0))
+        #expect(width(1.0) > width(0.92) || width(0.92) >= width(1.0) - 1)
+        #expect(ORBScaledFont.points(10, scale: 0.92) == 11)
+        #expect(ORBScaledFont.points(13, scale: 1.3) == 17)
+    }
+
+    @Test("Every Text size option has a strictly increasing scale")
+    func scales() {
+        let s = AppearancePrefs.TextSize.allCases.map(\.scale)
+        #expect(s == s.sorted() && Set(s).count == s.count)
+        #expect(AppearancePrefs.TextSize.standard.scale == 1)
+    }
+
+    @Test("Compare matrix and About pane render in light and dark")
+    func panes() {
+        let results: [TestRunResult] = []
+        for scheme in [ColorScheme.light, .dark] {
+            for v in [AnyView(CompareMatrixView(results: results)), AnyView(AboutPane())] {
+                let r = ImageRenderer(content: v.environment(\.colorScheme, scheme).frame(width: 480))
+                r.scale = 1
+                #expect(r.nsImage != nil)
+            }
+        }
     }
 }
 

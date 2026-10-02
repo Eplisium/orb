@@ -67,14 +67,14 @@ struct ModalityModelField: View {
             if showsManual || choices.models.isEmpty {
                 TextField("Model ID (manual fallback)", text: $modelID)
                     .textFieldStyle(.roundedBorder)
-                    .font(.system(size: 12, design: .monospaced))
+                    .orbFont(size: 12, design: .monospaced)
             } else {
                 HStack(spacing: 6) {
-                    Text(modelID).font(.system(size: 11, design: .monospaced))
+                    Text(modelID).orbFont(size: 11, design: .monospaced)
                         .foregroundStyle(.tertiary).lineLimit(1).truncationMode(.middle)
                     Spacer(minLength: 0)
                     Button("Enter ID manually") { showsManual = true }
-                        .buttonStyle(.plain).font(.system(size: 11)).foregroundStyle(.secondary)
+                        .buttonStyle(.plain).orbFont(size: 11).foregroundStyle(.secondary)
                 }
             }
             if let status = choices.status {
@@ -223,15 +223,15 @@ struct FilesView: View {
     private func fileRow(_ file: WorkspaceFile) -> some View {
         HStack(spacing: 12) {
             Image(systemName: iconName(for: file))
-                .font(.system(size: 14))
+                .orbFont(size: 14)
                 .foregroundStyle(accent)
                 .frame(width: 28)
             VStack(alignment: .leading, spacing: 2) {
                 Text(file.filename ?? file.id)
-                    .font(.system(size: 12, weight: .medium))
+                    .orbFont(size: 12, weight: .medium)
                     .lineLimit(1)
                 HStack(spacing: 8) {
-                    Text(file.id).font(.system(size: 11, design: .monospaced)).foregroundStyle(.tertiary)
+                    Text(file.id).orbFont(size: 11, design: .monospaced).foregroundStyle(.tertiary)
                     if let bytes = file.sizeBytes {
                         Text(ByteCountFormatter.string(fromByteCount: Int64(bytes), countStyle: .file))
                             .font(.caption).foregroundStyle(.secondary)
@@ -253,8 +253,8 @@ struct FilesView: View {
             .help("Delete file")
         }
         .padding(12)
-        .background(Color.primary.opacity(0.035), in: RoundedRectangle(cornerRadius: 11))
-        .overlay { RoundedRectangle(cornerRadius: 11).stroke(Color.primary.opacity(0.07), lineWidth: 0.5) }
+        .background(.orbSurface(0.035), in: RoundedRectangle(cornerRadius: 11))
+        .overlay { RoundedRectangle(cornerRadius: 11).stroke(.orbSurface(0.07), lineWidth: 0.5) }
     }
 
     private func iconName(for file: WorkspaceFile) -> String {
@@ -411,7 +411,7 @@ struct SavedCreationsLibraryView: View {
                         Button("Export…") { export(creation) }
                     }
                     .padding(10)
-                    .background(Color.primary.opacity(0.04))
+                    .background(.orbSurface(0.04))
                     .clipShape(RoundedRectangle(cornerRadius: 8))
                 }
                 if isOpening { ProgressView("Opening…") }
@@ -733,11 +733,11 @@ struct SpeechView: View {
                     VStack(alignment: .leading, spacing: 6) {
                         StudioLabel("Transcript")
                         Text(transcript)
-                            .font(.system(size: 12))
+                            .orbFont(size: 12)
                             .textSelection(.enabled)
                             .padding(10)
                             .frame(maxWidth: .infinity, alignment: .leading)
-                            .background(Color.primary.opacity(0.04))
+                            .background(.orbSurface(0.04))
                             .clipShape(RoundedRectangle(cornerRadius: 8))
                         Button("Copy") {
                             AppToasts.copy(transcript, what: "Transcript")
@@ -1068,7 +1068,7 @@ struct EmbeddingsView: View {
                             }
                         }
                         .padding(8)
-                        .background(Color.primary.opacity(0.04))
+                        .background(.orbSurface(0.04))
                         .clipShape(RoundedRectangle(cornerRadius: 7))
                     }
                 }

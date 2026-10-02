@@ -115,6 +115,7 @@ struct AppearanceModifier: ViewModifier {
         content
             .preferredColorScheme(prefs.preferredColorScheme)
             .dynamicTypeSize(prefs.textSize.dynamicTypeSize)
+            .environment(\.orbTextScale, prefs.textSize.scale)
             .controlSize(prefs.density.controlSize)
     }
 }
@@ -312,6 +313,20 @@ struct SaveStatusLabel: View {
                 .font(.callout)
                 .foregroundStyle({ if case .failed = status { return Color.red } else { return Color.secondary } }())
                 .accessibilityElement(children: .combine)
+        }
+    }
+}
+
+/// General → Notifications. A finished job posts a system notification when you are elsewhere; sound is opt-in.
+struct NotificationSettingsSection: View {
+    @AppStorage(JobNotification.soundKey) private var sound = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Label("Notifications", systemImage: "bell").font(.title3.weight(.semibold))
+            Toggle("Play a sound when a job finishes", isOn: $sound)
+            Text("ORB notifies you when a long job finishes while you are in another app or page. It stays quiet if you are already looking at it.")
+                .font(.callout).foregroundStyle(.secondary)
         }
     }
 }

@@ -114,16 +114,16 @@ struct SuggestionCard: View {
         Button(action: action) {
             HStack(alignment: .top, spacing: 11) {
                 Image(systemName: suggestion.icon)
-                    .font(.system(size: 13, weight: .semibold))
+                    .orbFont(size: 13, weight: .semibold)
                     .foregroundStyle(accent)
                     .frame(width: 28, height: 28)
                     .background(accent.opacity(0.10))
                     .clipShape(RoundedRectangle(cornerRadius: 8))
                 VStack(alignment: .leading, spacing: 4) {
                     Text(suggestion.title)
-                        .font(.system(size: 12, weight: .semibold))
+                        .orbFont(size: 12, weight: .semibold)
                     Text(suggestion.subtitle)
-                        .font(.system(size: 11))
+                        .orbFont(size: 11)
                         .foregroundStyle(.secondary)
                         .lineLimit(2)
                 }
@@ -131,10 +131,10 @@ struct SuggestionCard: View {
             }
             .padding(12)
             .frame(maxWidth: .infinity, minHeight: 64, alignment: .leading)
-            .background(Color.primary.opacity(0.032))
+            .background(.orbSurface(0.032))
             .overlay {
                 RoundedRectangle(cornerRadius: 10)
-                    .stroke(Color.primary.opacity(0.06), lineWidth: 1)
+                    .stroke(.orbSurface(0.06), lineWidth: 1)
             }
             .clipShape(RoundedRectangle(cornerRadius: 10))
             .contentShape(Rectangle())
@@ -151,11 +151,11 @@ struct CapabilityPill: View {
 
     var body: some View {
         Label(title, systemImage: icon)
-            .font(.system(size: 11, weight: .semibold))
+            .orbFont(size: 11, weight: .semibold)
             .foregroundStyle(.secondary)
             .padding(.horizontal, 9)
             .padding(.vertical, 5)
-            .background(Color.primary.opacity(0.045))
+            .background(.orbSurface(0.045))
             .clipShape(Capsule())
     }
 }
@@ -259,17 +259,17 @@ struct ToolCallCard: View {
             } label: {
                 HStack(spacing: 8) {
                     Image(systemName: toolIcon)
-                        .font(.system(size: 11, weight: .semibold))
+                        .orbFont(size: 11, weight: .semibold)
                         .foregroundStyle(statusColor)
                         .frame(width: 20, height: 20)
                         .background(statusColor.opacity(0.10))
                         .clipShape(RoundedRectangle(cornerRadius: 5))
                     Text(toolCall.name)
-                        .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                        .orbFont(size: 11, weight: .semibold, design: .monospaced)
                         .foregroundStyle(.primary)
                         .layoutPriority(1)
                     Text(subtitle)
-                        .font(.system(size: 11, design: .monospaced))
+                        .orbFont(size: 11, design: .monospaced)
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
                         .truncationMode(.middle)
@@ -278,11 +278,11 @@ struct ToolCallCard: View {
                         ProgressView().controlSize(.mini)
                     } else if toolCall.result != nil {
                         Image(systemName: toolCall.isError ? "xmark.circle.fill" : "checkmark.circle.fill")
-                            .font(.system(size: 11))
+                            .orbFont(size: 11)
                             .foregroundStyle(toolCall.isError ? Color.red : Color.green)
                     }
                     Image(systemName: "chevron.down")
-                        .font(.system(size: 11, weight: .bold))
+                        .orbFont(size: 11, weight: .bold)
                         .foregroundStyle(.tertiary)
                         .rotationEffect(.degrees(isExpanded ? 180 : 0))
                 }
@@ -312,7 +312,7 @@ struct ToolCallCard: View {
                 }
             }
         }
-        .background(Color.primary.opacity(0.03), in: RoundedRectangle(cornerRadius: 9))
+        .background(.orbSurface(0.03), in: RoundedRectangle(cornerRadius: 9))
         .overlay {
             RoundedRectangle(cornerRadius: 9)
                 .stroke(toolCall.isExecuting ? accent.opacity(0.35) : Color.primary.opacity(0.07), lineWidth: 0.5)
@@ -368,15 +368,15 @@ struct ToolCallActivityGroup: View {
                             .tint(accent)
                     } else {
                         Image(systemName: "wrench.and.screwdriver")
-                            .font(.system(size: 11, weight: .semibold))
+                            .orbFont(size: 11, weight: .semibold)
                             .foregroundStyle(accent)
                     }
                     Text(summaryLabel)
-                        .font(.system(size: 11, weight: .semibold))
+                        .orbFont(size: 11, weight: .semibold)
                     statusSummary
                     Spacer(minLength: 8)
                     Image(systemName: "chevron.right")
-                        .font(.system(size: 11, weight: .semibold))
+                        .orbFont(size: 11, weight: .semibold)
                         .foregroundStyle(.tertiary)
                         .rotationEffect(.degrees(isExpanded ? 90 : 0))
                 }
@@ -396,10 +396,10 @@ struct ToolCallActivityGroup: View {
                 .padding(.bottom, 4)
             }
         }
-        .background(Color.primary.opacity(0.025))
+        .background(.orbSurface(0.025))
         .overlay {
             RoundedRectangle(cornerRadius: 8)
-                .stroke(Color.primary.opacity(0.06), lineWidth: 0.5)
+                .stroke(.orbSurface(0.06), lineWidth: 0.5)
         }
         .clipShape(RoundedRectangle(cornerRadius: 8))
     }
@@ -416,7 +416,7 @@ struct ToolCallActivityGroup: View {
                 status("circle.dashed", "\(runningCount)", accent)
             }
         }
-        .font(.system(size: 11, design: .monospaced))
+        .orbFont(size: 11, design: .monospaced)
         .foregroundStyle(.secondary)
     }
 
@@ -451,10 +451,10 @@ struct PlaygroundMessageView: View {
         VStack(alignment: .leading, spacing: 14) {
             HStack(spacing: 8) {
                 Image(systemName: isUser ? "person.crop.circle" : "sparkle")
-                    .font(.system(size: 13, weight: .medium))
+                    .orbFont(size: 13, weight: .medium)
                     .foregroundStyle(isUser ? Color.secondary : accent)
                 Text(isUser ? "You" : assistantName)
-                    .font(.system(size: 12, weight: .semibold))
+                    .orbFont(size: 12, weight: .semibold)
                     .foregroundStyle(isUser ? Color.secondary : Color.primary)
                 Spacer()
                 messageActions
@@ -502,7 +502,7 @@ struct PlaygroundMessageView: View {
         if let action {
             Button(action: action) {
                 Image(systemName: symbol)
-                    .font(.system(size: 11, weight: .semibold))
+                    .orbFont(size: 11, weight: .semibold)
                     .foregroundStyle(.secondary)
                     .frame(width: 24, height: 24)
             }
@@ -516,7 +516,7 @@ struct PlaygroundMessageView: View {
         HStack(spacing: 3) {
             Button(action: copyMessage) {
                 Image(systemName: showCopyCheck ? "checkmark" : "doc.on.doc")
-                    .font(.system(size: 11, weight: .semibold))
+                    .orbFont(size: 11, weight: .semibold)
                     .foregroundStyle(showCopyCheck ? .green : .secondary)
                     .frame(width: 24, height: 24)
             }
@@ -533,7 +533,7 @@ struct PlaygroundMessageView: View {
                     onDelete()
                 } label: {
                     Image(systemName: "trash")
-                        .font(.system(size: 11, weight: .semibold))
+                        .orbFont(size: 11, weight: .semibold)
                         .foregroundStyle(.red.opacity(0.7))
                         .frame(width: 24, height: 24)
                 }
@@ -548,7 +548,7 @@ struct PlaygroundMessageView: View {
         .clipShape(RoundedRectangle(cornerRadius: 7))
         .overlay {
             RoundedRectangle(cornerRadius: 7)
-                .stroke(Color.primary.opacity(0.08), lineWidth: 0.5)
+                .stroke(.orbSurface(0.08), lineWidth: 0.5)
         }
         .shadow(color: .black.opacity(0.08), radius: 4, y: 2)
     }
@@ -618,17 +618,17 @@ struct ReasoningDisclosure: View {
                     TimelineView(.periodic(from: .now, by: 1)) { context in
                         let elapsed = startedAt.map { (duration ?? 0) + max(0, context.date.timeIntervalSince($0)) }
                         Text(elapsed.map(ThoughtDurationFormatter.live) ?? "Thinking…")
-                            .font(.system(size: 13))
+                            .orbFont(size: 13)
                             .foregroundStyle(.secondary)
                             .opacity(breathe ? 1.0 : 0.55)
                     }
                 } else {
                     Text(headerTitle)
-                        .font(.system(size: 13))
+                        .orbFont(size: 13)
                         .foregroundStyle(.secondary)
                 }
                 Image(systemName: "chevron.right")
-                    .font(.system(size: 11, weight: .semibold))
+                    .orbFont(size: 11, weight: .semibold)
                     .foregroundStyle(.tertiary)
                     .rotationEffect(.degrees(effectiveExpansion ? 90 : 0))
             }
@@ -640,7 +640,7 @@ struct ReasoningDisclosure: View {
 
     private var bodyPanel: some View {
         MarkdownText(content: ReasoningTextFormatter.display(text), accent: accent, showsCursor: isStreaming)
-            .font(.system(size: 13))
+            .orbFont(size: 13)
             .foregroundStyle(.secondary)
             .lineSpacing(5)
             .textSelection(.enabled)
@@ -719,7 +719,7 @@ extension PlaygroundMessageView {
         VStack(alignment: .leading, spacing: 12) {
             if isUser {
                 Text(message.content)
-                    .font(.system(size: 14))
+                    .orbFont(size: 14)
                     .lineSpacing(5)
                     .textSelection(.enabled)
                 if let parts = message.parts, !parts.isEmpty {
@@ -741,7 +741,7 @@ extension PlaygroundMessageView {
                 } icon: {
                     Image(systemName: message.status == .failed ? "exclamationmark.triangle" : "pause.circle")
                 }
-                .font(.system(size: 11, weight: .medium))
+                .orbFont(size: 11, weight: .medium)
                 .foregroundStyle(message.status == .failed ? Color.orange : Color.secondary)
             }
         }
@@ -799,7 +799,7 @@ extension PlaygroundMessageView {
                     case .text:
                         MarkdownText(content: segment.text, accent: accent,
                                      showsCursor: isStreaming && !isReasoning && segment.id == segments.last?.id)
-                            .font(.system(size: 14))
+                            .orbFont(size: 14)
                             .lineSpacing(6)
                             .textSelection(.enabled)
                             .frame(maxWidth: .infinity, alignment: .leading)
@@ -872,15 +872,15 @@ struct PlaygroundErrorBanner: View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(alignment: .top, spacing: 9) {
                 Image(systemName: "exclamationmark.triangle.fill")
-                    .font(.system(size: 11))
+                    .orbFont(size: 11)
                     .foregroundStyle(.orange)
                     .padding(.top, 1)
                 VStack(alignment: .leading, spacing: 2) {
                     Text(summary.headline)
-                        .font(.system(size: 11, weight: .semibold))
+                        .orbFont(size: 11, weight: .semibold)
                     if let hint = summary.hint {
                         Text(hint)
-                            .font(.system(size: 11))
+                            .orbFont(size: 11)
                             .foregroundStyle(.secondary)
                     }
                 }
@@ -889,7 +889,7 @@ struct PlaygroundErrorBanner: View {
                     withAnimation(ORBMotion.oneShot(.easeInOut(duration: 0.15), system: reduceMotion)) { showsDetail.toggle() }
                 } label: {
                     Text(showsDetail ? "Hide details" : "Details")
-                        .font(.system(size: 11, weight: .medium))
+                        .orbFont(size: 11, weight: .medium)
                         .foregroundStyle(.secondary)
                 }
                 .buttonStyle(.plain)
@@ -897,14 +897,14 @@ struct PlaygroundErrorBanner: View {
                     AppToasts.copy(message, what: "Error details")
                 } label: {
                     Image(systemName: "doc.on.doc")
-                        .font(.system(size: 11))
+                        .orbFont(size: 11)
                         .foregroundStyle(.secondary)
                 }
                 .buttonStyle(.plain)
                 .help("Copy error details")
                 Button(action: onDismiss) {
                     Image(systemName: "xmark")
-                        .font(.system(size: 11, weight: .semibold))
+                        .orbFont(size: 11, weight: .semibold)
                         .foregroundStyle(.secondary)
                 }
                 .buttonStyle(.plain)
@@ -913,12 +913,12 @@ struct PlaygroundErrorBanner: View {
 
             if showsDetail {
                 Text(message)
-                    .font(.system(size: 11, design: .monospaced))
+                    .orbFont(size: 11, design: .monospaced)
                     .foregroundStyle(.secondary)
                     .textSelection(.enabled)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(8)
-                    .background(Color.primary.opacity(0.04))
+                    .background(.orbSurface(0.04))
                     .clipShape(RoundedRectangle(cornerRadius: 6))
             }
         }

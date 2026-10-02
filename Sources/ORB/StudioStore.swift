@@ -87,6 +87,7 @@ final class StudioNotifier {
         let content = UNMutableNotificationContent()
         content.title = title
         content.body = body
+        if JobNotification.soundEnabled() { content.sound = .default }
         center.add(UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil))
     }
 }

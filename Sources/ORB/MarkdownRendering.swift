@@ -392,7 +392,7 @@ private struct MarkdownBlockView: View, Equatable {
             Text(MarkdownParser.inline(text)) + cursorText
         case .heading(let level, let text):
             Text(MarkdownParser.inline(text))
-                .font(.system(size: Self.headingSize(level), weight: .bold))
+                .orbFont(size: Self.headingSize(level), weight: .bold)
                 .padding(.top, level <= 2 ? 6 : 2)
         case .bullet(let items):
             listView(items.map { MarkdownListItem(depth: 0, marker: "•", text: $0, checked: nil) })
@@ -424,7 +424,7 @@ private struct MarkdownBlockView: View, Equatable {
                 HStack(alignment: .firstTextBaseline, spacing: 8) {
                     if let checked = item.checked {
                         Image(systemName: checked ? "checkmark.square.fill" : "square")
-                            .font(.system(size: 12))
+                            .orbFont(size: 12)
                             .foregroundStyle(checked ? accent : Color.secondary)
                             .frame(minWidth: 16, alignment: .trailing)
                     } else if item.marker == "•" {
@@ -435,7 +435,7 @@ private struct MarkdownBlockView: View, Equatable {
                             .frame(minWidth: 16, alignment: .trailing)
                     } else {
                         Text(item.marker)
-                            .font(.system(size: 12, weight: .semibold, design: .rounded))
+                            .orbFont(size: 12, weight: .semibold, design: .rounded)
                             .foregroundStyle(accent.opacity(0.8))
                             .frame(minWidth: 16, alignment: .trailing)
                     }
@@ -494,7 +494,7 @@ private struct MarkdownTableView: View {
     private func cellView(_ text: String, column: Int, isHeader: Bool) -> some View {
         let alignment = column < table.alignments.count ? table.alignments[column] : .leading
         return Text(MarkdownParser.inline(text))
-            .font(.system(size: 12, weight: isHeader ? .semibold : .regular))
+            .orbFont(size: 12, weight: isHeader ? .semibold : .regular)
             .multilineTextAlignment(alignment == .trailing ? .trailing : alignment == .center ? .center : .leading)
             .frame(maxWidth: .infinity, alignment: alignment == .trailing ? .trailing : alignment == .center ? .center : .leading)
             .fixedSize(horizontal: false, vertical: true)
@@ -541,10 +541,10 @@ struct CodeBlockView: View {
         VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 6) {
                 Image(systemName: "chevron.left.forwardslash.chevron.right")
-                    .font(.system(size: 11, weight: .bold))
+                    .orbFont(size: 11, weight: .bold)
                     .foregroundStyle(accent.opacity(0.75))
                 Text((language ?? "code").lowercased())
-                    .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                    .orbFont(size: 11, weight: .semibold, design: .monospaced)
                     .foregroundStyle(.secondary)
                 if isStreaming {
                     ProgressView().controlSize(.mini).scaleEffect(0.6)
@@ -553,7 +553,7 @@ struct CodeBlockView: View {
                 if isHovering || copied {
                     Button(action: copyCode) {
                         Label(copied ? "Copied" : "Copy", systemImage: copied ? "checkmark" : "doc.on.doc")
-                            .font(.system(size: 11, weight: .medium))
+                            .orbFont(size: 11, weight: .medium)
                             .foregroundStyle(copied ? Color.green : Color.secondary)
                     }
                     .buttonStyle(.plain)
@@ -561,24 +561,24 @@ struct CodeBlockView: View {
             }
             .padding(.horizontal, 10)
             .padding(.vertical, 6)
-            .background(Color.primary.opacity(0.05))
+            .background(.orbSurface(0.05))
 
             Divider().opacity(0.4)
 
             ScrollView(.horizontal, showsIndicators: false) {
                 Text(source)
-                    .font(.system(size: 11.5, design: .monospaced))
+                    .orbFont(size: 11.5, design: .monospaced)
                     .textSelection(.enabled)
                     .padding(.horizontal, 12)
                     .padding(.vertical, 9)
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
         }
-        .background(Color.primary.opacity(0.028))
+        .background(.orbSurface(0.028))
         .clipShape(RoundedRectangle(cornerRadius: 8))
         .overlay {
             RoundedRectangle(cornerRadius: 8)
-                .stroke(Color.primary.opacity(0.07), lineWidth: 0.5)
+                .stroke(.orbSurface(0.07), lineWidth: 0.5)
         }
         .onHover { isHovering = $0 }
         .contextMenu { Button("Copy code", systemImage: "doc.on.doc") { copyCode() } }

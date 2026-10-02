@@ -31,16 +31,16 @@ struct ConversationSidebarHeader: View {
                         )
                     )
                 Image(systemName: icon)
-                    .font(.system(size: 13, weight: .bold))
+                    .orbFont(size: 13, weight: .bold)
                     .foregroundStyle(.white)
             }
             .frame(width: 30, height: 30)
 
             VStack(alignment: .leading, spacing: 1) {
                 Text(title)
-                    .font(.system(size: 14, weight: .semibold))
+                    .orbFont(size: 14, weight: .semibold)
                 Text(subtitle)
-                    .font(.system(size: 11, weight: .medium))
+                    .orbFont(size: 11, weight: .medium)
                     .foregroundStyle(.secondary)
             }
             Spacer()
@@ -49,7 +49,7 @@ struct ConversationSidebarHeader: View {
                     onToggleSelecting()
                 }
                 .buttonStyle(.plain)
-                .font(.system(size: 11, weight: .semibold))
+                .orbFont(size: 11, weight: .semibold)
                 .foregroundStyle(isSelecting ? accent : .secondary)
                 .disabled(!canSelect && !isSelecting)
                 .help(isSelecting ? "Exit selection mode" : "Select multiple sessions")
@@ -62,7 +62,7 @@ struct ConversationSidebarHeader: View {
                 }
             } label: {
                 Image(systemName: "square.and.pencil")
-                    .font(.system(size: 13, weight: .semibold))
+                    .orbFont(size: 13, weight: .semibold)
             }
             .buttonStyle(.plain)
             .help("New session")
@@ -98,14 +98,14 @@ struct ConversationRow: View {
                 HStack(spacing: 6) {
                     if isSelecting {
                         Image(systemName: isChecked ? "checkmark.circle.fill" : "circle")
-                            .font(.system(size: 12))
+                            .orbFont(size: 12)
                             .foregroundStyle(isChecked ? accent : .secondary)
                     }
                     Image(systemName: icon)
-                        .font(.system(size: 11, weight: .semibold))
+                        .orbFont(size: 11, weight: .semibold)
                         .foregroundStyle(isSelected ? accent : .secondary)
                     Text(conversation.title)
-                        .font(.system(size: 12, weight: isSelected ? .semibold : .medium))
+                        .orbFont(size: 12, weight: isSelected ? .semibold : .medium)
                         .lineLimit(1)
                     Spacer(minLength: 0)
                     if isRunning {
@@ -122,7 +122,7 @@ struct ConversationRow: View {
                     Text("\(conversation.messages.count)")
                     Image(systemName: "bubble.left")
                 }
-                .font(.system(size: 11, weight: .medium))
+                .orbFont(size: 11, weight: .medium)
                 .foregroundStyle(.tertiary)
             }
             .padding(.horizontal, 10)
@@ -180,24 +180,24 @@ struct ConversationSelectionBar: View {
 
     var body: some View {
         VStack(spacing: 8) {
-            Rectangle().fill(Color.primary.opacity(0.07)).frame(height: 1)
+            Rectangle().fill(.orbSurface(0.07)).frame(height: 1)
             HStack(spacing: 8) {
                 Text("\(selectedCount) selected")
-                    .font(.system(size: 11, weight: .semibold))
+                    .orbFont(size: 11, weight: .semibold)
                     .foregroundStyle(.secondary)
                 Spacer()
                 Button(selectedCount == totalCount ? "Select None" : "Select All") {
                     if selectedCount == totalCount { onClear() } else { onSelectAll() }
                 }
                 .buttonStyle(.plain)
-                .font(.system(size: 11, weight: .medium))
+                .orbFont(size: 11, weight: .medium)
                 .foregroundStyle(accent)
             }
             Button(role: .destructive) {
                 showConfirm = true
             } label: {
                 Label("Delete \(selectedCount)", systemImage: "trash")
-                    .font(.system(size: 12, weight: .semibold))
+                    .orbFont(size: 12, weight: .semibold)
                     .frame(maxWidth: .infinity)
             }
             .buttonStyle(.borderedProminent)
@@ -230,7 +230,7 @@ struct ConversationSidebarFooter: View {
     var body: some View {
         VStack(spacing: 9) {
             Rectangle()
-                .fill(Color.primary.opacity(0.07))
+                .fill(.orbSurface(0.07))
                 .frame(height: 1)
             HStack(spacing: 7) {
                 Circle()
@@ -238,12 +238,12 @@ struct ConversationSidebarFooter: View {
                     .frame(width: 7, height: 7)
                     .shadow(color: statusColor.opacity(0.6), radius: 3)
                 Text(statusText)
-                    .font(.system(size: 11, weight: .medium))
+                    .orbFont(size: 11, weight: .medium)
                     .foregroundStyle(.secondary)
                 Spacer()
                 if tokensPerSecond > 0 {
                     Text("\(String(format: "%.1f", tokensPerSecond)) tok/s")
-                        .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                        .orbFont(size: 11, weight: .semibold, design: .monospaced)
                         .foregroundStyle(.orange)
                         .padding(.horizontal, 6)
                         .padding(.vertical, 2)
@@ -257,7 +257,7 @@ struct ConversationSidebarFooter: View {
                     Spacer()
                     Text(formattedCost(conversation.totalCost))
                 }
-                .font(.system(size: 11, weight: .medium, design: .monospaced))
+                .orbFont(size: 11, weight: .medium, design: .monospaced)
                 .foregroundStyle(.secondary)
             }
         }
@@ -272,10 +272,10 @@ struct EmptyConversationList: View {
     var body: some View {
         VStack(spacing: 10) {
             Image(systemName: "bubble.left.and.sparkles")
-                .font(.system(size: 24, weight: .light))
+                .orbFont(size: 24, weight: .light)
                 .foregroundStyle(accent.opacity(0.75))
             Text("Your sessions\nwill appear here")
-                .font(.system(size: 11))
+                .orbFont(size: 11)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
         }

@@ -19,7 +19,7 @@ struct ConversationSearchField: View {
             }
         }
         .padding(.horizontal, 8).padding(.vertical, 6)
-        .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 8))
+        .background(.orbSurface(0.06), in: RoundedRectangle(cornerRadius: 8))
         .padding(.horizontal, 10)
         .padding(.bottom, 6)
     }
@@ -84,11 +84,11 @@ struct ConversationSectionsList: View {
                         } header: {
                             HStack {
                                 Text(section.title.uppercased())
-                                    .font(.system(size: 11, weight: .bold))
+                                    .orbFont(size: 11, weight: .bold)
                                     .foregroundStyle(.secondary)
                                 Spacer()
                                 Text("\(section.items.count)")
-                                    .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                                    .orbFont(size: 11, weight: .semibold, design: .monospaced)
                                     .foregroundStyle(.secondary)
                             }
                             .padding(.horizontal, 4).padding(.vertical, 5)
@@ -123,7 +123,7 @@ struct ContextGaugeView: View {
             Text(gauge.level == .normal ? gauge.summary : "\(gauge.statusWord) · \(gauge.summary)")
                 .monospacedDigit()
         }
-        .font(.system(size: 11, weight: .medium))
+        .orbFont(size: 11, weight: .medium)
         .foregroundStyle(tint)
         .help("Estimated from text length, not exact. Context window: \(gauge.contextLength) tokens.")
         .accessibilityElement(children: .ignore)
@@ -141,7 +141,7 @@ struct SlashCommandMenu: View {
                 ForEach(entries) { entry in
                     Button { pick(entry) } label: {
                         HStack {
-                            Text("/" + entry.name).font(.system(size: 12, weight: .semibold, design: .monospaced))
+                            Text("/" + entry.name).orbFont(size: 12, weight: .semibold, design: .monospaced)
                             Text(entry.summary).font(ORBFont.caption).foregroundStyle(.secondary)
                             Spacer()
                         }
@@ -217,7 +217,7 @@ struct ConversationMeterView: View {
     var body: some View {
         if let conversation {
             Text(ConversationMeter.text(tokens: conversation.totalTokens, cost: conversation.totalCost))
-                .font(.system(size: 11, weight: .medium))
+                .orbFont(size: 11, weight: .medium)
                 .monospacedDigit()
                 .foregroundStyle(.secondary)
                 .help("Tokens and cost for this session")
@@ -252,7 +252,7 @@ struct EditableTitle: View {
                     .accessibilityAction(named: "Rename") { begin() }
             }
         }
-        .font(.system(size: 15, weight: .semibold))
+        .orbFont(size: 15, weight: .semibold)
     }
 
     private func begin() { draft = title; editing = true; focused = true }
@@ -316,7 +316,7 @@ struct ApprovalSheet: View {
         let p = ApprovalPresentation.make(toolName: request.toolName, server: request.server, summary: request.summary)
         VStack(alignment: .leading, spacing: 14) {
             HStack(spacing: 10) {
-                Image(systemName: p.symbol).font(.system(size: 26)).foregroundStyle(p.risk == .high ? .red : ORBTheme.warning)
+                Image(systemName: p.symbol).orbFont(size: 26).foregroundStyle(p.risk == .high ? .red : ORBTheme.warning)
                     .accessibilityHidden(true)
                 VStack(alignment: .leading, spacing: 2) {
                     Text(p.title).font(ORBFont.headline)
@@ -329,13 +329,13 @@ struct ApprovalSheet: View {
                 .font(ORBFont.footnote).foregroundStyle(.secondary)
             ScrollView {
                 Text(p.displaySummary)
-                    .font(.system(size: 12, design: .monospaced))
+                    .orbFont(size: 12, design: .monospaced)
                     .textSelection(.enabled)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(8)
             }
             .frame(maxHeight: 140)
-            .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 8))
+            .background(.orbSurface(0.06), in: RoundedRectangle(cornerRadius: 8))
             if waiting > 0 {
                 Text("\(waiting) more waiting").font(ORBFont.caption).foregroundStyle(.secondary)
             }

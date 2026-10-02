@@ -204,7 +204,7 @@ struct TestResultsTableView: View {
                 } label: {
                     HStack(spacing: 2) {
                         Text(f.title)
-                        if field == f { Image(systemName: ascending ? "chevron.up" : "chevron.down").font(.system(size: 11)) }
+                        if field == f { Image(systemName: ascending ? "chevron.up" : "chevron.down").orbFont(size: 11) }
                     }
                     .font(ORBFont.caption.weight(.semibold))
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -231,7 +231,7 @@ struct TestResultsTableView: View {
             }
             .font(ORBFont.footnote)
             .padding(.horizontal, 10).padding(.vertical, 6)
-            .background(Color.primary.opacity(0.03), in: RoundedRectangle(cornerRadius: 8))
+            .background(.orbSurface(0.03), in: RoundedRectangle(cornerRadius: 8))
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)

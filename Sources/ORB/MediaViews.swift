@@ -139,7 +139,7 @@ struct ImagesView: View {
     var body: some View {
         HStack(spacing: 0) {
             controlsColumn
-            Rectangle().fill(Color.primary.opacity(0.07)).frame(width: 1)
+            Rectangle().fill(.orbSurface(0.07)).frame(width: 1)
             galleryColumn
         }
         .task {
@@ -322,7 +322,7 @@ struct ImagesView: View {
                             HStack(spacing: 4) {
                                 Text(url.lastPathComponent).lineLimit(1)
                                 Button { referenceURLs.removeAll { $0 == url } } label: {
-                                    Image(systemName: "xmark").font(.system(size: 11, weight: .bold))
+                                    Image(systemName: "xmark").orbFont(size: 11, weight: .bold)
                                 }.buttonStyle(.plain)
                             }
                             .font(.caption)
@@ -434,8 +434,8 @@ struct ImagesView: View {
             }.font(.caption)
         }
         .padding(12)
-        .background(Color.primary.opacity(0.035), in: RoundedRectangle(cornerRadius: 14))
-        .overlay { RoundedRectangle(cornerRadius: 14).stroke(Color.primary.opacity(0.07), lineWidth: 0.5) }
+        .background(.orbSurface(0.035), in: RoundedRectangle(cornerRadius: 14))
+        .overlay { RoundedRectangle(cornerRadius: 14).stroke(.orbSurface(0.07), lineWidth: 0.5) }
     }
 
     private func header(title: String, subtitle: String, icon: String) -> some View {
@@ -445,8 +445,8 @@ struct ImagesView: View {
                 Image(systemName: icon).foregroundStyle(accent)
             }
             VStack(alignment: .leading, spacing: 1) {
-                Text(title).font(.system(size: 15, weight: .semibold))
-                Text(subtitle).font(.system(size: 11)).foregroundStyle(.secondary)
+                Text(title).orbFont(size: 15, weight: .semibold)
+                Text(subtitle).orbFont(size: 11).foregroundStyle(.secondary)
             }
         }
     }
@@ -664,7 +664,7 @@ struct ImageGeneratingPlaceholder: View {
                     .clipShape(RoundedRectangle(cornerRadius: 12))
                     VStack(spacing: 8) {
                         Image(systemName: "sparkles")
-                            .font(.system(size: 28, weight: .medium))
+                            .orbFont(size: 28, weight: .medium)
                             .foregroundStyle(accent)
                             .scaleEffect(0.9 + 0.2 * pulse)
                             .opacity(0.6 + 0.4 * pulse)
@@ -677,7 +677,7 @@ struct ImageGeneratingPlaceholder: View {
                 .overlay { RoundedRectangle(cornerRadius: 12).stroke(accent.opacity(0.25 + 0.2 * pulse), lineWidth: 1) }
             }
             .padding(12)
-            .background(Color.primary.opacity(0.035), in: RoundedRectangle(cornerRadius: 14))
+            .background(.orbSurface(0.035), in: RoundedRectangle(cornerRadius: 14))
         }
         .accessibilityLabel("Generating image")
     }
@@ -723,7 +723,7 @@ struct VideoView: View {
     var body: some View {
         HStack(spacing: 0) {
             controlsColumn
-            Rectangle().fill(Color.primary.opacity(0.07)).frame(width: 1)
+            Rectangle().fill(.orbSurface(0.07)).frame(width: 1)
             jobsColumn
         }
         .task {
@@ -806,7 +806,7 @@ struct VideoView: View {
                                 ForEach(durations, id: \.self) { Text("\($0) s").tag(String($0)) }
                             }.labelsHidden()
                         } else {
-                            Text("Model default").font(.system(size: 12)).foregroundStyle(.secondary)
+                            Text("Model default").orbFont(size: 12).foregroundStyle(.secondary)
                         }
                     }
                     StudioField("Size") {
@@ -947,12 +947,12 @@ struct VideoView: View {
                 VStack(spacing: 14) {
                     ZStack {
                         Circle().fill(accent.opacity(0.10)).frame(width: 96, height: 96)
-                        Image(systemName: "film").font(.system(size: 32)).foregroundStyle(accent)
+                        Image(systemName: "film").orbFont(size: 32).foregroundStyle(accent)
                     }
                     Text("Generate video")
-                        .font(.system(size: 24, weight: .semibold, design: .rounded))
+                        .orbFont(size: 24, weight: .semibold, design: .rounded)
                     Text("Video jobs take minutes. Submit one and it polls here until the download is ready.")
-                        .font(.system(size: 13)).foregroundStyle(.secondary)
+                        .orbFont(size: 13).foregroundStyle(.secondary)
                         .multilineTextAlignment(.center).frame(maxWidth: 460)
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -970,7 +970,7 @@ struct VideoView: View {
                                     }
                                     Spacer()
                                     Button("Export…") { exportSaved(creation) }
-                                }.padding(12).background(Color.primary.opacity(0.03))
+                                }.padding(12).background(.orbSurface(0.03))
                             }
                         }
                         ForEach(jobs) { record in
@@ -994,7 +994,7 @@ struct VideoView: View {
         if !resumableRecords.isEmpty || service.durablePersistenceError != nil {
             VStack(alignment: .leading, spacing: 8) {
                 Text("RECOVERABLE JOBS")
-                    .font(.system(size: 11, weight: .bold))
+                    .orbFont(size: 11, weight: .bold)
                     .foregroundStyle(.secondary)
                 ForEach(resumableRecords) { record in
                     resumableRow(record)
@@ -1039,7 +1039,7 @@ struct VideoView: View {
             }
         }
         .padding(10)
-        .background(Color.primary.opacity(0.03))
+        .background(.orbSurface(0.03))
         .clipShape(RoundedRectangle(cornerRadius: 10))
         .accessibilityElement(children: .combine)
     }
@@ -1091,7 +1091,7 @@ struct VideoView: View {
                 Spacer()
                 statusPill(record.job.status)
             }
-            Text(record.prompt).font(.system(size: 12)).lineLimit(3)
+            Text(record.prompt).orbFont(size: 12).lineLimit(3)
             if let cost = record.job.cost {
                 Text("Cost: $\(cost, specifier: "%.4f")")
                     .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
@@ -1122,7 +1122,7 @@ struct VideoView: View {
             }
         }
         .padding(12)
-        .background(Color.primary.opacity(0.03))
+        .background(.orbSurface(0.03))
         .clipShape(RoundedRectangle(cornerRadius: 12))
     }
 
@@ -1130,7 +1130,7 @@ struct VideoView: View {
         let color: Color = status == "completed" ? .green
             : status == "failed" || status == "expired" || status == "cancelled" ? .red : .orange
         return Text(status.uppercased())
-            .font(.system(size: 11, weight: .bold))
+            .orbFont(size: 11, weight: .bold)
             .padding(.horizontal, 7).padding(.vertical, 3)
             .background(color.opacity(0.14))
             .foregroundStyle(color)
@@ -1144,8 +1144,8 @@ struct VideoView: View {
                 Image(systemName: icon).foregroundStyle(accent)
             }
             VStack(alignment: .leading, spacing: 1) {
-                Text(title).font(.system(size: 15, weight: .semibold))
-                Text(subtitle).font(.system(size: 11)).foregroundStyle(.secondary)
+                Text(title).orbFont(size: 15, weight: .semibold)
+                Text(subtitle).orbFont(size: 11).foregroundStyle(.secondary)
             }
         }
     }

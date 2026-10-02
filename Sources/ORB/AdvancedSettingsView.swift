@@ -238,7 +238,7 @@ struct AdvancedSettingsView: View {
                         .textFieldStyle(.roundedBorder)
                     Text("JSON Schema (object)").font(.callout)
                     TextEditor(text: $jsonSchemaText)
-                        .font(.system(size: 11, design: .monospaced))
+                        .orbFont(size: 11, design: .monospaced)
                         .frame(minHeight: 90)
                         .overlay {
                             RoundedRectangle(cornerRadius: 6)

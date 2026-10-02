@@ -41,6 +41,9 @@ struct ShellCommands: Commands {
     let focusManager: FocusManager
 
     var body: some Commands {
+        CommandGroup(replacing: .appInfo) {
+            Button("About ORB") { AboutWindow.show() }
+        }
         CommandGroup(replacing: .newItem) {
             Button("New Chat") { shell.send(.newChat) }
                 .keyboardShortcut("n", modifiers: .command)

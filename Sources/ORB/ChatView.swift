@@ -55,7 +55,7 @@ struct ChatView: View {
         HStack(spacing: 0) {
             conversationSidebar
             Rectangle()
-                .fill(Color.primary.opacity(0.07))
+                .fill(.orbSurface(0.07))
                 .frame(width: 1)
             mainArea
         }
@@ -78,7 +78,7 @@ struct ChatView: View {
         VStack(spacing: 0) {
             chatHeader
             Rectangle()
-                .fill(Color.primary.opacity(0.07))
+                .fill(.orbSurface(0.07))
                 .frame(height: 1)
             if let error = chatService.lastError,
                chatService.lastErrorConversationID == nil || chatService.lastErrorConversationID == chatService.activeConversation?.id {
@@ -187,16 +187,16 @@ struct ChatView: View {
     private func sidebarSectionHeader(title: String, icon: String, count: Int) -> some View {
         HStack(spacing: 6) {
             Image(systemName: icon)
-                .font(.system(size: 11, weight: .semibold))
+                .orbFont(size: 11, weight: .semibold)
                 .foregroundStyle(accent)
             Text(title.uppercased())
-                .font(.system(size: 11, weight: .bold))
+                .orbFont(size: 11, weight: .bold)
             Text("\(count)")
-                .font(.system(size: 11, weight: .bold, design: .monospaced))
+                .orbFont(size: 11, weight: .bold, design: .monospaced)
                 .foregroundStyle(.secondary)
                 .padding(.horizontal, 5)
                 .padding(.vertical, 2)
-                .background(Color.primary.opacity(0.06))
+                .background(.orbSurface(0.06))
                 .clipShape(Capsule())
             Spacer()
         }
@@ -218,7 +218,7 @@ struct ChatView: View {
                     Image(systemName: "bolt.horizontal")
                     Text("Direct OpenRouter completion")
                 }
-                .font(.system(size: 11, weight: .medium))
+                .orbFont(size: 11, weight: .medium)
                 .foregroundStyle(.secondary)
             }
 
@@ -240,7 +240,7 @@ struct ChatView: View {
                         Image(systemName: "arrow.clockwise")
                         Text("Regenerate")
                     }
-                    .font(.system(size: 11, weight: .semibold))
+                    .orbFont(size: 11, weight: .semibold)
                     .foregroundStyle(accent)
                     .padding(.horizontal, 9)
                     .padding(.vertical, 6)
@@ -268,9 +268,9 @@ struct ChatView: View {
                         .disabled(chatService.isRunning(conversationID: conversation.id))
                 } label: {
                     Image(systemName: "ellipsis.circle")
-                        .font(.system(size: 13, weight: .semibold))
+                        .orbFont(size: 13, weight: .semibold)
                         .frame(width: 28, height: 28)
-                        .background(Color.primary.opacity(0.05))
+                        .background(.orbSurface(0.05))
                         .clipShape(RoundedRectangle(cornerRadius: 7))
                 }
                 .menuStyle(.borderlessButton)
@@ -283,9 +283,9 @@ struct ChatView: View {
                 showSettings.toggle()
             } label: {
                 Image(systemName: "slider.horizontal.3")
-                    .font(.system(size: 12, weight: .semibold))
+                    .orbFont(size: 12, weight: .semibold)
                     .frame(width: 28, height: 28)
-                    .background(Color.primary.opacity(0.05))
+                    .background(.orbSurface(0.05))
                     .clipShape(RoundedRectangle(cornerRadius: 7))
             }
             .buttonStyle(.plain)
@@ -311,13 +311,13 @@ struct ChatView: View {
                 Text(shortModelName(currentModelId))
                     .lineLimit(1)
                 Image(systemName: "chevron.down")
-                    .font(.system(size: 11, weight: .bold))
+                    .orbFont(size: 11, weight: .bold)
                     .foregroundStyle(.tertiary)
             }
-            .font(.system(size: 11, weight: .semibold))
+            .orbFont(size: 11, weight: .semibold)
             .padding(.horizontal, 9)
             .padding(.vertical, 6)
-            .background(Color.primary.opacity(0.05))
+            .background(.orbSurface(0.05))
             .clipShape(RoundedRectangle(cornerRadius: 7))
         }
         .buttonStyle(.plain)
@@ -414,7 +414,7 @@ struct ChatView: View {
 
             VStack(alignment: .leading, spacing: 7) {
                 Text("SYSTEM PROMPT (OPTIONAL)")
-                    .font(.system(size: 11, weight: .bold))
+                    .orbFont(size: 11, weight: .bold)
                     .foregroundStyle(.secondary)
                 TextEditor(text: Binding(
                     get: { chatService.activeConversation?.systemPrompt ?? "" },
@@ -424,7 +424,7 @@ struct ChatView: View {
                         }
                     }
                 ))
-                .font(.system(size: 11))
+                .orbFont(size: 11)
                 .frame(height: 80)
                 .overlay {
                     RoundedRectangle(cornerRadius: 6)
@@ -576,7 +576,7 @@ struct ChatView: View {
                         .stroke(accent.opacity(0.18), lineWidth: 1)
                         .frame(width: 82, height: 82)
                     Image(systemName: "bubble.left.and.bubble.right.fill")
-                        .font(.system(size: 34, weight: .medium))
+                        .orbFont(size: 34, weight: .medium)
                         .foregroundStyle(
                             LinearGradient(
                                 colors: [accent, .blue],
@@ -588,9 +588,9 @@ struct ChatView: View {
 
                 VStack(spacing: 8) {
                     Text("Explore any model")
-                        .font(.system(size: 26, weight: .semibold, design: .rounded))
+                        .orbFont(size: 26, weight: .semibold, design: .rounded)
                     Text("Chat directly with any model in the OpenRouter catalog. Responses stream live with usage and cost tracking.")
-                        .font(.system(size: 13))
+                        .orbFont(size: 13)
                         .foregroundStyle(.secondary)
                         .multilineTextAlignment(.center)
                         .frame(maxWidth: 570)
@@ -627,7 +627,7 @@ struct ChatView: View {
                 .scaleEffect(0.5)
                 .frame(width: 16, height: 16)
             Text(chatService.activityLabel)
-                .font(.system(size: 11, weight: .medium))
+                .orbFont(size: 11, weight: .medium)
                 .foregroundStyle(.secondary)
                 .contentTransition(.opacity)
             Spacer(minLength: 0)
@@ -660,7 +660,7 @@ struct ChatView: View {
                         Label(warning, systemImage: "exclamationmark.triangle")
                     }
                 }
-                .font(.system(size: 11))
+                .orbFont(size: 11)
                 .foregroundStyle(.orange)
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
@@ -672,7 +672,7 @@ struct ChatView: View {
             VStack(spacing: 0) {
                 TextField(composerPlaceholder, text: $messageText, axis: .vertical)
                     .textFieldStyle(.plain)
-                    .font(.system(size: 13))
+                    .orbFont(size: 13)
                     .lineLimit(1...7)
                     .focused($inputFocused)
                     .padding(.horizontal, 14)
@@ -683,9 +683,9 @@ struct ChatView: View {
                 HStack(spacing: 9) {
                     Button(action: chooseAttachments) {
                         Image(systemName: "paperclip")
-                            .font(.system(size: 12, weight: .semibold))
+                            .orbFont(size: 12, weight: .semibold)
                             .frame(width: 25, height: 25)
-                            .background(Color.primary.opacity(0.05))
+                            .background(.orbSurface(0.05))
                             .clipShape(Circle())
                     }
                     .buttonStyle(.plain)
@@ -696,12 +696,12 @@ struct ChatView: View {
                     if let gauge = contextGauge { ContextGaugeView(gauge: gauge) }
 
                     Text(ComposerKeyPolicy.hint(requireCommand: requireCommandToSend))
-                        .font(.system(size: 11, weight: .medium))
+                        .orbFont(size: 11, weight: .medium)
                         .foregroundStyle(.tertiary)
 
                     Button(action: sendOrStop) {
                         Image(systemName: currentSessionRunning ? "stop.fill" : "arrow.up")
-                            .font(.system(size: 11, weight: .bold))
+                            .orbFont(size: 11, weight: .bold)
                             .foregroundStyle(.white)
                             .frame(width: 28, height: 28)
                             .background(canSend || currentSessionRunning ? accent : Color.gray.opacity(0.45))
@@ -726,7 +726,7 @@ struct ChatView: View {
             .dropDestination(for: URL.self) { urls, _ in handleDrop(urls) } isTargeted: { dropTargeted = $0 }
 
             Text("AI can make mistakes. Review important output.")
-                .font(.system(size: 11))
+                .orbFont(size: 11)
                 .foregroundStyle(Color.secondary)
         }
         .frame(maxWidth: 820)

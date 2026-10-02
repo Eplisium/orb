@@ -33,7 +33,7 @@ struct TestSuiteView: View {
         HStack(spacing: 0) {
             categorySidebar
             Rectangle()
-                .fill(Color.primary.opacity(0.07))
+                .fill(.orbSurface(0.07))
                 .frame(width: 1)
             mainArea
         }
@@ -157,16 +157,16 @@ struct TestSuiteView: View {
                         )
                     )
                 Image(systemName: "checkmark.seal.fill")
-                    .font(.system(size: 13, weight: .bold))
+                    .orbFont(size: 13, weight: .bold)
                     .foregroundStyle(.white)
             }
             .frame(width: 30, height: 30)
 
             VStack(alignment: .leading, spacing: 1) {
                 Text("Test Suite")
-                    .font(.system(size: 14, weight: .semibold))
+                    .orbFont(size: 14, weight: .semibold)
                 Text("Text & project tests")
-                    .font(.system(size: 11, weight: .medium))
+                    .orbFont(size: 11, weight: .medium)
                     .foregroundStyle(.secondary)
             }
             Spacer()
@@ -183,13 +183,13 @@ struct TestSuiteView: View {
             Text(shortModelName(currentModelId))
                 .lineLimit(1)
             Image(systemName: "chevron.down")
-                .font(.system(size: 11, weight: .bold))
+                .orbFont(size: 11, weight: .bold)
                 .foregroundStyle(.tertiary)
         }
-        .font(.system(size: 11, weight: .semibold))
+        .orbFont(size: 11, weight: .semibold)
         .padding(.horizontal, 10)
         .padding(.vertical, 7)
-        .background(Color.primary.opacity(0.05))
+        .background(.orbSurface(0.05))
         .clipShape(RoundedRectangle(cornerRadius: controlRadius))
         .contentShape(Rectangle())
         .onTapGesture {
@@ -226,10 +226,10 @@ struct TestSuiteView: View {
                 } header: {
                     HStack(spacing: 6) {
                         Image(systemName: "square.grid.2x2")
-                            .font(.system(size: 11, weight: .semibold))
+                            .orbFont(size: 11, weight: .semibold)
                             .foregroundStyle(accent)
                         Text("CATEGORIES")
-                            .font(.system(size: 11, weight: .bold))
+                            .orbFont(size: 11, weight: .bold)
                         Spacer()
                     }
                     .foregroundStyle(.secondary)
@@ -247,10 +247,10 @@ struct TestSuiteView: View {
         VStack(spacing: 4) {
             HStack(spacing: 6) {
                 Image(systemName: "plus.app")
-                    .font(.system(size: 11, weight: .semibold))
+                    .orbFont(size: 11, weight: .semibold)
                     .foregroundStyle(accent)
                 Text("CUSTOM TESTS")
-                    .font(.system(size: 11, weight: .bold))
+                    .orbFont(size: 11, weight: .bold)
                 Spacer()
             }
             .foregroundStyle(.secondary)
@@ -268,10 +268,10 @@ struct TestSuiteView: View {
 
         return HStack(spacing: 6) {
             Image(systemName: test.icon)
-                .font(.system(size: 11, weight: .semibold))
+                .orbFont(size: 11, weight: .semibold)
                 .foregroundStyle(isSelected ? accent : .secondary)
             Text(test.title)
-                .font(.system(size: 12, weight: isSelected ? .semibold : .medium))
+                .orbFont(size: 12, weight: isSelected ? .semibold : .medium)
                 .lineLimit(1)
             Spacer(minLength: 0)
         }
@@ -314,14 +314,14 @@ struct TestSuiteView: View {
         } label: {
             HStack(spacing: 6) {
                 Image(systemName: icon)
-                    .font(.system(size: 11, weight: .semibold))
+                    .orbFont(size: 11, weight: .semibold)
                     .foregroundStyle(isSelected ? accent : .secondary)
                 Text(title)
-                    .font(.system(size: 12, weight: isSelected ? .semibold : .medium))
+                    .orbFont(size: 12, weight: isSelected ? .semibold : .medium)
                     .lineLimit(1)
                 Spacer(minLength: 0)
                 Text("\(count)")
-                    .font(.system(size: 11, weight: .medium, design: .monospaced))
+                    .orbFont(size: 11, weight: .medium, design: .monospaced)
                     .foregroundStyle(.tertiary)
             }
             .padding(.horizontal, 10)
@@ -341,7 +341,7 @@ struct TestSuiteView: View {
     private var sidebarFooter: some View {
         VStack(spacing: 9) {
             Rectangle()
-                .fill(Color.primary.opacity(0.07))
+                .fill(.orbSurface(0.07))
                 .frame(height: 1)
 
             HStack(spacing: 7) {
@@ -350,7 +350,7 @@ struct TestSuiteView: View {
                     .frame(width: 7, height: 7)
                     .shadow(color: runnerStatusColor.opacity(0.6), radius: 3)
                 Text(runnerStatusText)
-                    .font(.system(size: 11, weight: .medium))
+                    .orbFont(size: 11, weight: .medium)
                     .foregroundStyle(.secondary)
                 Spacer()
             }
@@ -361,7 +361,7 @@ struct TestSuiteView: View {
                     Spacer()
                     Text(testRunner.formattedTotalCost)
                 }
-                .font(.system(size: 11, weight: .medium, design: .monospaced))
+                .orbFont(size: 11, weight: .medium, design: .monospaced)
                 .foregroundStyle(.secondary)
             }
         }
@@ -389,7 +389,7 @@ struct TestSuiteView: View {
         VStack(spacing: 0) {
             testHeader
             Rectangle()
-                .fill(Color.primary.opacity(0.07))
+                .fill(.orbSurface(0.07))
                 .frame(height: 1)
 
             if let scenario = selectedScenario {
@@ -404,15 +404,15 @@ struct TestSuiteView: View {
         HStack(spacing: 12) {
             VStack(alignment: .leading, spacing: 3) {
                 Text(selectedCategory?.rawValue ?? "All Tests")
-                    .font(.system(size: 16, weight: .semibold))
+                    .orbFont(size: 16, weight: .semibold)
                 if let cat = selectedCategory {
                     Text(cat.description)
-                        .font(.system(size: 11, weight: .medium))
+                        .orbFont(size: 11, weight: .medium)
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
                 } else {
                     Text("\(TestCatalog.availableScenarios.count) prompts — project tasks use tools when available; text probes do not")
-                        .font(.system(size: 11, weight: .medium))
+                        .orbFont(size: 11, weight: .medium)
                         .foregroundStyle(.secondary)
                 }
             }
@@ -426,7 +426,7 @@ struct TestSuiteView: View {
                         Image(systemName: "plus")
                         Text("New Test")
                     }
-                    .font(.system(size: 11, weight: .semibold))
+                    .orbFont(size: 11, weight: .semibold)
                     .padding(.horizontal, 10)
                     .padding(.vertical, 6)
                     .background(accent.opacity(0.12))
@@ -464,7 +464,7 @@ struct TestSuiteView: View {
                 // Scenario cards
                 VStack(alignment: .leading, spacing: 12) {
                     Text("AVAILABLE TESTS")
-                        .font(.system(size: 11, weight: .bold))
+                        .orbFont(size: 11, weight: .bold)
                         .foregroundStyle(.secondary)
 
                     LazyVGrid(columns: [GridItem(.flexible(), spacing: 12), GridItem(.flexible(), spacing: 12)], spacing: 12) {
@@ -485,7 +485,7 @@ struct TestSuiteView: View {
         VStack(alignment: .leading, spacing: 12) {
             HStack {
                 Text("RECENT RESULTS")
-                    .font(.system(size: 11, weight: .bold))
+                    .orbFont(size: 11, weight: .bold)
                     .foregroundStyle(.secondary)
                 Spacer()
                 Button {
@@ -493,14 +493,19 @@ struct TestSuiteView: View {
                     testRunner.clearResults()
                 } label: {
                     Text("Clear All")
-                        .font(.system(size: 11, weight: .medium))
+                        .orbFont(size: 11, weight: .medium)
                         .foregroundStyle(.red)
                 }
                 .buttonStyle(.plain)
             }
 
             Text("Older saved passes may predate artifact checks; rerun to verify them. — cost means zero or unreported; totals are lower bounds.")
-                .font(.system(size: 11)).foregroundStyle(.secondary)
+                .orbFont(size: 11).foregroundStyle(.secondary)
+
+            DisclosureGroup("Compare models side by side") {
+                CompareMatrixView(results: testRunner.results).padding(.top, 6)
+            }
+            .font(ORBFont.footnote)
 
             TestResultsTableView(
                 results: testRunner.results,
@@ -529,13 +534,13 @@ struct TestSuiteView: View {
             HStack(spacing: 10) {
                 Image(systemName: result.errorMessage == TestRunner.unverifiedMessage ? "questionmark.circle.fill" :
                       result.success ? "checkmark.circle.fill" : "xmark.circle.fill")
-                    .font(.system(size: 14))
+                    .orbFont(size: 14)
                     .foregroundStyle(result.errorMessage == TestRunner.unverifiedMessage ? .orange :
                                      result.success ? .green : .red)
 
                 VStack(alignment: .leading, spacing: 2) {
                     Text(result.scenarioTitle)
-                        .font(.system(size: 12, weight: .semibold))
+                        .orbFont(size: 12, weight: .semibold)
                         .lineLimit(1)
                     HStack(spacing: 6) {
                         Text(shortModelName(result.modelId))
@@ -548,17 +553,17 @@ struct TestSuiteView: View {
                             Label("Project", systemImage: "folder.fill")
                         }
                     }
-                    .font(.system(size: 11, weight: .medium, design: .monospaced))
+                    .orbFont(size: 11, weight: .medium, design: .monospaced)
                     .foregroundStyle(.tertiary)
                 }
                 Spacer()
                 Text(testRunner.formattedCost(result.cost))
-                    .font(.system(size: 11, weight: .medium, design: .monospaced))
+                    .orbFont(size: 11, weight: .medium, design: .monospaced)
                     .foregroundStyle(.secondary)
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 9)
-            .background(Color.primary.opacity(0.025))
+            .background(.orbSurface(0.025))
             .clipShape(RoundedRectangle(cornerRadius: controlRadius))
             .contentShape(Rectangle())
         }
@@ -598,17 +603,17 @@ struct TestSuiteView: View {
                         RoundedRectangle(cornerRadius: 8)
                             .fill(accent.opacity(0.10))
                         Image(systemName: scenario.icon)
-                            .font(.system(size: 14, weight: .semibold))
+                            .orbFont(size: 14, weight: .semibold)
                             .foregroundStyle(accent)
                     }
                     .frame(width: 34, height: 34)
 
                     VStack(alignment: .leading, spacing: 2) {
                         Text(scenario.title)
-                            .font(.system(size: 13, weight: .semibold))
+                            .orbFont(size: 13, weight: .semibold)
                             .lineLimit(1)
                         Text(scenario.category.rawValue)
-                            .font(.system(size: 11, weight: .medium))
+                            .orbFont(size: 11, weight: .medium)
                             .foregroundStyle(.secondary)
                     }
                     Spacer()
@@ -619,7 +624,7 @@ struct TestSuiteView: View {
                 }
 
                 Text(scenario.subtitle)
-                    .font(.system(size: 11))
+                    .orbFont(size: 11)
                     .foregroundStyle(.secondary)
                     .lineLimit(2)
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -627,11 +632,11 @@ struct TestSuiteView: View {
                 HStack(spacing: 8) {
                     difficultyTag(scenario.difficulty)
                     Label("\(scenario.estimatedSeconds)s", systemImage: "clock")
-                        .font(.system(size: 11, weight: .medium))
+                        .orbFont(size: 11, weight: .medium)
                         .foregroundStyle(.tertiary)
                     if result?.outputPath != nil {
                         Label("Built", systemImage: "folder.badge.checkmark")
-                            .font(.system(size: 11, weight: .medium))
+                            .orbFont(size: 11, weight: .medium)
                             .foregroundStyle(.green)
                     }
                     Spacer()
@@ -639,10 +644,10 @@ struct TestSuiteView: View {
             }
             .padding(14)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .background(Color.primary.opacity(0.032))
+            .background(.orbSurface(0.032))
             .overlay {
                 RoundedRectangle(cornerRadius: cardRadius)
-                    .stroke(Color.primary.opacity(0.06), lineWidth: 1)
+                    .stroke(.orbSurface(0.06), lineWidth: 1)
             }
             .clipShape(RoundedRectangle(cornerRadius: cardRadius))
             .contentShape(Rectangle())
@@ -655,9 +660,9 @@ struct TestSuiteView: View {
         let unverified = result.errorMessage == TestRunner.unverifiedMessage
         return HStack(spacing: 3) {
             Image(systemName: unverified ? "questionmark.circle.fill" : result.success ? "checkmark.circle.fill" : "xmark.circle.fill")
-                .font(.system(size: 11))
+                .orbFont(size: 11)
             Text(unverified ? "Review" : result.success ? "Pass" : "Fail")
-                .font(.system(size: 11, weight: .bold))
+                .orbFont(size: 11, weight: .bold)
         }
         .foregroundStyle(unverified ? Color.orange : result.success ? Color.green : Color.red)
         .padding(.horizontal, 6)
@@ -677,7 +682,7 @@ struct TestSuiteView: View {
         }()
 
         return Text(difficulty.rawValue.uppercased())
-            .font(.system(size: 11, weight: .bold))
+            .orbFont(size: 11, weight: .bold)
             .foregroundStyle(color)
             .padding(.horizontal, 6)
             .padding(.vertical, 2)
@@ -700,7 +705,7 @@ struct TestSuiteView: View {
                         selectedScenario = nil
                     } label: {
                         Image(systemName: "chevron.left")
-                            .font(.system(size: 12, weight: .semibold))
+                            .orbFont(size: 12, weight: .semibold)
                     }
                     .buttonStyle(.plain)
                     .help("Back to all tests")
@@ -709,16 +714,16 @@ struct TestSuiteView: View {
                         RoundedRectangle(cornerRadius: 8)
                             .fill(accent.opacity(0.10))
                         Image(systemName: scenario.icon)
-                            .font(.system(size: 18, weight: .semibold))
+                            .orbFont(size: 18, weight: .semibold)
                             .foregroundStyle(accent)
                     }
                     .frame(width: 42, height: 42)
 
                     VStack(alignment: .leading, spacing: 3) {
                         Text(scenario.title)
-                            .font(.system(size: 18, weight: .semibold))
+                            .orbFont(size: 18, weight: .semibold)
                         Text(scenario.subtitle)
-                            .font(.system(size: 12))
+                            .orbFont(size: 12)
                             .foregroundStyle(.secondary)
                     }
 
@@ -734,22 +739,22 @@ struct TestSuiteView: View {
                     Label("\(scenario.evaluationCriteria.count) review criteria", systemImage: "checklist")
                     Spacer()
                 }
-                .font(.system(size: 11, weight: .medium))
+                .orbFont(size: 11, weight: .medium)
                 .foregroundStyle(.secondary)
                 .frame(maxWidth: 820)
 
                 // Evaluation Criteria
                 VStack(alignment: .leading, spacing: 8) {
                     Text("REVIEW CRITERIA — NOT AUTOMATICALLY SCORED")
-                        .font(.system(size: 11, weight: .bold))
+                        .orbFont(size: 11, weight: .bold)
                         .foregroundStyle(.secondary)
                     ForEach(scenario.evaluationCriteria, id: \.self) { criterion in
                         HStack(spacing: 6) {
                             Image(systemName: "checkmark.circle")
-                                .font(.system(size: 11))
+                                .orbFont(size: 11)
                                 .foregroundStyle(accent)
                             Text(criterion)
-                                .font(.system(size: 12))
+                                .orbFont(size: 12)
                         }
                     }
                 }
@@ -774,7 +779,7 @@ struct TestSuiteView: View {
                             }
                             Text(isThisRunning ? (testRunner.activityLabel.isEmpty ? "Running…" : testRunner.activityLabel) : "Run Test")
                         }
-                        .font(.system(size: 13, weight: .semibold))
+                        .orbFont(size: 13, weight: .semibold)
                         .foregroundStyle(.white)
                         .padding(.horizontal, 16)
                         .padding(.vertical, 9)
@@ -794,18 +799,18 @@ struct TestSuiteView: View {
                     if testRunner.isRunning {
                         Button("Cancel", role: .destructive) { testRunner.cancel() }
                         Text("\(testRunner.batchCompleted)/\(testRunner.batchTotal) finished · \(testRunner.runningModelId ?? "")")
-                            .font(.system(size: 11)).lineLimit(1)
+                            .orbFont(size: 11).lineLimit(1)
                     }
 
                     if !KeychainManager.hasAPIKey {
                         Text("Add your OpenRouter API key in Settings → Accounts & Keys to run tests.")
-                            .font(.system(size: 11))
+                            .orbFont(size: 11)
                             .foregroundStyle(.orange)
                     }
 
                     if !isEligible {
                         Text("Choose an available text-output model to run this test.")
-                            .font(.system(size: 11))
+                            .orbFont(size: 11)
                             .foregroundStyle(.orange)
                     }
 
@@ -815,19 +820,19 @@ struct TestSuiteView: View {
 
                 if isEligible && !testRunner.isRunning {
                     Text("Single runs use credits without a ceiling; Compare Models offers a between-run spend limit.")
-                        .font(.system(size: 11))
+                        .orbFont(size: 11)
                         .foregroundStyle(.secondary)
                         .frame(maxWidth: 820, alignment: .leading)
                 }
 
                 if let notice = testRunner.batchNotice {
-                    Text(notice).font(.system(size: 11)).foregroundStyle(.orange)
+                    Text(notice).orbFont(size: 11).foregroundStyle(.orange)
                 }
 
                 let modelResults = testRunner.results.filter { $0.scenarioId == scenario.id }
                 if !modelResults.isEmpty {
                     VStack(alignment: .leading, spacing: 6) {
-                        Text("RESULTS BY MODEL").font(.system(size: 11, weight: .bold))
+                        Text("RESULTS BY MODEL").orbFont(size: 11, weight: .bold)
                         ForEach(modelResults.prefix(10)) { entry in
                             Button {
                                 selectedModelId = entry.modelId
@@ -841,7 +846,7 @@ struct TestSuiteView: View {
                                                          entry.success ? .green : .red)
                                     Text(testRunner.formattedCost(entry.cost))
                                 }
-                                .font(.system(size: 11))
+                                .orbFont(size: 11)
                                 .padding(5)
                                 .background(entry.modelId == currentModelId ? accent.opacity(0.10) : Color.clear)
                             }
@@ -865,26 +870,26 @@ struct TestSuiteView: View {
                 // System prompt preview
                 DisclosureGroup("System Prompt") {
                     Text(scenario.systemPrompt)
-                        .font(.system(size: 11, design: .monospaced))
+                        .orbFont(size: 11, design: .monospaced)
                         .textSelection(.enabled)
                         .padding(12)
                         .frame(maxWidth: .infinity, alignment: .leading)
-                        .background(Color.primary.opacity(0.03))
+                        .background(.orbSurface(0.03))
                         .clipShape(RoundedRectangle(cornerRadius: controlRadius))
                 }
-                .font(.system(size: 11, weight: .medium))
+                .orbFont(size: 11, weight: .medium)
                 .frame(maxWidth: 820, alignment: .leading)
 
                 DisclosureGroup("User Prompt") {
                     Text(scenario.userPrompt)
-                        .font(.system(size: 11, design: .monospaced))
+                        .orbFont(size: 11, design: .monospaced)
                         .textSelection(.enabled)
                         .padding(12)
                         .frame(maxWidth: .infinity, alignment: .leading)
-                        .background(Color.primary.opacity(0.03))
+                        .background(.orbSurface(0.03))
                         .clipShape(RoundedRectangle(cornerRadius: controlRadius))
                 }
-                .font(.system(size: 11, weight: .medium))
+                .orbFont(size: 11, weight: .medium)
                 .frame(maxWidth: 820, alignment: .leading)
             }
             .padding(.horizontal, 28)
@@ -901,14 +906,14 @@ struct TestSuiteView: View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 6) {
                 Text("YOUR INPUT")
-                    .font(.system(size: 11, weight: .bold))
+                    .orbFont(size: 11, weight: .bold)
                     .foregroundStyle(.secondary)
                 Text("OPTIONAL")
-                    .font(.system(size: 11, weight: .bold))
+                    .orbFont(size: 11, weight: .bold)
                     .foregroundStyle(.tertiary)
                     .padding(.horizontal, 5)
                     .padding(.vertical, 2)
-                    .background(Color.primary.opacity(0.05))
+                    .background(.orbSurface(0.05))
                     .clipShape(Capsule())
                 Spacer()
                 if !userInstructions.isEmpty {
@@ -916,7 +921,7 @@ struct TestSuiteView: View {
                         userInstructions = ""
                     } label: {
                         Text("Clear")
-                            .font(.system(size: 11, weight: .medium))
+                            .orbFont(size: 11, weight: .medium)
                             .foregroundStyle(.secondary)
                     }
                     .buttonStyle(.plain)
@@ -925,29 +930,29 @@ struct TestSuiteView: View {
             }
 
             Text("Add a note, constraint, or extra instruction for this run. It is appended to the task prompt below.")
-                .font(.system(size: 11))
+                .orbFont(size: 11)
                 .foregroundStyle(.secondary)
 
             ZStack(alignment: .topLeading) {
                 if userInstructions.isEmpty {
                     Text("e.g. Use a dark theme, keep the project under 200 lines…")
-                        .font(.system(size: 12))
+                        .orbFont(size: 12)
                         .foregroundStyle(.tertiary)
                         .padding(.horizontal, 10)
                         .padding(.vertical, 14)
                         .allowsHitTesting(false)
                 }
                 TextEditor(text: $userInstructions)
-                    .font(.system(size: 12))
+                    .orbFont(size: 12)
                     .frame(minHeight: 72)
                     .scrollContentBackground(.hidden)
                     .padding(6)
                     .disabled(isRunning)
             }
-            .background(Color.primary.opacity(0.04))
+            .background(.orbSurface(0.04))
             .overlay {
                 RoundedRectangle(cornerRadius: controlRadius)
-                    .stroke(Color.primary.opacity(0.06), lineWidth: 1)
+                    .stroke(.orbSurface(0.06), lineWidth: 1)
             }
             .clipShape(RoundedRectangle(cornerRadius: controlRadius))
         }
@@ -959,17 +964,17 @@ struct TestSuiteView: View {
     private var activityLogView: some View {
         VStack(alignment: .leading, spacing: 6) {
             Text("AGENT ACTIVITY")
-                .font(.system(size: 11, weight: .bold))
+                .orbFont(size: 11, weight: .bold)
                 .foregroundStyle(accent)
             ScrollView {
                 VStack(alignment: .leading, spacing: 3) {
                     ForEach(Array(testRunner.activityLog.enumerated()), id: \.offset) { _, entry in
                         HStack(spacing: 6) {
                             Image(systemName: entry.icon)
-                                .font(.system(size: 11))
+                                .orbFont(size: 11)
                                 .foregroundStyle(accent.opacity(0.7))
                             Text(entry.text)
-                                .font(.system(size: 11, design: .monospaced))
+                                .orbFont(size: 11, design: .monospaced)
                                 .foregroundStyle(.secondary)
                         }
                     }
@@ -978,7 +983,7 @@ struct TestSuiteView: View {
             }
             .frame(maxHeight: 200)
             .padding(10)
-            .background(Color.primary.opacity(0.03))
+            .background(.orbSurface(0.03))
             .clipShape(RoundedRectangle(cornerRadius: controlRadius))
         }
     }
@@ -990,12 +995,12 @@ struct TestSuiteView: View {
             HStack(spacing: 8) {
                 Image(systemName: result.errorMessage == TestRunner.unverifiedMessage ? "questionmark.circle.fill" :
                       result.success ? "checkmark.seal.fill" : "xmark.seal.fill")
-                    .font(.system(size: 14))
+                    .orbFont(size: 14)
                     .foregroundStyle(result.errorMessage == TestRunner.unverifiedMessage ? .orange :
                                      result.success ? .green : .red)
                 Text(result.errorMessage == TestRunner.unverifiedMessage ? "Text Response — Needs Review" :
                      result.success ? "Project Checks Passed" : "Test Failed")
-                    .font(.system(size: 13, weight: .semibold))
+                    .orbFont(size: 13, weight: .semibold)
                 Spacer()
             }
 
@@ -1005,13 +1010,13 @@ struct TestSuiteView: View {
                 Label("\(result.latencyMs)ms", systemImage: "clock")
                 Label(testRunner.formattedCost(result.cost), systemImage: "dollarsign.circle")
             }
-            .font(.system(size: 11, weight: .medium, design: .monospaced))
+            .orbFont(size: 11, weight: .medium, design: .monospaced)
             .foregroundStyle(.secondary)
 
             if let error = result.errorMessage {
                 let needsReview = error == TestRunner.unverifiedMessage
                 Text(error)
-                    .font(.system(size: 11))
+                    .orbFont(size: 11)
                     .foregroundStyle(needsReview ? .orange : .red)
                     .padding(10)
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -1028,18 +1033,18 @@ struct TestSuiteView: View {
             if !result.response.isEmpty {
                 VStack(alignment: .leading, spacing: 8) {
                     Text(result.outputPath == nil ? "TEXT RESPONSE (PROJECT NOT VERIFIED)" : "AGENT SUMMARY")
-                        .font(.system(size: 11, weight: .bold))
+                        .orbFont(size: 11, weight: .bold)
                         .foregroundStyle(.secondary)
                     Text(result.response)
-                        .font(.system(size: 13))
+                        .orbFont(size: 13)
                         .lineSpacing(3)
                         .textSelection(.enabled)
                         .padding(14)
                         .frame(maxWidth: .infinity, alignment: .leading)
-                        .background(Color.primary.opacity(0.03))
+                        .background(.orbSurface(0.03))
                         .overlay {
                             RoundedRectangle(cornerRadius: cardRadius)
-                                .stroke(Color.primary.opacity(0.06), lineWidth: 1)
+                                .stroke(.orbSurface(0.06), lineWidth: 1)
                         }
                         .clipShape(RoundedRectangle(cornerRadius: cardRadius))
                 }
@@ -1051,7 +1056,7 @@ struct TestSuiteView: View {
     private func projectActionsView(_ projectPath: String, result: TestRunResult) -> some View {
         VStack(alignment: .leading, spacing: 10) {
             Text("PROJECT OUTPUT")
-                .font(.system(size: 11, weight: .bold))
+                .orbFont(size: 11, weight: .bold)
                 .foregroundStyle(.secondary)
 
             HStack(spacing: 12) {
@@ -1060,12 +1065,12 @@ struct TestSuiteView: View {
                     Image(systemName: "folder.fill")
                         .foregroundStyle(accent)
                     Text(projectPath.replacingOccurrences(of: FileManager.default.homeDirectoryForCurrentUser.path, with: "~"))
-                        .font(.system(size: 11, design: .monospaced))
+                        .orbFont(size: 11, design: .monospaced)
                         .lineLimit(1)
                 }
                 .padding(.horizontal, 10)
                 .padding(.vertical, 7)
-                .background(Color.primary.opacity(0.04))
+                .background(.orbSurface(0.04))
                 .clipShape(RoundedRectangle(cornerRadius: controlRadius))
 
                 Spacer()
@@ -1078,7 +1083,7 @@ struct TestSuiteView: View {
                         Image(systemName: "folder.open.fill")
                         Text("Open Folder")
                     }
-                    .font(.system(size: 11, weight: .semibold))
+                    .orbFont(size: 11, weight: .semibold)
                     .padding(.horizontal, 10)
                     .padding(.vertical, 7)
                     .background(accent.opacity(0.12))
@@ -1094,10 +1099,10 @@ struct TestSuiteView: View {
                         Image(systemName: "macfinder")
                         Text("Reveal")
                     }
-                    .font(.system(size: 11, weight: .semibold))
+                    .orbFont(size: 11, weight: .semibold)
                     .padding(.horizontal, 10)
                     .padding(.vertical, 7)
-                    .background(Color.primary.opacity(0.06))
+                    .background(.orbSurface(0.06))
                     .clipShape(RoundedRectangle(cornerRadius: controlRadius))
                 }
                 .buttonStyle(.plain)
@@ -1123,7 +1128,7 @@ struct TestSuiteView: View {
             if !htmlFiles.isEmpty {
                 VStack(alignment: .leading, spacing: 6) {
                     Text("OPEN IN BROWSER")
-                        .font(.system(size: 11, weight: .bold))
+                        .orbFont(size: 11, weight: .bold)
                         .foregroundStyle(.secondary)
 
                     ForEach(htmlFiles, id: \.self) { file in
@@ -1135,7 +1140,7 @@ struct TestSuiteView: View {
                                 Text(URL(fileURLWithPath: file).lastPathComponent)
                                     .lineLimit(1)
                             }
-                            .font(.system(size: 11, weight: .medium))
+                            .orbFont(size: 11, weight: .medium)
                             .padding(.horizontal, 10)
                             .padding(.vertical, 6)
                             .background(accent.opacity(0.10))

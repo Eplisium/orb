@@ -44,18 +44,18 @@ struct PlaygroundModelPicker: View {
                 HStack {
                     VStack(alignment: .leading, spacing: 2) {
                         Text("Choose a model")
-                            .font(.system(size: 15, weight: .semibold))
+                            .orbFont(size: 15, weight: .semibold)
                         Text(defaultModelId == nil ? "Favorites first, then your most recent models" : "Pin a model to use it for every new \(defaultLabel ?? "playground") session")
-                            .font(.system(size: 11))
+                            .orbFont(size: 11)
                             .foregroundStyle(.secondary)
                     }
                     Spacer()
                     Text("\(resultCount)")
-                        .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                        .orbFont(size: 11, weight: .semibold, design: .monospaced)
                         .foregroundStyle(.secondary)
                         .padding(.horizontal, 7)
                         .padding(.vertical, 4)
-                        .background(Color.primary.opacity(0.05))
+                        .background(.orbSurface(0.05))
                         .clipShape(Capsule())
                 }
 
@@ -77,7 +77,7 @@ struct PlaygroundModelPicker: View {
                 }
                 .padding(.horizontal, 10)
                 .padding(.vertical, 8)
-                .background(Color.primary.opacity(0.05))
+                .background(.orbSurface(0.05))
                 .clipShape(RoundedRectangle(cornerRadius: 8))
 
                 HStack(spacing: 8) {
@@ -89,7 +89,7 @@ struct PlaygroundModelPicker: View {
                 if let toolCapableOnly {
                     Toggle(isOn: toolCapableOnly) {
                         Label("Only models with function calling", systemImage: "wrench.and.screwdriver")
-                            .font(.system(size: 11, weight: .medium))
+                            .orbFont(size: 11, weight: .medium)
                     }
                     .toggleStyle(.switch)
                     .controlSize(.mini)
@@ -127,7 +127,7 @@ struct PlaygroundModelPicker: View {
                                     Spacer()
                                     Text("\(section.models.count)")
                                 }
-                                .font(.system(size: 11, weight: .bold))
+                                .orbFont(size: 11, weight: .bold)
                                 .foregroundStyle(.secondary)
                                 .padding(.horizontal, 4)
                                 .padding(.vertical, 7)
@@ -165,10 +165,10 @@ struct PlaygroundModelPicker: View {
                 Image(systemName: "arrow.up.arrow.down")
                 Text("Sort: \(sortField.rawValue)")
             }
-            .font(.system(size: 11, weight: .medium))
+            .orbFont(size: 11, weight: .medium)
             .padding(.horizontal, 8)
             .padding(.vertical, 5)
-            .background(Color.primary.opacity(0.05))
+            .background(.orbSurface(0.05))
             .clipShape(RoundedRectangle(cornerRadius: 6))
         }
         .menuStyle(.borderlessButton)
@@ -181,9 +181,9 @@ struct PlaygroundModelPicker: View {
             sortOrder = (sortOrder == .ascending) ? .descending : .ascending
         } label: {
             Image(systemName: sortOrder == .ascending ? "arrow.up" : "arrow.down")
-                .font(.system(size: 11, weight: .semibold))
+                .orbFont(size: 11, weight: .semibold)
                 .frame(width: 24, height: 24)
-                .background(Color.primary.opacity(0.05))
+                .background(.orbSurface(0.05))
                 .clipShape(RoundedRectangle(cornerRadius: 6))
         }
         .buttonStyle(.plain)
@@ -204,7 +204,7 @@ struct PlaygroundModelPicker: View {
                         RoundedRectangle(cornerRadius: 7)
                             .fill(selected ? accent.opacity(0.18) : Color.primary.opacity(0.05))
                         Text(String(model.provider.prefix(1)).uppercased())
-                            .font(.system(size: 11, weight: .bold))
+                            .orbFont(size: 11, weight: .bold)
                             .foregroundStyle(selected ? accent : .secondary)
                     }
                     .frame(width: 30, height: 30)
@@ -212,11 +212,11 @@ struct PlaygroundModelPicker: View {
                     VStack(alignment: .leading, spacing: 3) {
                         HStack(spacing: 5) {
                             Text(model.name)
-                                .font(.system(size: 11, weight: .semibold))
+                                .orbFont(size: 11, weight: .semibold)
                                 .lineLimit(1)
                             if model.isFree {
                                 Text("FREE")
-                                    .font(.system(size: 11, weight: .bold))
+                                    .orbFont(size: 11, weight: .bold)
                                     .foregroundStyle(.green)
                             }
                         }
@@ -231,7 +231,7 @@ struct PlaygroundModelPicker: View {
                                 Image(systemName: "brain")
                             }
                         }
-                        .font(.system(size: 11, weight: .medium))
+                        .orbFont(size: 11, weight: .medium)
                         .foregroundStyle(.secondary)
                     }
                     Spacer(minLength: 4)
@@ -249,7 +249,7 @@ struct PlaygroundModelPicker: View {
                     defaultModelId.wrappedValue = isDefault ? "" : model.id
                 } label: {
                     Image(systemName: isDefault ? "pin.fill" : "pin")
-                        .font(.system(size: 11, weight: .semibold))
+                        .orbFont(size: 11, weight: .semibold)
                         .foregroundStyle(isDefault ? accent : Color.secondary)
                         .frame(width: 26, height: 26)
                         .contentShape(Rectangle())
@@ -262,7 +262,7 @@ struct PlaygroundModelPicker: View {
                 toggleFavorite(model)
             } label: {
                 Image(systemName: favorite ? "star.fill" : "star")
-                    .font(.system(size: 11, weight: .semibold))
+                    .orbFont(size: 11, weight: .semibold)
                     .foregroundStyle(favorite ? Color.yellow : Color.secondary)
                     .frame(width: 26, height: 26)
                     .contentShape(Rectangle())

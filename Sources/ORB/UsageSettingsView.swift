@@ -117,7 +117,7 @@ struct UsageSettingsView: View {
             }
         }
         .padding(14)
-        .background(Color.primary.opacity(0.03), in: RoundedRectangle(cornerRadius: 12))
+        .background(.orbSurface(0.03), in: RoundedRectangle(cornerRadius: 12))
     }
 
     private func reload() {
@@ -132,11 +132,11 @@ struct UsageSettingsView: View {
     private func stat(_ title: String, _ value: String, icon: String) -> some View {
         VStack(alignment: .leading, spacing: 6) {
             Label(title, systemImage: icon).font(.caption).foregroundStyle(.secondary)
-            Text(value).font(.system(size: 20, weight: .semibold, design: .rounded)).lineLimit(1).minimumScaleFactor(0.6)
+            Text(value).orbFont(size: 20, weight: .semibold, design: .rounded).lineLimit(1).minimumScaleFactor(0.6)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(12)
-        .background(Color.primary.opacity(0.04), in: RoundedRectangle(cornerRadius: 10))
+        .background(.orbSurface(0.04), in: RoundedRectangle(cornerRadius: 10))
     }
 
     private func section(_ title: String, _ rows: [UsageBucket], showShare: Bool) -> some View {
@@ -148,7 +148,7 @@ struct UsageSettingsView: View {
                 let weight = maxCost > 0 ? row.cost / maxCost : Double(row.requests) / Double(max(maxRequests, 1))
                 VStack(alignment: .leading, spacing: 3) {
                     HStack {
-                        Text(row.key).font(.system(size: 12, weight: .medium)).lineLimit(1).truncationMode(.middle)
+                        Text(row.key).orbFont(size: 12, weight: .medium).lineLimit(1).truncationMode(.middle)
                         Spacer()
                         Text("\(row.requests) req · \(Self.compact(row.tokens)) tok")
                             .font(.caption2.monospacedDigit()).foregroundStyle(.secondary)
@@ -170,7 +170,7 @@ struct UsageSettingsView: View {
             }
         }
         .padding(14)
-        .background(Color.primary.opacity(0.03), in: RoundedRectangle(cornerRadius: 12))
+        .background(.orbSurface(0.03), in: RoundedRectangle(cornerRadius: 12))
     }
 
     static func money(_ value: Double) -> String {

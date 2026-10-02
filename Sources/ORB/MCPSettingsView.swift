@@ -76,10 +76,10 @@ struct MCPSettingsView: View {
         VStack(spacing: 10) {
             Spacer()
             Image(systemName: "puzzlepiece.extension")
-                .font(.system(size: 30))
+                .orbFont(size: 30)
                 .foregroundStyle(.tertiary)
             Text("No MCP servers configured")
-                .font(.system(size: 12, weight: .semibold))
+                .orbFont(size: 12, weight: .semibold)
             Text("Add a server or paste an existing mcpServers configuration.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
@@ -97,7 +97,7 @@ struct MCPSettingsView: View {
                     .controlSize(.mini)
                 TextField("Name", text: config.name)
                     .textFieldStyle(.plain)
-                    .font(.system(size: 12, weight: .semibold))
+                    .orbFont(size: 12, weight: .semibold)
                 Spacer()
                 if probing.contains(config.wrappedValue.id) {
                     ProgressView().controlSize(.mini)
@@ -118,7 +118,7 @@ struct MCPSettingsView: View {
 
             TextField("Command (e.g. npx)", text: config.command)
                 .textFieldStyle(.roundedBorder)
-                .font(.system(size: 11, design: .monospaced))
+                .orbFont(size: 11, design: .monospaced)
 
             TextField(
                 "Arguments (space separated)",
@@ -128,18 +128,18 @@ struct MCPSettingsView: View {
                 )
             )
             .textFieldStyle(.roundedBorder)
-            .font(.system(size: 11, design: .monospaced))
+            .orbFont(size: 11, design: .monospaced)
 
             secretConsentSection(config.wrappedValue)
 
             if let message = status[config.wrappedValue.name] {
                 Text(message)
-                    .font(.system(size: 11))
+                    .orbFont(size: 11)
                     .foregroundStyle(message.hasPrefix("✓") ? .green : .red)
             }
         }
         .padding(10)
-        .background(Color.primary.opacity(0.03))
+        .background(.orbSurface(0.03))
         .clipShape(RoundedRectangle(cornerRadius: 8))
         .onChange(of: config.wrappedValue) { _, _ in persist() }
     }
@@ -180,7 +180,7 @@ struct MCPSettingsView: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
             TextEditor(text: $importText)
-                .font(.system(size: 11, design: .monospaced))
+                .orbFont(size: 11, design: .monospaced)
                 .frame(height: 200)
                 .overlay {
                     RoundedRectangle(cornerRadius: 6)
@@ -229,10 +229,10 @@ struct MCPSettingsView: View {
         if !stored.isEmpty {
             HStack(spacing: 5) {
                 Image(systemName: "lock.fill")
-                    .font(.system(size: 11))
+                    .orbFont(size: 11)
                     .foregroundStyle(.green)
                 Text("In the Keychain: \(stored.joined(separator: ", "))")
-                    .font(.system(size: 11))
+                    .orbFont(size: 11)
                     .foregroundStyle(.secondary)
             }
         }
@@ -240,15 +240,15 @@ struct MCPSettingsView: View {
         if !candidates.isEmpty {
             VStack(alignment: .leading, spacing: 6) {
                 Text("ENV VALUES")
-                    .font(.system(size: 11, weight: .bold))
+                    .orbFont(size: 11, weight: .bold)
                     .foregroundStyle(.secondary)
                 Text("Selected values move into the macOS Keychain; the settings file keeps only a reference. Values are never shown.")
-                    .font(.system(size: 11))
+                    .orbFont(size: 11)
                     .foregroundStyle(.secondary)
                 ForEach(candidates, id: \.self) { variable in
                     Toggle(isOn: secretSelectionBinding(config, variable)) {
                         Text(variable)
-                            .font(.system(size: 11, design: .monospaced))
+                            .orbFont(size: 11, design: .monospaced)
                     }
                     .toggleStyle(.checkbox)
                 }
@@ -267,7 +267,7 @@ struct MCPSettingsView: View {
                 }
                 if let outcome = migrationOutcomes[config.id] {
                     Text(migrationMessage(outcome))
-                        .font(.system(size: 11))
+                        .orbFont(size: 11)
                         .foregroundStyle(outcome.didSucceed ? .green : .red)
                 }
             }

@@ -127,7 +127,7 @@ struct ActiveFilterChips: View {
                         Button { vm.filters.remove(chip) } label: {
                             HStack(spacing: 4) {
                                 Text(chip.title)
-                                Image(systemName: "xmark").font(.system(size: 11, weight: .semibold))
+                                Image(systemName: "xmark").orbFont(size: 11, weight: .semibold)
                             }
                             .font(ORBFont.caption)
                             .padding(.horizontal, 8).padding(.vertical, 3)
@@ -186,7 +186,7 @@ struct NoResultsView: View {
         let suggestions = NoResultsSuggestions.make(search: vm.searchText, filters: vm.filters)
         VStack(spacing: 10) {
             Image(systemName: "magnifyingglass")
-                .font(.system(size: 34)).foregroundStyle(.tertiary)
+                .orbFont(size: 34).foregroundStyle(.tertiary)
                 .accessibilityHidden(true)
             Text("No models match").font(ORBFont.headline)
             Text("Nothing fits your search and filters.")

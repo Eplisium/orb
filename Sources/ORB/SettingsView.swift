@@ -5,11 +5,12 @@ struct SettingsView: View {
     @StateObject private var account = AccountService()
     @StateObject private var directory = DirectoryService()
     @State private var apiKeyInput = ""
-    @State private var showKeySaved = false
     @State private var showKeyDeleted = false
     @State private var showKey = false
     @State private var showRemoveKeyConfirmation = false
     @State private var keyActionError: String?
+    @StateObject private var keySave = SaveFeedback(what: "API key")
+    @StateObject private var managementSave = SaveFeedback(what: "Management key")
     @AppStorage(SettingsPane.storageKey) private var paneRaw = SettingsPane.general.rawValue
     private var pane: Binding<SettingsPane> {
         Binding(get: { SettingsPane(rawValue: paneRaw) ?? .general }, set: { paneRaw = $0.rawValue })
@@ -97,7 +98,11 @@ struct SettingsView: View {
             VStack(alignment: .leading, spacing: 24) {
                 AppearanceSettingsSection()
                 Divider()
+                NotificationSettingsSection()
+                Divider()
                 securitySection
+                Divider()
+                AboutPane()
             }
         case .accounts:
             VStack(alignment: .leading, spacing: 24) {
@@ -174,7 +179,7 @@ struct SettingsView: View {
     private var apiKeySection: some View {
         VStack(alignment: .leading, spacing: 16) {
             Label("API Key", systemImage: "key.fill")
-                .font(.system(size: 17, weight: .semibold))
+                .orbFont(size: 17, weight: .semibold)
 
             Text("Your OpenRouter API key is stored securely in the macOS Keychain. It's used for authenticated features like checking credits and sending chat messages.")
                 .font(.callout)
@@ -193,13 +198,13 @@ struct SettingsView: View {
 
                 if let masked = KeychainManager.maskedKey {
                     Text(masked)
-                        .font(.system(size: 12, design: .monospaced))
+                        .orbFont(size: 12, design: .monospaced)
                         .foregroundStyle(.secondary)
                 }
             }
             .padding(12)
-            .background(Color.primary.opacity(0.04), in: RoundedRectangle(cornerRadius: 10))
-            .overlay { RoundedRectangle(cornerRadius: 10).stroke(Color.primary.opacity(0.07), lineWidth: 0.5) }
+            .background(.orbSurface(0.04), in: RoundedRectangle(cornerRadius: 10))
+            .overlay { RoundedRectangle(cornerRadius: 10).stroke(.orbSurface(0.07), lineWidth: 0.5) }
 
             // Key input
             VStack(alignment: .leading, spacing: 8) {
@@ -215,7 +220,7 @@ struct SettingsView: View {
                         }
                     }
                     .textFieldStyle(.roundedBorder)
-                    .font(.system(size: 13, design: .monospaced))
+                    .orbFont(size: 13, design: .monospaced)
 
                     Button {
                         showKey.toggle()
@@ -235,27 +240,19 @@ struct SettingsView: View {
                     Button("Save Key") {
                         let trimmed = apiKeyInput.trimmingCharacters(in: .whitespacesAndNewlines)
                         guard !trimmed.isEmpty else { return }
-                        if let error = KeychainManager.saveAPIKey(trimmed) {
-                            keyActionError = error
-                        } else {
+                        var failure: String?
+                        if keySave.run({ failure = KeychainManager.saveAPIKey(trimmed); return failure }) {
                             keyActionError = nil
-                            showKeySaved = true
                             apiKeyInput = ""
                             Task { await refreshAccount() }
-                            DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
-                                showKeySaved = false
-                            }
+                        } else {
+                            keyActionError = failure
                         }
                     }
                     .buttonStyle(.borderedProminent)
                     .disabled(apiKeyInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
 
-                    if showKeySaved {
-                        Label("Saved!", systemImage: "checkmark.circle.fill")
-                            .foregroundStyle(.green)
-                            .font(.subheadline)
-                            .transition(.opacity)
-                    }
+                    SaveStatusLabel(status: keySave.status)
 
                     Spacer()
 
@@ -296,7 +293,7 @@ struct SettingsView: View {
     private var managementKeySection: some View {
         VStack(alignment: .leading, spacing: 16) {
             Label("Management Key", systemImage: "lock.shield")
-                .font(.system(size: 17, weight: .semibold))
+                .orbFont(size: 17, weight: .semibold)
 
             Text(ManagementKeyPanel.explanation)
                 .font(.callout)
@@ -313,8 +310,8 @@ struct SettingsView: View {
                 Spacer()
             }
             .padding(12)
-            .background(Color.primary.opacity(0.04), in: RoundedRectangle(cornerRadius: 10))
-            .overlay { RoundedRectangle(cornerRadius: 10).stroke(Color.primary.opacity(0.07), lineWidth: 0.5) }
+            .background(.orbSurface(0.04), in: RoundedRectangle(cornerRadius: 10))
+            .overlay { RoundedRectangle(cornerRadius: 10).stroke(.orbSurface(0.07), lineWidth: 0.5) }
 
             VStack(alignment: .leading, spacing: 8) {
                 Text(account.hasManagementKey ? "Replace Management Key" : "Enter Management Key")
@@ -324,25 +321,26 @@ struct SettingsView: View {
                 // The value is never displayed back, echoed, or logged.
                 SecureField("sk-or-...", text: $management.draftKey)
                     .textFieldStyle(.roundedBorder)
-                    .font(.system(size: 13, design: .monospaced))
+                    .orbFont(size: 13, design: .monospaced)
 
                 HStack {
                     Button(account.hasManagementKey ? "Replace Key" : "Save Key") {
+                        managementSave.begin()
                         management.saveDraft(into: account)
                         // A newly-authorized role can now load the locked panels.
                         if management.showSaved {
+                            managementSave.succeed()
                             Task { await refreshAccount() }
+                        } else if let reason = management.actionError {
+                            managementSave.fail(reason)
+                        } else {
+                            managementSave.fail("The key was not accepted.")
                         }
                     }
                     .buttonStyle(.borderedProminent)
                     .disabled(!management.canSave)
 
-                    if management.showSaved {
-                        Label("Saved!", systemImage: "checkmark.circle.fill")
-                            .foregroundStyle(.green)
-                            .font(.subheadline)
-                            .transition(.opacity)
-                    }
+                    SaveStatusLabel(status: managementSave.status)
 
                     Spacer()
 
@@ -375,7 +373,7 @@ struct SettingsView: View {
         VStack(alignment: .leading, spacing: 16) {
             HStack {
                 Label("Account Credits", systemImage: "dollarsign.circle.fill")
-                    .font(.system(size: 17, weight: .semibold))
+                    .orbFont(size: 17, weight: .semibold)
                 Spacer()
                 if account.isLoadingCredits {
                     ProgressView().scaleEffect(0.7)
@@ -441,7 +439,7 @@ struct SettingsView: View {
         VStack(alignment: .leading, spacing: 16) {
             HStack {
                 Label("Usage Activity", systemImage: "chart.bar.fill")
-                    .font(.system(size: 17, weight: .semibold))
+                    .orbFont(size: 17, weight: .semibold)
                 Spacer()
                 if account.isLoadingActivity {
                     ProgressView().scaleEffect(0.7)
@@ -480,14 +478,14 @@ struct SettingsView: View {
                         ForEach(account.topModels.prefix(10), id: \.model) { item in
                             HStack {
                                 Text(item.model)
-                                    .font(.system(size: 12, design: .monospaced))
+                                    .orbFont(size: 12, design: .monospaced)
                                     .lineLimit(1)
                                 Spacer()
                                 Text("\(item.requests) reqs")
                                     .font(.caption)
                                     .foregroundStyle(.secondary)
                                 Text(formatCurrency(item.usage))
-                                    .font(.system(size: 12, design: .monospaced))
+                                    .orbFont(size: 12, design: .monospaced)
                                     .foregroundStyle(.orange)
                             }
                             .padding(.vertical, 2)
@@ -505,10 +503,10 @@ struct SettingsView: View {
                         ForEach(account.dailySpend.prefix(14), id: \.date) { item in
                             HStack {
                                 Text(item.date)
-                                    .font(.system(size: 12, design: .monospaced))
+                                    .orbFont(size: 12, design: .monospaced)
                                 Spacer()
                                 Text(formatCurrency(item.amount))
-                                    .font(.system(size: 12, design: .monospaced))
+                                    .orbFont(size: 12, design: .monospaced)
                                     .foregroundStyle(.orange)
                             }
                             .padding(.vertical, 2)
@@ -554,7 +552,7 @@ struct SettingsView: View {
         VStack(alignment: .leading, spacing: 16) {
             HStack {
                 Label("Current Key", systemImage: "key.fill")
-                    .font(.system(size: 17, weight: .semibold))
+                    .orbFont(size: 17, weight: .semibold)
                 Spacer()
                 Button {
                     Task { await directory.fetchKeyInfo() }
@@ -615,7 +613,7 @@ struct SettingsView: View {
         HStack {
             Text(label).font(.callout).foregroundStyle(.secondary)
             Spacer()
-            Text(value).font(.system(size: 12, design: .monospaced))
+            Text(value).orbFont(size: 12, design: .monospaced)
         }
         .padding(.vertical, 2)
     }
@@ -626,7 +624,7 @@ struct SettingsView: View {
         VStack(alignment: .leading, spacing: 16) {
             HStack {
                 Label("Providers", systemImage: "building.2.fill")
-                    .font(.system(size: 17, weight: .semibold))
+                    .orbFont(size: 17, weight: .semibold)
                 Spacer()
                 Button {
                     Task { await directory.fetchProviders() }
@@ -651,13 +649,13 @@ struct SettingsView: View {
                         HStack(spacing: 6) {
                             Circle().fill(Color.accentColor.opacity(0.6)).frame(width: 7, height: 7)
                             VStack(alignment: .leading, spacing: 1) {
-                                Text(provider.name).font(.system(size: 12, weight: .medium)).lineLimit(1)
-                                Text(provider.slug).font(.system(size: 11, design: .monospaced)).foregroundStyle(.tertiary).lineLimit(1)
+                                Text(provider.name).orbFont(size: 12, weight: .medium).lineLimit(1)
+                                Text(provider.slug).orbFont(size: 11, design: .monospaced).foregroundStyle(.tertiary).lineLimit(1)
                             }
                             Spacer()
                         }
                         .padding(8)
-                        .background(Color.primary.opacity(0.04))
+                        .background(.orbSurface(0.04))
                         .clipShape(RoundedRectangle(cornerRadius: 8))
                     }
                 }
@@ -730,14 +728,14 @@ struct CreditCard: View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 5) {
                 Image(systemName: icon)
-                    .font(.system(size: 11))
+                    .orbFont(size: 11)
                     .foregroundStyle(color)
                 Text(title)
-                    .font(.system(size: 11))
+                    .orbFont(size: 11)
                     .foregroundStyle(.secondary)
             }
             Text(value)
-                .font(.system(size: 18, weight: .semibold, design: .monospaced))
+                .orbFont(size: 18, weight: .semibold, design: .monospaced)
                 .lineLimit(1)
         }
         .frame(maxWidth: .infinity, alignment: .leading)

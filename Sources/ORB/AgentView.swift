@@ -47,7 +47,7 @@ struct AgentView: View {
         HStack(spacing: 0) {
             conversationSidebar
             Rectangle()
-                .fill(Color.primary.opacity(0.07))
+                .fill(.orbSurface(0.07))
                 .frame(width: 1)
             mainArea
         }
@@ -73,7 +73,7 @@ struct AgentView: View {
         VStack(spacing: 0) {
             agentHeader
             Rectangle()
-                .fill(Color.primary.opacity(0.07))
+                .fill(.orbSurface(0.07))
                 .frame(height: 1)
             if let error = chatService.lastError,
                chatService.lastErrorConversationID == nil || chatService.lastErrorConversationID == chatService.activeConversation?.id {
@@ -193,16 +193,16 @@ struct AgentView: View {
     private func sidebarSectionHeader(title: String, icon: String, count: Int) -> some View {
         HStack(spacing: 6) {
             Image(systemName: icon)
-                .font(.system(size: 11, weight: .semibold))
+                .orbFont(size: 11, weight: .semibold)
                 .foregroundStyle(accent)
             Text(title.uppercased())
-                .font(.system(size: 11, weight: .bold))
+                .orbFont(size: 11, weight: .bold)
             Text("\(count)")
-                .font(.system(size: 11, weight: .bold, design: .monospaced))
+                .orbFont(size: 11, weight: .bold, design: .monospaced)
                 .foregroundStyle(.secondary)
                 .padding(.horizontal, 5)
                 .padding(.vertical, 2)
-                .background(Color.primary.opacity(0.06))
+                .background(.orbSurface(0.06))
                 .clipShape(Capsule())
             Spacer()
         }
@@ -224,7 +224,7 @@ struct AgentView: View {
                     Image(systemName: "command")
                     Text("Powered by ORB functions")
                 }
-                .font(.system(size: 11, weight: .medium))
+                .orbFont(size: 11, weight: .medium)
                 .foregroundStyle(.secondary)
             }
 
@@ -237,7 +237,7 @@ struct AgentView: View {
                     Image(systemName: fullComputerAccess ? "desktopcomputer.and.macbook" : "network")
                     Text(fullComputerAccess ? "Computer Access" : "Web Only")
                 }
-                .font(.system(size: 11, weight: .semibold))
+                .orbFont(size: 11, weight: .semibold)
                 .foregroundStyle(fullComputerAccess ? Color.orange : Color.secondary)
                 .padding(.horizontal, 9)
                 .padding(.vertical, 6)
@@ -265,9 +265,9 @@ struct AgentView: View {
                         .disabled(chatService.isRunning(conversationID: conversation.id))
                 } label: {
                     Image(systemName: "ellipsis.circle")
-                        .font(.system(size: 13, weight: .semibold))
+                        .orbFont(size: 13, weight: .semibold)
                         .frame(width: 28, height: 28)
-                        .background(Color.primary.opacity(0.05))
+                        .background(.orbSurface(0.05))
                         .clipShape(RoundedRectangle(cornerRadius: 7))
                 }
                 .menuStyle(.borderlessButton)
@@ -280,9 +280,9 @@ struct AgentView: View {
                 showSettings.toggle()
             } label: {
                 Image(systemName: "slider.horizontal.3")
-                    .font(.system(size: 12, weight: .semibold))
+                    .orbFont(size: 12, weight: .semibold)
                     .frame(width: 28, height: 28)
-                    .background(Color.primary.opacity(0.05))
+                    .background(.orbSurface(0.05))
                     .clipShape(RoundedRectangle(cornerRadius: 7))
             }
             .buttonStyle(.plain)
@@ -306,13 +306,13 @@ struct AgentView: View {
                 Text(shortModelName(currentModelId))
                     .lineLimit(1)
                 Image(systemName: "chevron.down")
-                    .font(.system(size: 11, weight: .bold))
+                    .orbFont(size: 11, weight: .bold)
                     .foregroundStyle(.tertiary)
             }
-            .font(.system(size: 11, weight: .semibold))
+            .orbFont(size: 11, weight: .semibold)
             .padding(.horizontal, 9)
             .padding(.vertical, 6)
-            .background(Color.primary.opacity(0.05))
+            .background(.orbSurface(0.05))
             .clipShape(RoundedRectangle(cornerRadius: 7))
         }
         .buttonStyle(.plain)
@@ -345,7 +345,7 @@ struct AgentView: View {
 
             VStack(alignment: .leading, spacing: 7) {
                 Text("WORKSPACE")
-                    .font(.system(size: 11, weight: .bold))
+                    .orbFont(size: 11, weight: .bold)
                     .foregroundStyle(.secondary)
                 Button(action: chooseWorkspace) {
                     HStack {
@@ -358,7 +358,7 @@ struct AgentView: View {
                             .font(.caption2)
                     }
                     .padding(8)
-                    .background(Color.primary.opacity(0.05))
+                    .background(.orbSurface(0.05))
                     .clipShape(RoundedRectangle(cornerRadius: 7))
                 }
                 .buttonStyle(.plain)
@@ -375,7 +375,7 @@ struct AgentView: View {
 
             VStack(alignment: .leading, spacing: 7) {
                 Text("SYSTEM PROMPT (OPTIONAL)")
-                    .font(.system(size: 11, weight: .bold))
+                    .orbFont(size: 11, weight: .bold)
                     .foregroundStyle(.secondary)
                 TextEditor(text: Binding(
                     get: { chatService.activeConversation?.systemPrompt ?? "" },
@@ -385,7 +385,7 @@ struct AgentView: View {
                         }
                     }
                 ))
-                .font(.system(size: 11))
+                .orbFont(size: 11)
                 .frame(height: 80)
                 .disabled(chatService.activeConversation == nil)
                 .overlay {
@@ -401,7 +401,7 @@ struct AgentView: View {
 
             VStack(alignment: .leading, spacing: 7) {
                 Text("EXTENSIONS")
-                    .font(.system(size: 11, weight: .bold))
+                    .orbFont(size: 11, weight: .bold)
                     .foregroundStyle(.secondary)
                 Button {
                     showSettings = false
@@ -416,7 +416,7 @@ struct AgentView: View {
                             .font(.caption2)
                     }
                     .padding(8)
-                    .background(Color.primary.opacity(0.05))
+                    .background(.orbSurface(0.05))
                     .clipShape(RoundedRectangle(cornerRadius: 7))
                 }
                 .buttonStyle(.plain)
@@ -572,7 +572,7 @@ struct AgentView: View {
                         .stroke(accent.opacity(0.18), lineWidth: 1)
                         .frame(width: 82, height: 82)
                     Image(systemName: "wand.and.stars.inverse")
-                        .font(.system(size: 34, weight: .medium))
+                        .orbFont(size: 34, weight: .medium)
                         .foregroundStyle(
                             LinearGradient(
                                 colors: [accent, .blue],
@@ -584,9 +584,9 @@ struct AgentView: View {
 
                 VStack(spacing: 8) {
                     Text("What should we accomplish?")
-                        .font(.system(size: 26, weight: .semibold, design: .rounded))
+                        .orbFont(size: 26, weight: .semibold, design: .rounded)
                     Text("ORB runs its own agent loop and native functions. It can browse the web, work with files, run commands, automate Mac apps, and control your computer.")
-                        .font(.system(size: 13))
+                        .orbFont(size: 13)
                         .foregroundStyle(.secondary)
                         .multilineTextAlignment(.center)
                         .frame(maxWidth: 570)
@@ -635,7 +635,7 @@ struct AgentView: View {
                     Text("^[\(toolCount) tool call](inflect: true)")
                 }
             }
-            .font(.system(size: 11))
+            .orbFont(size: 11)
             .foregroundStyle(.secondary)
             Spacer(minLength: 0)
         }
@@ -672,7 +672,7 @@ struct AgentView: View {
                 }
                 if let attachmentContextSummary {
                     Text(attachmentContextSummary)
-                        .font(.system(size: 11, design: .monospaced))
+                        .orbFont(size: 11, design: .monospaced)
                         .foregroundStyle(.secondary)
                         .frame(maxWidth: .infinity, alignment: .leading)
                 }
@@ -684,7 +684,7 @@ struct AgentView: View {
                         Label(warning, systemImage: "exclamationmark.triangle")
                     }
                 }
-                .font(.system(size: 11))
+                .orbFont(size: 11)
                 .foregroundStyle(.orange)
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
@@ -696,7 +696,7 @@ struct AgentView: View {
             VStack(spacing: 0) {
                 TextField(composerPlaceholder, text: $messageText, axis: .vertical)
                     .textFieldStyle(.plain)
-                    .font(.system(size: 13))
+                    .orbFont(size: 13)
                     .lineLimit(1...7)
                     .focused($inputFocused)
                     .padding(.horizontal, 14)
@@ -707,9 +707,9 @@ struct AgentView: View {
                 HStack(spacing: 9) {
                     Button(action: chooseAttachments) {
                         Image(systemName: "paperclip")
-                            .font(.system(size: 12, weight: .semibold))
+                            .orbFont(size: 12, weight: .semibold)
                             .frame(width: 25, height: 25)
-                            .background(Color.primary.opacity(0.05))
+                            .background(.orbSurface(0.05))
                             .clipShape(Circle())
                     }
                     .buttonStyle(.plain)
@@ -722,7 +722,7 @@ struct AgentView: View {
                             Text(abbreviatedWorkspace)
                                 .lineLimit(1)
                         }
-                        .font(.system(size: 11, weight: .medium))
+                        .orbFont(size: 11, weight: .medium)
                         .foregroundStyle(.secondary)
                     }
                     .buttonStyle(.plain)
@@ -733,12 +733,12 @@ struct AgentView: View {
                     if let gauge = contextGauge { ContextGaugeView(gauge: gauge) }
 
                     Text(ComposerKeyPolicy.hint(requireCommand: requireCommandToSend))
-                        .font(.system(size: 11, weight: .medium))
+                        .orbFont(size: 11, weight: .medium)
                         .foregroundStyle(.tertiary)
 
                     Button(action: sendOrStop) {
                         Image(systemName: currentSessionRunning ? "stop.fill" : "arrow.up")
-                            .font(.system(size: 11, weight: .bold))
+                            .orbFont(size: 11, weight: .bold)
                             .foregroundStyle(.white)
                             .frame(width: 28, height: 28)
                             .background(canSend || currentSessionRunning ? accent : Color.gray.opacity(0.45))
@@ -765,7 +765,7 @@ struct AgentView: View {
             Text(fullComputerAccess
                  ? "Full access is on — this app can run commands, edit files, and control this Mac."
                  : "AI can make mistakes. Review important output and actions.")
-                .font(.system(size: 11))
+                .orbFont(size: 11)
                 .foregroundStyle(fullComputerAccess ? Color.orange.opacity(0.85) : Color.secondary)
         }
         .frame(maxWidth: 820)
@@ -784,12 +784,12 @@ struct AgentView: View {
                 refreshAttachmentDiagnostics()
             } label: {
                 Image(systemName: "xmark")
-                    .font(.system(size: 11, weight: .bold))
+                    .orbFont(size: 11, weight: .bold)
             }
             .buttonStyle(.plain)
             .accessibilityLabel("Remove attachment")
         }
-        .font(.system(size: 11, weight: .medium))
+        .orbFont(size: 11, weight: .medium)
         .padding(.horizontal, 8)
         .padding(.vertical, 5)
         .background(accent.opacity(0.10))

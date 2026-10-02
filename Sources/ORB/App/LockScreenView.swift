@@ -23,23 +23,23 @@ struct LockScreenView: View {
                         Circle()
                             .strokeBorder(accent.opacity(0.5), lineWidth: 1)
                         Image(systemName: "lock.fill")
-                            .font(.system(size: 32, weight: .medium))
+                            .orbFont(size: 32, weight: .medium)
                             .foregroundStyle(accent)
                     }
                     .frame(width: 84, height: 84)
 
                     Text("ORB is locked")
-                        .font(.system(size: 22, weight: .semibold))
+                        .orbFont(size: 22, weight: .semibold)
                         .foregroundStyle(.white)
 
                     VStack(spacing: 6) {
                         Text("Unlock with \(lock.biometricLabel) or your Mac password.")
                             .foregroundStyle(.white.opacity(0.85))
                         Text("Your API keys and sessions stay protected. ORB locks again when your Mac sleeps or locks, or after a period of inactivity.")
-                            .font(.system(size: 12))
+                            .orbFont(size: 12)
                             .foregroundStyle(.white.opacity(0.6))
                     }
-                    .font(.system(size: 13))
+                    .orbFont(size: 13)
                     .multilineTextAlignment(.center)
                     .frame(maxWidth: 350)
                 }
@@ -58,7 +58,7 @@ struct LockScreenView: View {
                             }
                             Text(lock.isUnlocking ? "Authenticating…" : "Unlock")
                         }
-                        .font(.system(size: 13, weight: .semibold))
+                        .orbFont(size: 13, weight: .semibold)
                         .foregroundStyle(.white)
                         .padding(.horizontal, 22)
                         .padding(.vertical, 10)
@@ -71,7 +71,7 @@ struct LockScreenView: View {
 
                     if let failure = lock.lastFailureMessage {
                         Text(failure)
-                            .font(.system(size: 11))
+                            .orbFont(size: 11)
                             .foregroundStyle(.red)
                     }
 
@@ -85,7 +85,7 @@ struct LockScreenView: View {
                             }
                         } label: {
                             Label("Lock settings", systemImage: "gearshape")
-                                .font(.system(size: 12, weight: .medium))
+                                .orbFont(size: 12, weight: .medium)
                                 .foregroundStyle(accent)
                                 .padding(.horizontal, 10)
                                 .padding(.vertical, 6)
@@ -108,7 +108,7 @@ struct LockScreenView: View {
                     NSApplication.shared.terminate(nil)
                 } label: {
                     Text("Quit ORB")
-                        .font(.system(size: 12, weight: .medium))
+                        .orbFont(size: 12, weight: .medium)
                         .foregroundStyle(.white.opacity(0.72))
                         .padding(.horizontal, 14)
                         .padding(.vertical, 8)

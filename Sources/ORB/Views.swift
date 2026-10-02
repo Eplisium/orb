@@ -33,7 +33,7 @@ struct ModelRowView: View {
                 HStack(spacing: 5) {
                     if isFavorite {
                         Image(systemName: "star.fill")
-                            .font(.system(size: 11))
+                            .orbFont(size: 11)
                             .foregroundStyle(.yellow)
                             .accessibilityLabel("Favorite")
                     }
@@ -103,7 +103,7 @@ struct ModelRowView: View {
 
     private var avatar: some View {
         Text(facts.avatarLetter)
-            .font(.system(size: 13, weight: .bold, design: .rounded))
+            .orbFont(size: 13, weight: .bold, design: .rounded)
             .foregroundStyle(providerColor)
             .frame(width: 30, height: 30)
             .background(providerColor.opacity(0.16), in: Circle())
@@ -148,7 +148,7 @@ struct ModelRowView: View {
             .help(isFavorite ? "Remove from favorites" : "Add to favorites")
             .accessibilityLabel(isFavorite ? "Remove from favorites" : "Add to favorites")
         }
-        .font(.system(size: 13))
+        .orbFont(size: 13)
     }
 
     /// Neutral glyphs, capped, with the full list in the tooltip.
@@ -158,7 +158,7 @@ struct ModelRowView: View {
         if !caps.isEmpty {
             HStack(spacing: 5) {
                 ForEach(Array(caps.prefix(Self.maxCapabilityIcons).enumerated()), id: \.offset) { _, cap in
-                    Image(systemName: cap.icon).font(.system(size: 11)).help(cap.name)
+                    Image(systemName: cap.icon).orbFont(size: 11).help(cap.name)
                 }
                 if caps.count > Self.maxCapabilityIcons {
                     Text("+\(caps.count - Self.maxCapabilityIcons)").lineLimit(1)
@@ -261,9 +261,9 @@ struct ModelDetailView: View {
                 if model.isUnofficial { Text("UNOFFICIAL").font(ORBFont.caption.weight(.bold)).foregroundStyle(.orange) }
                 if model.hasExpired { Text("EXPIRED").font(ORBFont.caption.weight(.bold)).foregroundStyle(.red) }
             }
-            Text(model.modelSlug).font(.system(size: 22, weight: .semibold)).lineLimit(2)
+            Text(model.modelSlug).orbFont(size: 22, weight: .semibold).lineLimit(2)
             Text(model.id)
-                .font(.system(size: 12, design: .monospaced))
+                .orbFont(size: 12, design: .monospaced)
                 .foregroundStyle(.secondary)
                 .textSelection(.enabled)
             HStack(spacing: 8) {
@@ -464,9 +464,9 @@ struct ModelDetailView: View {
                     ForEach(arena.sorted { ($0.elo ?? 0) > ($1.elo ?? 0) }) { entry in
                         HStack(spacing: 4) {
                             Text(entry.category ?? "?")
-                                .font(.system(size: 11, weight: .semibold))
+                                .orbFont(size: 11, weight: .semibold)
                             Text("\(Int(entry.elo ?? 0))")
-                                .font(.system(size: 11, design: .monospaced))
+                                .orbFont(size: 11, design: .monospaced)
                                 .foregroundStyle(.teal)
                         }
                         .padding(.horizontal, 8)
@@ -530,7 +530,7 @@ struct ModelDetailView: View {
                 FlowLayout(spacing: 6) {
                     ForEach(params.sorted(), id: \.self) { param in
                         Text(param)
-                            .font(.system(size: 11, design: .monospaced))
+                            .orbFont(size: 11, design: .monospaced)
                             .padding(.horizontal, 8)
                             .padding(.vertical, 4)
                             .background(.quaternary)
@@ -583,7 +583,7 @@ struct ProviderRow: View {
 
             VStack(alignment: .leading, spacing: 2) {
                 Text(endpoint.providerName ?? "Unknown")
-                    .font(.system(size: 13, weight: .semibold))
+                    .orbFont(size: 13, weight: .semibold)
                     .lineLimit(1)
                 HStack(spacing: 10) {
                     if let ctx = endpoint.contextLength {
@@ -592,7 +592,7 @@ struct ProviderRow: View {
                     }
                     if let q = endpoint.quantization, !q.isEmpty, q != "unknown" {
                         Text(q.uppercased())
-                            .font(.system(size: 11, weight: .bold, design: .monospaced))
+                            .orbFont(size: 11, weight: .bold, design: .monospaced)
                             .foregroundStyle(.teal)
                     }
                     if let up = endpoint.uptimeLast1d {
@@ -604,7 +604,7 @@ struct ProviderRow: View {
                             .foregroundStyle(.yellow)
                     }
                 }
-                .font(.system(size: 11))
+                .orbFont(size: 11)
             }
 
             Spacer()
@@ -617,7 +617,7 @@ struct ProviderRow: View {
                     Text("—")
                 }
             }
-            .font(.system(size: 11, design: .monospaced))
+            .orbFont(size: 11, design: .monospaced)
             .foregroundStyle(.orange)
         }
         .padding(10)
@@ -644,21 +644,21 @@ struct StatCard: View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 5) {
                 Image(systemName: icon)
-                    .font(.system(size: 11))
+                    .orbFont(size: 11)
                     .foregroundStyle(color)
                 Text(title)
-                    .font(.system(size: 11))
+                    .orbFont(size: 11)
                     .foregroundStyle(.secondary)
             }
             Text(value)
-                .font(.system(size: 17, weight: .semibold))
+                .orbFont(size: 17, weight: .semibold)
                 .monospacedDigit()
                 .lineLimit(1)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(12)
-        .background(Color.primary.opacity(0.04), in: RoundedRectangle(cornerRadius: ORBMetrics.cardRadius))
-        .overlay { RoundedRectangle(cornerRadius: ORBMetrics.cardRadius).stroke(Color.primary.opacity(0.07), lineWidth: 0.5) }
+        .background(.orbSurface(0.04), in: RoundedRectangle(cornerRadius: ORBMetrics.cardRadius))
+        .overlay { RoundedRectangle(cornerRadius: ORBMetrics.cardRadius).stroke(.orbSurface(0.07), lineWidth: 0.5) }
     }
 }
 
@@ -672,7 +672,7 @@ struct IndexVBar: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
             Text("\(Int(value))")
-                .font(.system(size: 14, weight: .bold, design: .monospaced))
+                .orbFont(size: 14, weight: .bold, design: .monospaced)
                 .foregroundStyle(color)
             GeometryReader { geo in
                 ZStack(alignment: .leading) {
@@ -685,7 +685,7 @@ struct IndexVBar: View {
             }
             .frame(height: 8)
             Text(label)
-                .font(.system(size: 11))
+                .orbFont(size: 11)
                 .foregroundStyle(.secondary)
         }
         .frame(width: 90)
@@ -702,9 +702,9 @@ struct CapabilityTag: View {
     var body: some View {
         HStack(spacing: 4) {
             Image(systemName: active ? "checkmark.circle.fill" : "xmark.circle")
-                .font(.system(size: 11))
+                .orbFont(size: 11)
             Text(label)
-                .font(.system(size: 12, weight: .medium))
+                .orbFont(size: 12, weight: .medium)
         }
         .foregroundStyle(active ? color : .secondary)
         .padding(.horizontal, 10)

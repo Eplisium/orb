@@ -757,8 +757,8 @@ struct ContentView: View {
         .font(ORBFont.body)
         .padding(.horizontal, 10)
         .padding(.vertical, 8)
-        .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 9))
-        .overlay { RoundedRectangle(cornerRadius: 9).stroke(Color.primary.opacity(0.08), lineWidth: 0.5) }
+        .background(.orbSurface(0.06), in: RoundedRectangle(cornerRadius: 9))
+        .overlay { RoundedRectangle(cornerRadius: 9).stroke(.orbSurface(0.08), lineWidth: 0.5) }
         .padding(.horizontal, 14)
         .padding(.top, 12)
         .padding(.bottom, 8)
@@ -842,7 +842,7 @@ struct ContentView: View {
         case .emptySection:
             VStack(spacing: 12) {
                 Image(systemName: vm.showFavoritesOnly ? "star" : "tray")
-                    .font(.system(size: 36))
+                    .orbFont(size: 36)
                     .foregroundStyle(.tertiary)
                     .accessibilityHidden(true)
                 Text(vm.showFavoritesOnly ? "No favorites yet" : (vm.showNewThisWeek ? "Nothing new this week" : "No models"))
@@ -879,7 +879,7 @@ struct ContentView: View {
                         .fill(ORBTheme.accent.opacity(0.08))
                         .frame(width: 84, height: 84)
                     Image(systemName: "cpu")
-                        .font(.system(size: 34, weight: .light))
+                        .orbFont(size: 34, weight: .light)
                         .foregroundStyle(ORBTheme.accent)
                 }
                 Text("Select a model")
@@ -887,7 +887,7 @@ struct ContentView: View {
                 Text(vm.api.models.isEmpty
                      ? "Loading the OpenRouter catalog…"
                      : "\(vm.api.models.count) models across \(max(vm.providerOptions.count - 1, 0)) providers")
-                    .font(.system(size: 13))
+                    .orbFont(size: 13)
                     .foregroundStyle(.secondary)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)

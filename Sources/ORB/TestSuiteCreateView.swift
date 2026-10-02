@@ -28,16 +28,16 @@ struct CreateTestView: View {
                     RoundedRectangle(cornerRadius: 8)
                         .fill(accent.opacity(0.12))
                     Image(systemName: "plus.app.fill")
-                        .font(.system(size: 14, weight: .bold))
+                        .orbFont(size: 14, weight: .bold)
                         .foregroundStyle(accent)
                 }
                 .frame(width: 32, height: 32)
 
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Create Custom Test")
-                        .font(.system(size: 15, weight: .semibold))
+                        .orbFont(size: 15, weight: .semibold)
                     Text("The AI agent will build a real project in its own directory")
-                        .font(.system(size: 11))
+                        .orbFont(size: 11)
                         .foregroundStyle(.secondary)
                 }
                 Spacer()
@@ -52,7 +52,7 @@ struct CreateTestView: View {
                     // Title
                     VStack(alignment: .leading, spacing: 6) {
                         Text("Title")
-                            .font(.system(size: 11, weight: .semibold))
+                            .orbFont(size: 11, weight: .semibold)
                         TextField("e.g. Build a REST API with Express", text: $title)
                             .textFieldStyle(.roundedBorder)
                     }
@@ -60,7 +60,7 @@ struct CreateTestView: View {
                     // Subtitle
                     VStack(alignment: .leading, spacing: 6) {
                         Text("Subtitle")
-                            .font(.system(size: 11, weight: .semibold))
+                            .orbFont(size: 11, weight: .semibold)
                         TextField("Short description shown on the card", text: $subtitle)
                             .textFieldStyle(.roundedBorder)
                     }
@@ -68,7 +68,7 @@ struct CreateTestView: View {
                     // Category
                     VStack(alignment: .leading, spacing: 6) {
                         Text("Category")
-                            .font(.system(size: 11, weight: .semibold))
+                            .orbFont(size: 11, weight: .semibold)
                         Picker("Category", selection: $category) {
                             ForEach(TestCategory.allCases) { cat in
                                 Label(cat.rawValue, systemImage: cat.icon).tag(cat)
@@ -81,7 +81,7 @@ struct CreateTestView: View {
                     // Icon
                     VStack(alignment: .leading, spacing: 6) {
                         Text("Icon")
-                            .font(.system(size: 11, weight: .semibold))
+                            .orbFont(size: 11, weight: .semibold)
                         LazyVGrid(columns: Array(repeating: GridItem(.fixed(36)), count: 7), spacing: 8) {
                             ForEach(icons, id: \.self) { iconName in
                                 Button {
@@ -91,7 +91,7 @@ struct CreateTestView: View {
                                         RoundedRectangle(cornerRadius: 8)
                                             .fill(icon == iconName ? accent.opacity(0.18) : Color.primary.opacity(0.04))
                                         Image(systemName: iconName)
-                                            .font(.system(size: 13))
+                                            .orbFont(size: 13)
                                             .foregroundStyle(icon == iconName ? accent : .secondary)
                                     }
                                     .frame(width: 36, height: 36)
@@ -106,41 +106,41 @@ struct CreateTestView: View {
                     // Prompt
                     VStack(alignment: .leading, spacing: 6) {
                         Text("Task Prompt")
-                            .font(.system(size: 11, weight: .semibold))
+                            .orbFont(size: 11, weight: .semibold)
                         Text("Describe what the AI should build. It will create files and run commands in its own project directory.")
-                            .font(.system(size: 11))
+                            .orbFont(size: 11)
                             .foregroundStyle(.secondary)
                         TextEditor(text: $userPrompt)
-                            .font(.system(size: 12))
+                            .orbFont(size: 12)
                             .frame(minHeight: 80)
                             .padding(4)
-                            .background(Color.primary.opacity(0.04))
+                            .background(.orbSurface(0.04))
                             .clipShape(RoundedRectangle(cornerRadius: 6))
                     }
 
                     // System prompt
                     DisclosureGroup("Custom System Prompt") {
                         TextEditor(text: $systemPrompt)
-                            .font(.system(size: 11))
+                            .orbFont(size: 11)
                             .frame(minHeight: 60)
                             .padding(4)
-                            .background(Color.primary.opacity(0.04))
+                            .background(.orbSurface(0.04))
                             .clipShape(RoundedRectangle(cornerRadius: 6))
                     }
-                    .font(.system(size: 11, weight: .medium))
+                    .orbFont(size: 11, weight: .medium)
 
                     // Notes / evaluation criteria
                     VStack(alignment: .leading, spacing: 6) {
                         Text("Evaluation Criteria (one per line)")
-                            .font(.system(size: 11, weight: .semibold))
+                            .orbFont(size: 11, weight: .semibold)
                         Text("Optional — shown as checklist items in the test detail.")
-                            .font(.system(size: 11))
+                            .orbFont(size: 11)
                             .foregroundStyle(.secondary)
                         TextEditor(text: $notes)
-                            .font(.system(size: 11))
+                            .orbFont(size: 11)
                             .frame(minHeight: 50)
                             .padding(4)
-                            .background(Color.primary.opacity(0.04))
+                            .background(.orbSurface(0.04))
                             .clipShape(RoundedRectangle(cornerRadius: 6))
                     }
                 }

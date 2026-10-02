@@ -69,7 +69,7 @@ private struct AssistantImageCard: View {
                         .help("Click to view full screen")
                 } else if isLoading {
                     RoundedRectangle(cornerRadius: 10)
-                        .fill(Color.primary.opacity(0.05))
+                        .fill(.orbSurface(0.05))
                         .frame(width: 320, height: 200)
                         .overlay { ProgressView().controlSize(.small) }
                 } else {
@@ -219,22 +219,22 @@ struct AttachmentDraftChip: View {
     var body: some View {
         HStack(spacing: 5) {
             Image(systemName: draft.iconName)
-                .font(.system(size: 11))
+                .orbFont(size: 11)
             Text(draft.filename)
                 .lineLimit(1)
             Text(draft.typeLabel)
-                .font(.system(size: 11, weight: .bold))
+                .orbFont(size: 11, weight: .bold)
                 .padding(.horizontal, 5)
                 .padding(.vertical, 1)
-                .background(Color.primary.opacity(0.08))
+                .background(.orbSurface(0.08))
                 .clipShape(Capsule())
             Button(action: onRemove) {
                 Image(systemName: "xmark")
-                    .font(.system(size: 11, weight: .bold))
+                    .orbFont(size: 11, weight: .bold)
             }
             .buttonStyle(.plain)
         }
-        .font(.system(size: 11, weight: .medium))
+        .orbFont(size: 11, weight: .medium)
         .padding(.horizontal, 9)
         .padding(.vertical, 6)
         .background(Color.accentColor.opacity(0.10))
@@ -252,7 +252,7 @@ struct SentAttachmentsLabel: View {
             "\(count) attachment\(count == 1 ? "" : "s")",
             systemImage: "paperclip"
         )
-        .font(.system(size: 11))
+        .orbFont(size: 11)
         .foregroundStyle(.secondary)
     }
 }
