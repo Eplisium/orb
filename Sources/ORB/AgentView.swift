@@ -13,6 +13,9 @@ struct AgentView: View {
     @State private var isSelectingSessions = false
     @State private var sessionQuery = ""
     @State private var unread = UnreadTracker()
+    @AppStorage("playground.requireCommandToSend") private var requireCommandToSend = false
+    @State private var undoSnapshot: [StoredConversation]?
+    @State private var dropTargeted = false
     @StateObject private var pins = ConversationPinStore(key: "orb.pinned.agent")
     @State private var selectedSessionIDs = Set<UUID>()
     @State private var selectedModelId = ""
@@ -89,6 +92,17 @@ struct AgentView: View {
             messageArea
             composer
         }
+        .overlay(alignment: .bottom) {
+            if let snapshot = undoSnapshot {
+                UndoToastView(
+                    message: UndoToast.message(deleted: snapshot.count),
+                    undo: { chatService.restore(snapshot); undoSnapshot = nil },
+                    dismiss: { undoSnapshot = nil }
+                )
+                .padding(.bottom, 80)
+                .transition(.move(edge: .bottom).combined(with: .opacity))
+            }
+        }
     }
 
     private var playgroundBackground: some View {
@@ -157,7 +171,7 @@ struct AgentView: View {
                     onSelectAll: { selectedSessionIDs = allIDs },
                     onClear: { selectedSessionIDs.removeAll() },
                     onDelete: {
-                        chatService.deleteConversations(ids: selectedSessionIDs)
+                        undoSnapshot = chatService.deleteConversationsUndoable(ids: selectedSessionIDs)
                         selectedSessionIDs.removeAll()
                         isSelectingSessions = false
                     }
@@ -202,9 +216,9 @@ struct AgentView: View {
     private var agentHeader: some View {
         HStack(spacing: 12) {
             VStack(alignment: .leading, spacing: 3) {
-                Text(chatService.activeConversation?.title ?? "New Agent Session")
-                    .font(.system(size: 15, weight: .semibold))
-                    .lineLimit(1)
+                EditableTitle(title: chatService.activeConversation?.title ?? "New Agent Session") { name in
+                    if let id = chatService.activeConversation?.id { chatService.renameConversation(id, to: name) }
+                }
                 HStack(spacing: 5) {
                     Image(systemName: "command")
                     Text("Powered by ORB functions")
@@ -237,19 +251,28 @@ struct AgentView: View {
 
             modelPickerButton
 
-            // Export button
             if let conversation = chatService.activeConversation {
-                Button {
-                    exportConversation(conversation)
+                Menu {
+                    Button { exportConversation(conversation) } label: { Label("Export as Markdown", systemImage: "square.and.arrow.up") }
+                    Button { exportConversationJSON(conversation) } label: { Label("Export as JSON", systemImage: "curlybraces") }
+                    Button { _ = chatService.duplicateConversation(conversation.id) } label: { Label("Duplicate", systemImage: "plus.square.on.square") }
+                        .disabled(chatService.isStreaming)
+                    Divider()
+                    Button(role: .destructive) {
+                        undoSnapshot = chatService.deleteConversationsUndoable(ids: [conversation.id])
+                    } label: { Label("Delete Session", systemImage: "trash") }
+                        .disabled(chatService.isRunning(conversationID: conversation.id))
                 } label: {
-                    Image(systemName: "square.and.arrow.up")
-                        .font(.system(size: 12, weight: .semibold))
+                    Image(systemName: "ellipsis.circle")
+                        .font(.system(size: 13, weight: .semibold))
                         .frame(width: 28, height: 28)
                         .background(Color.primary.opacity(0.05))
                         .clipShape(RoundedRectangle(cornerRadius: 7))
                 }
-                .buttonStyle(.plain)
-                .help("Export conversation as Markdown")
+                .menuStyle(.borderlessButton)
+                .fixedSize()
+                .help("More actions")
+                .accessibilityLabel("More actions")
             }
 
             Button {
@@ -262,7 +285,7 @@ struct AgentView: View {
                     .clipShape(RoundedRectangle(cornerRadius: 7))
             }
             .buttonStyle(.plain)
-            .popover(isPresented: $showSettings) { settingsPopover }
+            .inspector(isPresented: $showSettings) { settingsPopover.inspectorColumnWidth(min: 280, ideal: 320, max: 420) }
             .sheet(isPresented: $showMCPSettings) { MCPSettingsView(accent: accent, isEmbedded: false) }
         }
         .padding(.horizontal, 18)
@@ -310,7 +333,7 @@ struct AgentView: View {
     }
 
     private var settingsPopover: some View {
-        VStack(alignment: .leading, spacing: 16) {
+        ScrollView { VStack(alignment: .leading, spacing: 16) {
             HStack {
                 Image(systemName: "slider.horizontal.3")
                     .foregroundStyle(accent)
@@ -396,8 +419,8 @@ struct AgentView: View {
                     .foregroundStyle(.secondary)
             }
         }
+        }
         .padding(18)
-        .frame(width: 300)
     }
 
     // MARK: - Messages
@@ -427,6 +450,13 @@ struct AgentView: View {
                                         onDelete: conversationIsRunning
                                             ? nil
                                             : { chatService.deleteMessage(message.id, from: conversation) },
+                                        onRegenerate: regenerateAction(for: message, in: conversation, running: conversationIsRunning),
+                                        onEdit: conversationIsRunning || message.role != "user"
+                                            ? nil
+                                            : { if let text = chatService.truncateConversation(from: message.id, in: conversation.id) { messageText = text; inputFocused = true } },
+                                        onBranch: conversationIsRunning
+                                            ? nil
+                                            : { if let branch = chatService.branchConversation(from: message.id, in: conversation.id) { selectedModelId = branch.modelId } },
                                         showToolCalls: true
                                     )
                                     .id(message.id)
@@ -666,7 +696,7 @@ struct AgentView: View {
                     .padding(.horizontal, 14)
                     .padding(.top, 12)
                     .padding(.bottom, 9)
-                    .onSubmit { sendMessage() }
+                    .onSubmit { if ComposerKeyPolicy.shouldSend(command: NSEvent.modifierFlags.contains(.command), shift: NSEvent.modifierFlags.contains(.shift), requireCommand: requireCommandToSend) { sendMessage() } }
 
                 HStack(spacing: 9) {
                     Button(action: chooseAttachments) {
@@ -696,8 +726,8 @@ struct AgentView: View {
 
                     if let gauge = contextGauge { ContextGaugeView(gauge: gauge) }
 
-                    Text("↩ send")
-                        .font(.system(size: 9, weight: .medium))
+                    Text(ComposerKeyPolicy.hint(requireCommand: requireCommandToSend))
+                        .font(.system(size: 11, weight: .medium))
                         .foregroundStyle(.tertiary)
 
                     Button(action: sendOrStop) {
@@ -723,6 +753,8 @@ struct AgentView: View {
             }
             .clipShape(RoundedRectangle(cornerRadius: 14))
             .shadow(color: .black.opacity(0.07), radius: 12, y: 4)
+            .fileDropHighlight(dropTargeted, accent: accent)
+            .dropDestination(for: URL.self) { urls, _ in handleDrop(urls) } isTargeted: { dropTargeted = $0 }
 
             Text(fullComputerAccess
                  ? "Full access is on — this app can run commands, edit files, and control this Mac."
@@ -922,6 +954,13 @@ struct AgentView: View {
         if panel.runModal() == .OK, let url = panel.url { workspace = url.path }
     }
 
+    private func handleDrop(_ urls: [URL]) -> Bool {
+        guard !chatService.isStreaming, !urls.isEmpty else { return false }
+        attachments.append(contentsOf: urls)
+        refreshAttachmentDiagnostics()
+        return true
+    }
+
     private func chooseAttachments() {
         let panel = NSOpenPanel()
         panel.title = "Attach Files for the Agent"
@@ -958,6 +997,28 @@ struct AgentView: View {
             attachmentWarnings.append("Attachments may consume most of this model's context window.")
         }
         attachmentContextSummary = "\(result.includedFiles.count) readable file\(result.includedFiles.count == 1 ? "" : "s") · ~\(estimatedTokens.formatted()) tokens of \(contextLength.formatted())"
+    }
+
+    /// Agent runs have side effects, so they are never silently replayed.
+    private func regenerateAction(for message: ChatMessage, in conversation: ChatConversation, running: Bool) -> (() -> Void)? { nil }
+
+    private func exportConversationJSON(_ conv: ChatConversation) {
+        let panel = NSSavePanel()
+        panel.title = "Export Conversation as JSON"
+        panel.nameFieldStringValue = "\(conv.title).json"
+        panel.allowedContentTypes = [.json]
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        let payload: [String: Any] = [
+            "title": conv.title, "model": conv.modelId, "mode": conv.mode.rawValue,
+            "systemPrompt": conv.systemPrompt,
+            "messages": conv.messages.map { ["role": $0.role, "content": $0.content] },
+        ]
+        do {
+            let data = try JSONSerialization.data(withJSONObject: payload, options: [.prettyPrinted, .sortedKeys])
+            try data.write(to: url, options: .atomic)
+        } catch {
+            chatService.lastError = "Could not export: \(error.localizedDescription)"
+        }
     }
 
     private func exportConversation(_ conv: ChatConversation) {

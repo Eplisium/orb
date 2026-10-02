@@ -209,6 +209,111 @@ final class ChatService: ObservableObject {
         catch { lastError = "Could not delete message: \(error.localizedDescription)" }
     }
 
+    // MARK: - Session management (Phase 5)
+    //
+    // Everything here is storage-first: the store is written (or the removal
+    // succeeds) before the in-memory list changes, so a failure never leaves
+    // the UI showing something the database does not have.
+
+    @discardableResult
+    func renameConversation(_ id: UUID, to name: String) -> Bool {
+        let trimmed = String(name.trimmingCharacters(in: .whitespacesAndNewlines).prefix(120))
+        guard !trimmed.isEmpty, let index = conversations.firstIndex(where: { $0.id == id }) else { return false }
+        conversations[index].title = trimmed
+        synchronizeActive(id)
+        persist(id)
+        return true
+    }
+
+    /// Full copy with fresh message IDs, selected on success.
+    func duplicateConversation(_ id: UUID) -> ChatConversation? {
+        guard let source = conversations.first(where: { $0.id == id }) else { return nil }
+        return insertCopy(of: source, messages: source.messages, titleSuffix: "(copy)")
+    }
+
+    /// Copy of the conversation up to and including `messageID`.
+    func branchConversation(from messageID: UUID, in conversationID: UUID) -> ChatConversation? {
+        guard let source = conversations.first(where: { $0.id == conversationID }),
+              let cut = source.messages.firstIndex(where: { $0.id == messageID }) else { return nil }
+        return insertCopy(of: source, messages: Array(source.messages[...cut]), titleSuffix: "(branch)")
+    }
+
+    private func insertCopy(of source: ChatConversation, messages: [ChatMessage], titleSuffix: String) -> ChatConversation? {
+        var copy = ChatConversation(
+            title: "\(source.title) \(titleSuffix)",
+            modelId: source.modelId,
+            mode: source.mode,
+            messages: messages.map { message in
+                var m = message
+                m.id = UUID()
+                // Interrupted/streaming rows are copied as-is but never as live.
+                if m.status == .streaming { m.status = .interrupted }
+                return m
+            },
+            systemPrompt: source.systemPrompt
+        )
+        copy.totalCost = source.totalCost
+        copy.totalTokens = source.totalTokens
+        conversations.insert(copy, at: 0)
+        rebuildAgentHistory(for: copy.id)
+        do {
+            try saveRecord(copy.id)
+        } catch {
+            conversations.removeAll { $0.id == copy.id }
+            agentHistories[copy.id] = nil
+            lastError = "Could not save the new session: \(error.localizedDescription)"
+            return nil
+        }
+        activeConversation = copy
+        return copy
+    }
+
+    /// Edit-and-resend: drops a user message and everything after it and
+    /// returns its text for the composer. Nil (and nothing changed) on failure.
+    func truncateConversation(from messageID: UUID, in conversationID: UUID) -> String? {
+        guard !isRunning(conversationID: conversationID),
+              let index = conversations.firstIndex(where: { $0.id == conversationID }),
+              let cut = conversations[index].messages.firstIndex(where: { $0.id == messageID }),
+              conversations[index].messages[cut].role == "user" else { return nil }
+        let text = conversations[index].messages[cut].content
+        let dropped = conversations[index].messages[cut...].map(\.id)
+        do {
+            for id in dropped { try store.removeMessage(id) }
+        } catch {
+            lastError = "Could not edit the conversation: \(error.localizedDescription)"
+            return nil
+        }
+        conversations[index].messages.removeSubrange(cut...)
+        rebuildAgentHistory(for: conversationID)
+        synchronizeActive(conversationID)
+        do { try saveRecord(conversationID) } catch { lastError = "Could not edit the conversation: \(error.localizedDescription)" }
+        return text
+    }
+
+    /// Bulk delete that hands back what it removed so the UI can offer Undo.
+    /// Only conversations whose removal succeeded are in the snapshot.
+    func deleteConversationsUndoable(ids: Set<UUID>) -> [StoredConversation]? {
+        let targets = conversations.filter { ids.contains($0.id) }
+        let snapshot = targets.map { StoredConversation(conversation: $0, agentHistory: agentHistories[$0.id] ?? []) }
+        let removed = deleteConversations(ids: ids)
+        guard removed > 0 else { return nil }
+        let survivors = Set(conversations.map(\.id))
+        let result = snapshot.filter { !survivors.contains($0.conversation.id) }
+        return result.isEmpty ? nil : result
+    }
+
+    /// Puts deleted conversations back (idempotent) and re-saves them.
+    func restore(_ records: [StoredConversation]) {
+        let existing = Set(conversations.map(\.id))
+        for record in records where !existing.contains(record.conversation.id) {
+            conversations.append(record.conversation)
+            agentHistories[record.conversation.id] = record.agentHistory
+            do { try store.saveRecord(record) }
+            catch { lastError = "Could not restore a session: \(error.localizedDescription)" }
+        }
+        conversations.sort { $0.createdAt > $1.createdAt }
+    }
+
     func updateSystemPrompt(_ prompt: String, for conversation: ChatConversation) {
         guard let index = conversations.firstIndex(where: { $0.id == conversation.id }) else { return }
         conversations[index].systemPrompt = prompt

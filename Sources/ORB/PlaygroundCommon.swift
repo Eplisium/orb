@@ -434,6 +434,9 @@ struct PlaygroundMessageView: View {
     let accent: Color
     var isReasoning: Bool = false
     var onDelete: (() -> Void)?
+    var onRegenerate: (() -> Void)?
+    var onEdit: (() -> Void)?
+    var onBranch: (() -> Void)?
     var showToolCalls: Bool = false
 
     @State private var isHovering = false
@@ -468,12 +471,18 @@ struct PlaygroundMessageView: View {
             if !message.content.isEmpty {
                 Button("Copy message", systemImage: "doc.on.doc") { copyMessage() }
             }
+            if !isStreaming, let onRegenerate { Button("Regenerate", systemImage: "arrow.clockwise") { onRegenerate() } }
+            if !isStreaming, let onEdit { Button("Edit and resend", systemImage: "pencil") { onEdit() } }
+            if !isStreaming, let onBranch { Button("Branch from here", systemImage: "arrow.triangle.branch") { onBranch() } }
             if !isStreaming, let onDelete {
                 Button("Delete message", systemImage: "trash", role: .destructive) { onDelete() }
             }
         }
         .accessibilityActions {
             if !message.content.isEmpty { Button("Copy message") { copyMessage() } }
+            if !isStreaming, let onRegenerate { Button("Regenerate") { onRegenerate() } }
+            if !isStreaming, let onEdit { Button("Edit and resend") { onEdit() } }
+            if !isStreaming, let onBranch { Button("Branch from here") { onBranch() } }
             if !isStreaming, let onDelete { Button("Delete message") { onDelete() } }
         }
     }
@@ -486,6 +495,21 @@ struct PlaygroundMessageView: View {
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { showCopyCheck = false }
     }
 
+    @ViewBuilder
+    private func actionButton(_ symbol: String, _ label: String, _ action: (() -> Void)?) -> some View {
+        if let action {
+            Button(action: action) {
+                Image(systemName: symbol)
+                    .font(.system(size: 9, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                    .frame(width: 24, height: 24)
+            }
+            .buttonStyle(.plain)
+            .help(label)
+            .accessibilityLabel(label)
+        }
+    }
+
     private var messageActions: some View {
         HStack(spacing: 3) {
             Button(action: copyMessage) {
@@ -496,6 +520,11 @@ struct PlaygroundMessageView: View {
             }
             .buttonStyle(.plain)
             .help("Copy message")
+            .accessibilityLabel("Copy message")
+
+            actionButton("arrow.clockwise", "Regenerate", onRegenerate)
+            actionButton("pencil", "Edit and resend", onEdit)
+            actionButton("arrow.triangle.branch", "Branch from here", onBranch)
 
             if let onDelete {
                 Button {
@@ -508,6 +537,7 @@ struct PlaygroundMessageView: View {
                 }
                 .buttonStyle(.plain)
                 .help("Delete message")
+                .accessibilityLabel("Delete message")
             }
         }
         .padding(.horizontal, 4)

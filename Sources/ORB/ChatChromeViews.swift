@@ -224,3 +224,84 @@ struct ConversationMeterView: View {
         }
     }
 }
+
+/// Title that turns into a text field on double-click; Return commits, Escape cancels.
+struct EditableTitle: View {
+    let title: String
+    let commit: (String) -> Void
+    @State private var editing = false
+    @State private var draft = ""
+    @FocusState private var focused: Bool
+
+    var body: some View {
+        Group {
+            if editing {
+                TextField("Title", text: $draft)
+                    .textFieldStyle(.roundedBorder)
+                    .focused($focused)
+                    .onSubmit { finish(save: true) }
+                    .onExitCommand { finish(save: false) }
+                    .onChange(of: focused) { _, now in if !now && editing { finish(save: true) } }
+            } else {
+                Text(title)
+                    .lineLimit(1)
+                    .onTapGesture(count: 2) { begin() }
+                    .help("Double-click to rename")
+                    .accessibilityAddTraits(.isButton)
+                    .accessibilityHint("Double tap to rename")
+                    .accessibilityAction(named: "Rename") { begin() }
+            }
+        }
+        .font(.system(size: 15, weight: .semibold))
+    }
+
+    private func begin() { draft = title; editing = true; focused = true }
+
+    private func finish(save: Bool) {
+        guard editing else { return }
+        editing = false
+        if save { commit(draft) }
+    }
+}
+
+/// Bottom-of-window toast with an Undo button; dismisses itself.
+struct UndoToastView: View {
+    let message: String
+    let undo: () -> Void
+    let dismiss: () -> Void
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Image(systemName: "trash").accessibilityHidden(true)
+            Text(message).font(ORBFont.footnote.weight(.medium))
+            Button("Undo", action: undo).buttonStyle(.link).keyboardShortcut("z", modifiers: .command)
+            Button { dismiss() } label: { Image(systemName: "xmark") }
+                .buttonStyle(.plain).accessibilityLabel("Dismiss")
+        }
+        .padding(.horizontal, 14).padding(.vertical, 9)
+        .background(.regularMaterial, in: Capsule())
+        .overlay { Capsule().stroke(Color.primary.opacity(0.12)) }
+        .shadow(color: .black.opacity(0.15), radius: 8, y: 3)
+        .padding(.bottom, 16)
+        .task(id: message) {
+            try? await Task.sleep(for: .seconds(UndoToast.visibleDuration))
+            dismiss()
+        }
+        .accessibilityElement(children: .combine)
+    }
+}
+
+extension View {
+    /// Dashed accent outline while files are dragged over.
+    func fileDropHighlight(_ targeted: Bool, accent: Color) -> some View {
+        overlay {
+            if targeted {
+                RoundedRectangle(cornerRadius: 14)
+                    .strokeBorder(accent, style: StrokeStyle(lineWidth: 2, dash: [6, 4]))
+                    .background(accent.opacity(0.08), in: RoundedRectangle(cornerRadius: 14))
+                    .overlay { Label("Drop to attach", systemImage: "paperclip").font(ORBFont.footnote.weight(.semibold)).foregroundStyle(accent) }
+                    .allowsHitTesting(false)
+            }
+        }
+    }
+}

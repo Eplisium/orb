@@ -12,6 +12,10 @@ struct ChatView: View {
     @State private var isSelectingSessions = false
     @State private var sessionQuery = ""
     @State private var unread = UnreadTracker()
+    @AppStorage("playground.requireCommandToSend") private var requireCommandToSend = false
+    @State private var undoSnapshot: [StoredConversation]?
+    @State private var dropTargeted = false
+    @State private var temperatureIsModelDefault = false
     @StateObject private var pins = ConversationPinStore(key: "orb.pinned.chat")
     @State private var selectedSessionIDs = Set<UUID>()
     @State private var selectedModelId = ""
@@ -42,7 +46,7 @@ struct ChatView: View {
     /// simple controls and the advanced panel stay in sync.
     private var requestSettings: GenerationSettings {
         var resolved = settings
-        resolved.temperature = temperature
+        resolved.temperature = QuickSampling(temperature: temperatureIsModelDefault ? nil : temperature).requestTemperature
         resolved.maxTokens = maxTokens > 0 ? Int(maxTokens) : nil
         return resolved
     }
@@ -82,6 +86,17 @@ struct ChatView: View {
             }
             messageArea
             composer
+        }
+        .overlay(alignment: .bottom) {
+            if let snapshot = undoSnapshot {
+                UndoToastView(
+                    message: UndoToast.message(deleted: snapshot.count),
+                    undo: { chatService.restore(snapshot); undoSnapshot = nil },
+                    dismiss: { undoSnapshot = nil }
+                )
+                .padding(.bottom, 80)
+                .transition(.move(edge: .bottom).combined(with: .opacity))
+            }
         }
     }
 
@@ -151,7 +166,7 @@ struct ChatView: View {
                     onSelectAll: { selectedSessionIDs = allIDs },
                     onClear: { selectedSessionIDs.removeAll() },
                     onDelete: {
-                        chatService.deleteConversations(ids: selectedSessionIDs)
+                        undoSnapshot = chatService.deleteConversationsUndoable(ids: selectedSessionIDs)
                         selectedSessionIDs.removeAll()
                         isSelectingSessions = false
                     }
@@ -196,9 +211,9 @@ struct ChatView: View {
     private var chatHeader: some View {
         HStack(spacing: 12) {
             VStack(alignment: .leading, spacing: 3) {
-                Text(chatService.activeConversation?.title ?? "New Chat")
-                    .font(.system(size: 15, weight: .semibold))
-                    .lineLimit(1)
+                EditableTitle(title: chatService.activeConversation?.title ?? "New Chat") { name in
+                    if let id = chatService.activeConversation?.id { chatService.renameConversation(id, to: name) }
+                }
                 HStack(spacing: 5) {
                     Image(systemName: "bolt.horizontal")
                     Text("Direct OpenRouter completion")
@@ -240,19 +255,28 @@ struct ChatView: View {
 
             modelPickerButton
 
-            // Export button
             if let conversation = chatService.activeConversation {
-                Button {
-                    exportConversation(conversation)
+                Menu {
+                    Button { exportConversation(conversation) } label: { Label("Export as Markdown", systemImage: "square.and.arrow.up") }
+                    Button { exportConversationJSON(conversation) } label: { Label("Export as JSON", systemImage: "curlybraces") }
+                    Button { _ = chatService.duplicateConversation(conversation.id) } label: { Label("Duplicate", systemImage: "plus.square.on.square") }
+                        .disabled(chatService.isStreaming)
+                    Divider()
+                    Button(role: .destructive) {
+                        undoSnapshot = chatService.deleteConversationsUndoable(ids: [conversation.id])
+                    } label: { Label("Delete Session", systemImage: "trash") }
+                        .disabled(chatService.isRunning(conversationID: conversation.id))
                 } label: {
-                    Image(systemName: "square.and.arrow.up")
-                        .font(.system(size: 12, weight: .semibold))
+                    Image(systemName: "ellipsis.circle")
+                        .font(.system(size: 13, weight: .semibold))
                         .frame(width: 28, height: 28)
                         .background(Color.primary.opacity(0.05))
                         .clipShape(RoundedRectangle(cornerRadius: 7))
                 }
-                .buttonStyle(.plain)
-                .help("Export conversation as Markdown")
+                .menuStyle(.borderlessButton)
+                .fixedSize()
+                .help("More actions")
+                .accessibilityLabel("More actions")
             }
 
             Button {
@@ -265,7 +289,7 @@ struct ChatView: View {
                     .clipShape(RoundedRectangle(cornerRadius: 7))
             }
             .buttonStyle(.plain)
-            .popover(isPresented: $showSettings) { settingsPopover }
+            .inspector(isPresented: $showSettings) { settingsPopover.inspectorColumnWidth(min: 280, ideal: 320, max: 420) }
             .sheet(isPresented: $showAdvancedSettings) {
                 AdvancedSettingsView(accent: accent, settings: $settings)
             }
@@ -315,7 +339,7 @@ struct ChatView: View {
     }
 
     private var settingsPopover: some View {
-        VStack(alignment: .leading, spacing: 16) {
+        ScrollView { VStack(alignment: .leading, spacing: 16) {
             HStack {
                 Image(systemName: "slider.horizontal.3")
                     .foregroundStyle(accent)
@@ -327,12 +351,15 @@ struct ChatView: View {
                 HStack {
                     Text("Temperature")
                     Spacer()
-                    Text(String(format: "%.2f", temperature))
+                    Text(QuickSampling(temperature: temperatureIsModelDefault ? nil : temperature).display)
                         .monospacedDigit()
                         .foregroundStyle(.secondary)
                 }
-                PresetPicker(temperature: $temperature, accent: accent)
-                Slider(value: $temperature, in: 0...2, step: 0.05)
+                PresetPicker(temperature: Binding(get: { temperature }, set: { temperature = $0; temperatureIsModelDefault = false }), accent: accent)
+                Slider(value: Binding(get: { temperature }, set: { temperature = $0; temperatureIsModelDefault = false }), in: 0...2, step: 0.05)
+                    .disabled(temperatureIsModelDefault)
+                Toggle("Use model default (send no temperature)", isOn: $temperatureIsModelDefault)
+                    .font(.caption)
                 HStack {
                     Text("Max tokens")
                     Spacer()
@@ -403,8 +430,8 @@ struct ChatView: View {
                     .foregroundStyle(.secondary)
             }
         }
+        }
         .padding(18)
-        .frame(width: 300)
     }
 
     // MARK: - Messages
@@ -428,7 +455,14 @@ struct ChatView: View {
                                         isReasoning: chatService.isReasoningMessage(message.id, conversationID: conversation.id),
                                         onDelete: conversationIsRunning
                                             ? nil
-                                            : { chatService.deleteMessage(message.id, from: conversation) }
+                                            : { chatService.deleteMessage(message.id, from: conversation) },
+                                        onRegenerate: regenerateAction(for: message, in: conversation, running: conversationIsRunning),
+                                        onEdit: conversationIsRunning || message.role != "user"
+                                            ? nil
+                                            : { if let text = chatService.truncateConversation(from: message.id, in: conversation.id) { messageText = text; inputFocused = true } },
+                                        onBranch: conversationIsRunning
+                                            ? nil
+                                            : { if let branch = chatService.branchConversation(from: message.id, in: conversation.id) { selectedModelId = branch.modelId } }
                                     )
                                     .id(message.id)
                                 }
@@ -639,7 +673,7 @@ struct ChatView: View {
                     .padding(.horizontal, 14)
                     .padding(.top, 12)
                     .padding(.bottom, 9)
-                    .onSubmit { sendMessage() }
+                    .onSubmit { if ComposerKeyPolicy.shouldSend(command: NSEvent.modifierFlags.contains(.command), shift: NSEvent.modifierFlags.contains(.shift), requireCommand: requireCommandToSend) { sendMessage() } }
 
                 HStack(spacing: 9) {
                     Button(action: chooseAttachments) {
@@ -656,8 +690,8 @@ struct ChatView: View {
                     Spacer()
                     if let gauge = contextGauge { ContextGaugeView(gauge: gauge) }
 
-                    Text("↩ send")
-                        .font(.system(size: 9, weight: .medium))
+                    Text(ComposerKeyPolicy.hint(requireCommand: requireCommandToSend))
+                        .font(.system(size: 11, weight: .medium))
                         .foregroundStyle(.tertiary)
 
                     Button(action: sendOrStop) {
@@ -683,6 +717,8 @@ struct ChatView: View {
             }
             .clipShape(RoundedRectangle(cornerRadius: 14))
             .shadow(color: .black.opacity(0.07), radius: 12, y: 4)
+            .fileDropHighlight(dropTargeted, accent: accent)
+            .dropDestination(for: URL.self) { urls, _ in handleDrop(urls) } isTargeted: { dropTargeted = $0 }
 
             Text("AI can make mistakes. Review important output.")
                 .font(.system(size: 9))
@@ -827,6 +863,14 @@ struct ChatView: View {
         )
     }
 
+    private func handleDrop(_ urls: [URL]) -> Bool {
+        guard !chatService.isStreaming, !urls.isEmpty else { return false }
+        let result = ChatAttachmentBuilder.classify(urls: urls)
+        attachmentDrafts.append(contentsOf: result.drafts)
+        refreshAttachmentWarnings(extra: result.warnings)
+        return !result.drafts.isEmpty
+    }
+
     private func chooseAttachments() {
         let panel = NSOpenPanel()
         panel.title = "Attach Files for Chat"
@@ -847,6 +891,32 @@ struct ChatView: View {
         let model = viewModel.api.models.first { $0.id == currentModelId }
         warnings += AttachmentCapability.warnings(model: model, drafts: attachmentDrafts)
         attachmentWarnings = warnings
+    }
+
+    private func regenerateAction(for message: ChatMessage, in conversation: ChatConversation, running: Bool) -> (() -> Void)? {
+        guard !running, message.role == "assistant", conversation.messages.last?.id == message.id else { return nil }
+        return {
+            Task { await chatService.regenerateLastResponse(modelId: currentModelId, settings: requestSettings) }
+        }
+    }
+
+    private func exportConversationJSON(_ conv: ChatConversation) {
+        let panel = NSSavePanel()
+        panel.title = "Export Conversation as JSON"
+        panel.nameFieldStringValue = "\(conv.title).json"
+        panel.allowedContentTypes = [.json]
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        let payload: [String: Any] = [
+            "title": conv.title, "model": conv.modelId, "mode": conv.mode.rawValue,
+            "systemPrompt": conv.systemPrompt,
+            "messages": conv.messages.map { ["role": $0.role, "content": $0.content] },
+        ]
+        do {
+            let data = try JSONSerialization.data(withJSONObject: payload, options: [.prettyPrinted, .sortedKeys])
+            try data.write(to: url, options: .atomic)
+        } catch {
+            chatService.lastError = "Could not export: \(error.localizedDescription)"
+        }
     }
 
     private func exportConversation(_ conv: ChatConversation) {

@@ -301,3 +301,77 @@ struct UnreadTracker: Equatable {
         }
     }
 }
+
+// MARK: Undo toast
+
+enum UndoToast {
+    static let visibleDuration: TimeInterval = 8
+
+    static func message(deleted count: Int) -> String {
+        "Deleted \(count) session\(count == 1 ? "" : "s")"
+    }
+}
+
+// MARK: Quick sampling ("model default" is a real choice)
+
+/// The quick temperature control. nil means "send nothing" so the provider's
+/// own default applies; ORB never invents one.
+struct QuickSampling: Equatable {
+    var temperature: Double?
+
+    var requestTemperature: Double? { temperature }
+    var display: String { temperature.map { String(format: "%.2f", $0) } ?? "Model default" }
+    /// Where the slider rests while the value is unset.
+    var sliderValue: Double { temperature ?? 0.7 }
+}
+
+// MARK: Approval presentation
+
+struct ApprovalPresentation: Equatable {
+    enum Risk: Equatable { case elevated, high }
+
+    let risk: Risk
+    let title: String
+    let symbol: String
+    let riskWord: String
+    let displaySummary: String
+
+    static func make(toolName: String, server: String?, summary: String) -> ApprovalPresentation {
+        let trimmed = summary.trimmingCharacters(in: .whitespacesAndNewlines)
+        let shown = trimmed.isEmpty ? "No arguments shown." : String(trimmed.prefix(600))
+        switch toolName {
+        case "run_command":
+            return .init(risk: .high, title: "Run a command on this Mac?", symbol: "terminal.fill", riskWord: "High risk", displaySummary: shown)
+        case "run_applescript", "computer_action", "open_application", "open_url", "capture_screen", "view_image":
+            return .init(risk: .high, title: "Let the agent control this Mac?", symbol: "desktopcomputer.trianglebadge.exclamationmark", riskWord: "High risk", displaySummary: shown)
+        default:
+            let name = server ?? "an MCP server"
+            return .init(risk: .elevated, title: "Allow a tool from \(name)?", symbol: "puzzlepiece.extension.fill", riskWord: "Needs review", displaySummary: shown)
+        }
+    }
+}
+
+/// Prompts show one at a time, in arrival order.
+struct ApprovalQueue {
+    private var requests: [ApprovalCoordinator.Request] = []
+
+    var current: ApprovalCoordinator.Request? { requests.first }
+    var waiting: Int { max(0, requests.count - 1) }
+
+    mutating func enqueue(_ request: ApprovalCoordinator.Request) { requests.append(request) }
+    mutating func resolve(_ id: UUID) { requests.removeAll { $0.id == id } }
+}
+
+// MARK: Composer keys
+
+enum ComposerKeyPolicy {
+    /// Shift-Return is always a newline. With `requireCommand`, plain Return is too.
+    static func shouldSend(command: Bool, shift: Bool, requireCommand: Bool) -> Bool {
+        if shift { return false }
+        return requireCommand ? command : true
+    }
+
+    static func hint(requireCommand: Bool) -> String {
+        requireCommand ? "⌘↩ send · ↩ new line" : "↩ send · ⇧↩ new line"
+    }
+}
