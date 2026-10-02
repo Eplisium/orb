@@ -684,7 +684,11 @@ final class ChatService: ObservableObject {
     private func denyPendingApprovals() {
         approvalPresenter.denyAll()
         let approvals = approvals
-        Task { await approvals.cancelPending() }
+        Task {
+            await approvals.cancelPending()
+            // "Approve for this run" never outlives the run.
+            await approvals.revokeSessionApprovals()
+        }
     }
 
     func stopStreaming() {

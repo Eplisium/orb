@@ -133,3 +133,60 @@ struct SavedCreationsTests {
         await #expect(throws: AssetStoreError.self) { try await store.data(for: forged) }
     }
 }
+
+@Suite("Saved creations: delete")
+@MainActor
+struct SavedCreationsDeleteTests {
+    private func fixture() throws -> (URL, AssetStore, URL) {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("ORB-del-\(UUID())", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        return (root, AssetStore(baseDirectory: root.appendingPathComponent("Assets"), database: DatabaseManager()), root.appendingPathComponent("creations.json"))
+    }
+
+    @Test("remove updates the index, restore brings it back in order, purge deletes bytes")
+    func lifecycle() async throws {
+        let (root, assets, index) = try fixture()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = try SavedCreationsStore(assetStore: assets, indexURL: index)
+        let a = try await store.save(Data("one".utf8), mimeType: "text/plain", kind: .transcript, modelID: "m", prompt: nil)
+        let b = try await store.save(Data("two".utf8), mimeType: "text/plain", kind: .transcript, modelID: "m", prompt: nil)
+
+        let removed = try await store.remove(ids: [a.id])
+        #expect(removed == [a])
+        #expect(store.creations.map(\.id) == [b.id])
+        #expect(try SavedCreationsStore(assetStore: assets, indexURL: index).creations.map(\.id) == [b.id])
+        // Bytes survive until purge so Undo is lossless.
+        #expect(try await assets.data(atRelativePath: a.assetPath) == Data("one".utf8))
+
+        try await store.restore(removed)
+        let dates = store.creations.map(\.createdAt)
+        #expect(dates == dates.sorted(by: >))
+        #expect(Set(store.creations.map(\.id)) == [a.id, b.id])
+
+        let again = try await store.remove(ids: [a.id])
+        await store.purgeUnreferenced(again)
+        await #expect(throws: AssetStoreError.self) { _ = try await assets.data(atRelativePath: a.assetPath) }
+        #expect(try await assets.data(atRelativePath: b.assetPath) == Data("two".utf8))
+    }
+
+    @Test("purge keeps bytes still used by another creation")
+    func sharedBytes() async throws {
+        let (root, assets, index) = try fixture()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = try SavedCreationsStore(assetStore: assets, indexURL: index)
+        let bytes = Data("shared".utf8)
+        let a = try await store.save(bytes, mimeType: "text/plain", kind: .transcript, modelID: "one", prompt: nil)
+        let b = try await store.save(bytes, mimeType: "text/plain", kind: .transcript, modelID: "two", prompt: nil)
+        let removed = try await store.remove(ids: [a.id])
+        await store.purgeUnreferenced(removed)
+        #expect(try await assets.data(atRelativePath: b.assetPath) == bytes)
+    }
+
+    @Test("removing nothing is a no-op")
+    func noop() async throws {
+        let (root, assets, index) = try fixture()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = try SavedCreationsStore(assetStore: assets, indexURL: index)
+        #expect(try await store.remove(ids: [UUID()]).isEmpty)
+    }
+}

@@ -127,3 +127,35 @@ struct StudioPresetContentTests {
         #expect(StudioPreset(name: "Empty", settings: [:]).summary == "Default settings")
     }
 }
+
+@Suite("Studio presets: speech and embeddings")
+struct SpeechEmbeddingsPresetTests {
+    @Test("Speech preset round-trips and clamps a bad speed")
+    func speech() {
+        let s = StudioPreset.speechSettings(mode: "tts", model: "a/tts", voice: "alloy", speed: 1.25, format: "mp3",
+                                            language: "", transcriptionFormat: "json", timestamps: "none")
+        let v = SpeechPresetValues(StudioPreset(name: "x", settings: s))
+        #expect(v.mode == "tts" && v.model == "a/tts" && v.voice == "alloy" && v.speed == 1.25)
+        var bad = s; bad["speed"] = "99"
+        #expect(SpeechPresetValues(StudioPreset(name: "x", settings: bad)).speed == 1.0)
+    }
+
+    @Test("Embeddings preset drops non-numeric dimensions and unknown input types")
+    func embeddings() {
+        var s = StudioPreset.embeddingsSettings(model: "m", dimensions: "1024", inputType: "query", rerankModel: "r", topN: "5")
+        let ok = EmbeddingsPresetValues(StudioPreset(name: "x", settings: s))
+        #expect(ok.dimensions == "1024" && ok.inputType == "query" && ok.topN == "5")
+        s["dimensions"] = "12; drop"; s["inputType"] = "weird"; s["topN"] = "-1"
+        let bad = EmbeddingsPresetValues(StudioPreset(name: "x", settings: s))
+        #expect(bad.dimensions.isEmpty && bad.inputType.isEmpty && bad.topN.isEmpty)
+    }
+
+    @Test("Speech and embeddings presets are stored separately from other studios")
+    func isolated() {
+        let d = defaults()
+        var store = StudioPresetStore(studio: .speech, defaults: d)
+        store.save(StudioPreset(name: "Narrator", settings: ["mode": "tts"]))
+        #expect(StudioPresetStore(studio: .embeddings, defaults: d).presets.isEmpty)
+        #expect(StudioPresetStore(studio: .speech, defaults: d).presets.count == 1)
+    }
+}

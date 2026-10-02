@@ -124,6 +124,56 @@ final class SavedCreationsStore: ObservableObject {
         return item
     }
 
+    /// Removes creations from the index only (bytes stay so Undo works). If the index
+    /// write fails the in-memory list is untouched, so nothing disappears that would
+    /// come back after a restart.
+    @discardableResult
+    func remove(ids: Set<UUID>) async throws -> [SavedCreation] {
+        try await serialized { [self] in
+            if let loadError { throw loadError }
+            let removed = creations.filter { ids.contains($0.id) }
+            guard !removed.isEmpty else { return [] }
+            try writeIndex(creations.filter { !ids.contains($0.id) })
+            return removed
+        }
+    }
+
+    /// Puts removed creations back (Undo), keeping newest-first order.
+    func restore(_ items: [SavedCreation]) async throws {
+        try await serialized { [self] in
+            let existing = Set(creations.map(\.id))
+            let merged = (creations + items.filter { !existing.contains($0.id) }).sorted { $0.createdAt > $1.createdAt }
+            try writeIndex(merged)
+        }
+    }
+
+    /// Deletes bytes no remaining creation references. Call once Undo is no longer possible.
+    func purgeUnreferenced(_ removed: [SavedCreation]) async {
+        _ = try? await serialized { [self] in
+            let live = Set(creations.map(\.checksum))
+            for checksum in Set(removed.map(\.checksum)) where !live.contains(checksum) {
+                _ = try? assetStore.removeUnattached(checksum: checksum)
+            }
+        }
+    }
+
+    private func serialized<T>(_ work: @escaping @MainActor () async throws -> T) async throws -> T {
+        let predecessor = previousSave
+        let operation = Task { @MainActor () async throws -> T in
+            await predecessor?.value
+            return try await work()
+        }
+        previousSave = Task { _ = try? await operation.value }
+        return try await operation.value
+    }
+
+    private func writeIndex(_ updated: [SavedCreation]) throws {
+        let payload = try JSONEncoder().encode(CreationsManifest(version: 1, creations: updated))
+        try FileManager.default.createDirectory(at: indexURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try payload.write(to: indexURL, options: .atomic)
+        creations = updated
+    }
+
     func data(for creation: SavedCreation) async throws -> Data {
         let path = creation.assetPath
         guard Self.isValidAssetPath(path, checksum: creation.checksum) else {

@@ -215,6 +215,24 @@ final class AssetStore {
         return data
     }
 
+    // MARK: Deleting
+
+    /// Deletes the bytes and metadata for a checksum, unless a job or message still
+    /// references it. Returns whether anything was removed. Missing files are fine.
+    @discardableResult
+    func removeUnattached(checksum: String) throws -> Bool {
+        if database.hasAttachedAssetRecord(checksum: checksum) { return false }
+        let records = database.loadAssetRecords().filter { $0.checksum == checksum }
+        for record in records {
+            let url = try resolvedURL(forRelativePath: record.relativePath)
+            if FileManager.default.fileExists(atPath: url.path) {
+                try FileManager.default.removeItem(at: url)
+            }
+        }
+        try database.deleteUnattachedAssetRecords(checksum: checksum)
+        return !records.isEmpty
+    }
+
     // MARK: Layout
 
     /// `<2 hex chars>/<checksum>[.<ext>]` — content-addressed and secret-free.

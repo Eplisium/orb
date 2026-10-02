@@ -343,9 +343,10 @@ struct ApprovalSheet: View {
                 Spacer()
                 Button("Deny") { decide(.denied) }
                     .keyboardShortcut(.cancelAction)
+                Button("Approve for this run") { decide(.approvedForSession) }
+                    .help("Allow this tool again without asking until the run ends")
                 Button("Approve once") { decide(.approved) }
                     .keyboardShortcut(.defaultAction)
-                    .disabled(false)
             }
         }
         .padding(20)

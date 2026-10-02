@@ -20,6 +20,8 @@ actor ApprovalCoordinator {
 
     enum Decision: Sendable {
         case approved
+        /// Approved now, and remembered so the same tool does not re-prompt until revoked.
+        case approvedForSession
         case denied
     }
 
@@ -55,10 +57,10 @@ actor ApprovalCoordinator {
                 await self.fulfill(id: request.id, decision: resolved)
             }
         }
-        if decision == .approved, sessionScope {
+        if decision == .approvedForSession || (decision == .approved && sessionScope) {
             sessionApproved.insert(key)
         }
-        return decision == .approved
+        return decision != .denied
     }
 
     /// Cancels one pending approval, or all of them when no ID is given.

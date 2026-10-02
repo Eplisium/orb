@@ -138,3 +138,34 @@ struct AgentRunApprovalTests {
         #expect(toolMessage?.content.contains("not permitted") == true)
     }
 }
+
+@Suite("Agent approvals: approve for this run")
+struct ApproveForRunTests {
+    @Test("approvedForSession is remembered, then revocable")
+    func remembered() async {
+        let approvals = ApprovalCoordinator()
+        let prompts = PromptCounter()
+        await approvals.setHandler { _ in await prompts.hit(); return .approvedForSession }
+        #expect(await approvals.requestApproval(toolName: "run_command", summary: "a"))
+        #expect(await approvals.requestApproval(toolName: "run_command", summary: "b"))
+        #expect(await prompts.count == 1)
+        await approvals.revokeSessionApprovals()
+        #expect(await approvals.requestApproval(toolName: "run_command", summary: "c"))
+        #expect(await prompts.count == 2)
+    }
+
+    @Test("approve-once is not remembered")
+    func once() async {
+        let approvals = ApprovalCoordinator()
+        let prompts = PromptCounter()
+        await approvals.setHandler { _ in await prompts.hit(); return .approved }
+        _ = await approvals.requestApproval(toolName: "run_command", summary: "a")
+        _ = await approvals.requestApproval(toolName: "run_command", summary: "b")
+        #expect(await prompts.count == 2)
+    }
+}
+
+private actor PromptCounter {
+    var count = 0
+    func hit() { count += 1 }
+}

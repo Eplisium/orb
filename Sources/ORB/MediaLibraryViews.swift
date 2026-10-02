@@ -379,9 +379,9 @@ struct SavedCreationsLibraryView: View {
     @State private var query = LibraryQuery()
     @State private var selection = LibrarySelection()
     @State private var errorMessage: String?
-    @State private var selected: SavedCreation?
-    @State private var selectedData: Data?
     @State private var isOpening = false
+    @State private var pendingDelete: [SavedCreation]?
+    @State private var undoRemoved: [SavedCreation]?
     @FocusState private var focused: Bool
 
     private var visible: [SavedCreation] { query.apply(to: store.creations) }
@@ -409,7 +409,31 @@ struct SavedCreationsLibraryView: View {
             open(target); return .handled
         }
         .onChange(of: visible.map(\.id)) { _, ids in selection.prune(toVisible: ids) }
-        .sheet(item: $selected) { creation in preview(creation) }
+        .confirmationDialog(
+            LibraryDelete.confirmTitle(count: pendingDelete?.count ?? 0),
+            isPresented: Binding(get: { pendingDelete != nil }, set: { if !$0 { pendingDelete = nil } }),
+            titleVisibility: .visible
+        ) {
+            Button("Delete", role: .destructive) { if let items = pendingDelete { delete(items) } }
+            Button("Cancel", role: .cancel) { pendingDelete = nil }
+        } message: {
+            Text("You can undo for a few seconds. After that the saved file is removed from this Mac.")
+        }
+        .overlay(alignment: .bottom) {
+            if let removed = undoRemoved {
+                UndoToastView(
+                    message: LibraryDelete.message(count: removed.count),
+                    undo: { undoDelete(removed) },
+                    dismiss: { finalizeDelete(removed) }
+                )
+                .transition(.move(edge: .bottom).combined(with: .opacity))
+            }
+        }
+        .onDisappear { if let removed = undoRemoved { finalizeDelete(removed) } }
+        .onDeleteCommand {
+            let chosen = visible.filter { selection.contains($0.id) }
+            if !chosen.isEmpty { pendingDelete = chosen }
+        }
     }
 
     // MARK: Toolbar
@@ -466,6 +490,7 @@ struct SavedCreationsLibraryView: View {
             Button("Select All") { selection.selectAll(visible.map(\.id)) }
             Button("Deselect") { selection.clear() }
             Spacer()
+            Button(role: .destructive) { pendingDelete = visible.filter { selection.contains($0.id) } } label: { Label("Delete…", systemImage: "trash") }
             Button { exportSelected() } label: { Label("Export…", systemImage: "square.and.arrow.up") }
                 .buttonStyle(.borderedProminent)
         }
@@ -568,39 +593,10 @@ struct SavedCreationsLibraryView: View {
         Button("Open") { open(c) }
         Button("Export…") { export(c) }
         Button(selection.contains(c.id) ? "Deselect" : "Select") { selection.toggle(c.id) }
-        if let prompt = c.prompt, !prompt.isEmpty { Button("Copy Prompt") { AppToasts.copy(prompt, what: "Prompt") } }
-    }
-
-    // MARK: Preview
-
-    private func preview(_ creation: SavedCreation) -> some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack {
-                Label(creation.kind.title, systemImage: creation.kind.symbol).font(.headline)
-                Spacer()
-                Button("Done") { selected = nil; selectedData = nil }.keyboardShortcut(.cancelAction)
-            }
-            if let data = selectedData {
-                if creation.kind == .image, let image = NSImage(data: data) {
-                    Image(nsImage: image).resizable().scaledToFit()
-                        .accessibilityLabel(creation.prompt ?? "Saved image")
-                } else if creation.kind == .transcript || creation.kind == .embedding {
-                    ScrollView {
-                        Text(String(decoding: data, as: UTF8.self))
-                            .font(.system(.body, design: .monospaced)).textSelection(.enabled)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                    }
-                } else {
-                    ContentUnavailableView("No inline preview", systemImage: "doc",
-                        description: Text("Export to view this media in a compatible app."))
-                }
-            }
-            if let prompt = creation.prompt, !prompt.isEmpty {
-                Text(prompt).font(ORBFont.footnote).foregroundStyle(.secondary).lineLimit(3)
-            }
-            Button("Export…") { export(creation) }
+        Button("Delete…", role: .destructive) {
+            pendingDelete = selection.contains(c.id) ? visible.filter { selection.contains($0.id) } : [c]
         }
-        .padding(20).frame(minWidth: 520, minHeight: 380)
+        if let prompt = c.prompt, !prompt.isEmpty { Button("Copy Prompt") { AppToasts.copy(prompt, what: "Prompt") } }
     }
 
     // MARK: Actions
@@ -614,18 +610,13 @@ struct SavedCreationsLibraryView: View {
         Task {
             defer { isOpening = false }
             do {
-                let data = try await store.data(for: creation)
-                if creation.kind == .video || creation.kind == .audio {
-                    let directory = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
-                        .appendingPathComponent("ORB/CreationPreviews", isDirectory: true)
-                    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-                    let url = directory.appendingPathComponent(LibraryPreview.fileName(for: creation))
-                    try data.write(to: url, options: .atomic)
-                    guard NSWorkspace.shared.open(url) else { throw CocoaError(.fileReadUnknown) }
-                } else {
-                    selectedData = data
-                    selected = creation
-                }
+                // Space previews the whole selection; double-click previews one item.
+                let group = selection.contains(creation.id) && selection.count > 1
+                    ? visible.filter { selection.contains($0.id) && LibraryPreview.canQuickLook($0) }
+                    : [creation]
+                var loaded: [(creation: SavedCreation, data: Data)] = []
+                for item in group { loaded.append((item, try await store.data(for: item))) }
+                guard QuickLookPreview.shared.show(loaded) else { throw CocoaError(.fileWriteUnknown) }
             } catch { errorMessage = error.localizedDescription }
         }
     }
@@ -637,6 +628,36 @@ struct SavedCreationsLibraryView: View {
                 try exportCreation(data, creation: creation)
             } catch { errorMessage = error.localizedDescription }
         }
+    }
+
+    private func delete(_ items: [SavedCreation]) {
+        pendingDelete = nil
+        // A newer delete finalizes the previous one: only one Undo is offered at a time.
+        if let previous = undoRemoved { finalizeDelete(previous) }
+        Task {
+            do {
+                let removed = try await store.remove(ids: Set(items.map(\.id)))
+                guard !removed.isEmpty else { return }
+                selection.clear()
+                undoRemoved = removed
+            } catch {
+                errorMessage = "Couldn't delete: \(error.localizedDescription). Nothing was removed."
+            }
+        }
+    }
+
+    private func undoDelete(_ removed: [SavedCreation]) {
+        undoRemoved = nil
+        Task {
+            do { try await store.restore(removed) }
+            catch { errorMessage = "Couldn't restore: \(error.localizedDescription)" }
+        }
+    }
+
+    private func finalizeDelete(_ removed: [SavedCreation]) {
+        guard undoRemoved?.map(\.id) == removed.map(\.id) else { return }
+        undoRemoved = nil
+        Task { await store.purgeUnreferenced(removed) }
     }
 
     private func exportSelected() {
@@ -743,7 +764,25 @@ struct SpeechView: View {
     private var headerBar: some View {
         HStack(spacing: 12) {
             StudioHeader(title: "Speech", subtitle: "Synthesize voices · transcribe audio",
-                         icon: "speaker.wave.2.fill", accent: accent)
+                         icon: "speaker.wave.2.fill", accent: accent) {
+                StudioPresetMenu(
+                    studio: .speech,
+                    isApplicable: { SpeechPresetValues($0).mode == (mode == .tts ? "tts" : "stt") },
+                    snapshot: {
+                        StudioPreset.speechSettings(mode: mode == .tts ? "tts" : "stt", model: modelId, voice: voice,
+                                                    speed: speed, format: audioFormat, language: language,
+                                                    transcriptionFormat: transcriptionFormat, timestamps: timestampMode)
+                    },
+                    apply: { preset in
+                        let v = SpeechPresetValues(preset)
+                        if !v.model.isEmpty { modelId = v.model }
+                        if mode == .tts {
+                            voice = v.voice; speed = v.speed; audioFormat = v.format
+                        } else {
+                            language = v.language; transcriptionFormat = v.transcriptionFormat; timestampMode = v.timestamps
+                        }
+                    })
+            }
             Picker("Mode", selection: $mode) {
                 ForEach(Mode.allCases, id: \.self) { Text($0.rawValue).tag($0) }
             }
@@ -1170,7 +1209,21 @@ struct EmbeddingsView: View {
 
     private var headerBar: some View {
         StudioHeader(title: "Embeddings & Rerank", subtitle: "Vectors for search · ordering for retrieval",
-                     icon: "chart.dots.scatter", accent: accent)
+                     icon: "chart.dots.scatter", accent: accent) {
+            StudioPresetMenu(
+                studio: .embeddings,
+                snapshot: {
+                    StudioPreset.embeddingsSettings(model: modelId, dimensions: requestedDimensions, inputType: inputType,
+                                                    rerankModel: rerankModelId, topN: topN)
+                },
+                apply: { preset in
+                    let v = EmbeddingsPresetValues(preset)
+                    if !v.model.isEmpty { modelId = v.model }
+                    requestedDimensions = v.dimensions; inputType = v.inputType
+                    if !v.rerankModel.isEmpty { rerankModelId = v.rerankModel }
+                    topN = v.topN
+                })
+        }
     }
 
     private var embedSection: some View {

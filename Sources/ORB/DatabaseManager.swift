@@ -1018,6 +1018,23 @@ final class DatabaseManager {
         try requireDone(stmt)
     }
 
+    /// Removes metadata rows for a checksum. Rows tied to a job or message are left alone.
+    func deleteUnattachedAssetRecords(checksum: String) throws {
+        let sql = "DELETE FROM assets WHERE checksum = ? AND job_id IS NULL AND message_id IS NULL;"
+        guard let stmt = prepare(sql) else { throw DatabaseManagerError.operationFailed(currentError()) }
+        defer { sqlite3_finalize(stmt) }
+        sqlite3_bind_text(stmt, 1, checksum, -1, unsafeBitCast(-1, to: sqlite3_destructor_type.self))
+        try requireDone(stmt)
+    }
+
+    func hasAttachedAssetRecord(checksum: String) -> Bool {
+        let sql = "SELECT 1 FROM assets WHERE checksum = ? AND (job_id IS NOT NULL OR message_id IS NOT NULL) LIMIT 1;"
+        guard let stmt = prepare(sql) else { return false }
+        defer { sqlite3_finalize(stmt) }
+        sqlite3_bind_text(stmt, 1, checksum, -1, unsafeBitCast(-1, to: sqlite3_destructor_type.self))
+        return sqlite3_step(stmt) == SQLITE_ROW
+    }
+
     func loadAssetRecords() -> [AssetRecord] {
         let sql = """
         SELECT id, relative_path, remote_reference, mime_type, size_bytes, checksum,

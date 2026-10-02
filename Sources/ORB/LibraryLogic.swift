@@ -180,3 +180,14 @@ enum LibraryPreview {
     /// Raw PCM has no container or sample rate, so there is nothing safe to show.
     static func canQuickLook(_ c: SavedCreation) -> Bool { creationExtension(c) != "pcm" }
 }
+
+
+enum LibraryDelete {
+    static func confirmTitle(count: Int) -> String {
+        count == 1 ? "Delete this creation?" : "Delete \(count) creations?"
+    }
+
+    static func message(count: Int) -> String {
+        "Deleted \(count) creation\(count == 1 ? "" : "s")"
+    }
+}
