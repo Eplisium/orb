@@ -169,3 +169,27 @@ private actor PromptCounter {
     var count = 0
     func hit() { count += 1 }
 }
+
+@Suite("OP Mode")
+struct OPModeTests {
+    private func defaults() -> UserDefaults {
+        let n = "orb.tests.opmode.\(UUID())"
+        let d = UserDefaults(suiteName: n)!
+        d.removePersistentDomain(forName: n)
+        return d
+    }
+
+    @Test("Off by default, so the coordinator is used")
+    func offByDefault() {
+        let d = defaults()
+        #expect(!OPMode.isEnabled(in: d))
+        #expect(OPMode.approvals(ApprovalCoordinator(), defaults: d) != nil)
+    }
+
+    @Test("On removes the coordinator so nothing prompts")
+    func on() {
+        let d = defaults()
+        d.set(true, forKey: OPMode.key)
+        #expect(OPMode.approvals(ApprovalCoordinator(), defaults: d) == nil)
+    }
+}

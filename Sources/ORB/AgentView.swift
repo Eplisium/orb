@@ -6,6 +6,7 @@ import UniformTypeIdentifiers
 /// agent that can browse the web, work with files, run commands, automate Mac
 /// apps, and control the computer. Completely separate from Chat.
 struct AgentView: View {
+    @AppStorage(OPMode.key) private var opMode = false
     @ObservedObject var viewModel: BrowserViewModel
     @ObservedObject var chatService: ChatService
 
@@ -248,6 +249,15 @@ struct AgentView: View {
             .buttonStyle(.plain)
             .help(fullComputerAccess ? "The native agent may use local functions and control this Mac" : "Only the web fetch function is enabled")
             .disabled(chatService.isStreaming)
+
+            if opMode {
+                Label("OP Mode", systemImage: "bolt.shield.fill")
+                    .orbFont(size: 11, weight: .semibold)
+                    .foregroundStyle(ORBTheme.warning)
+                    .padding(.horizontal, 9).padding(.vertical, 6)
+                    .background(ORBTheme.warning.opacity(0.12), in: Capsule())
+                    .help("OP Mode is on: risky tools run without asking. Change it in Settings > Advanced.")
+            }
 
             ConversationMeterView(conversation: chatService.activeConversation)
 

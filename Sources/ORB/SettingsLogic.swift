@@ -330,3 +330,19 @@ struct NotificationSettingsSection: View {
         }
     }
 }
+
+
+/// OP Mode: the agent runs risky tools (terminal, computer control, MCP) without
+/// asking first. Off by default. It never widens what the agent may use: the
+/// capability policy (Computer Access vs Web Only, MCP approvals in settings)
+/// still decides that; OP Mode only removes the per-call prompt.
+enum OPMode {
+    static let key = "orb.opMode"
+
+    static func isEnabled(in defaults: UserDefaults = .standard) -> Bool { defaults.bool(forKey: key) }
+
+    /// The coordinator a run should consult. nil means "never prompt".
+    static func approvals(_ coordinator: ApprovalCoordinator, defaults: UserDefaults = .standard) -> ApprovalCoordinator? {
+        isEnabled(in: defaults) ? nil : coordinator
+    }
+}

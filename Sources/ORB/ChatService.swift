@@ -798,7 +798,7 @@ final class ChatService: ObservableObject {
                     systemPromptOverride: customPrompt.isEmpty ? nil : customPrompt,
                     client: self.client,
                     maximumTurns: self.agentMaximumTurns,
-                    approvals: self.approvals,
+                    approvals: OPMode.approvals(self.approvals),
                     onEvent: { event in await self.receiveAgent(event, context: context) }
                 )
                 guard self.owns(context.runID) else { return }

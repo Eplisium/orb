@@ -22,6 +22,8 @@ struct SettingsView: View {
     @State private var management = ManagementKeyPanel()
     @State private var showRemoveManagementKeyConfirmation = false
     @ObservedObject private var appLock = AppLock.shared
+    @AppStorage(OPMode.key) private var opMode = false
+    @State private var confirmOPMode = false
     @AppStorage(AppLockPolicy.idleMinutesKey) private var idleMinutes = AppLockPolicy.defaultIdleMinutes
 
     enum SettingsTab: String, CaseIterable {
@@ -122,7 +124,40 @@ struct SettingsView: View {
             }
         case .mcp: MCPSettingsView(accent: .accentColor)
         case .network: NetworkTimeoutsView(accent: .accentColor)
-        case .advanced: providersSection
+        case .advanced:
+            VStack(alignment: .leading, spacing: 24) {
+                opModeSection
+                Divider()
+                providersSection
+            }
+        }
+    }
+
+    // MARK: - OP Mode
+
+    private var opModeSection: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Label("OP Mode", systemImage: "bolt.shield.fill")
+                .font(.title3.weight(.semibold))
+            Text("Skips the approval prompt for risky agent tools: terminal commands, computer control and MCP tools. The agent can then run them without asking. It does not change what the agent is allowed to use: Web Only and Computer Access still apply.")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+            Toggle("Run risky tools without asking", isOn: Binding(
+                get: { opMode },
+                set: { on in if on { confirmOPMode = true } else { opMode = false } }
+            ))
+            .toggleStyle(.switch)
+            if opMode {
+                Label("OP Mode is on. Agent commands run immediately.", systemImage: "exclamationmark.triangle.fill")
+                    .font(.callout.weight(.semibold))
+                    .foregroundStyle(ORBTheme.warning)
+            }
+        }
+        .confirmationDialog("Turn on OP Mode?", isPresented: $confirmOPMode, titleVisibility: .visible) {
+            Button("Turn On OP Mode", role: .destructive) { opMode = true }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("The agent will run terminal commands and control this Mac without asking. Only use it with models and prompts you trust.")
         }
     }
 
