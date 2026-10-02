@@ -18,79 +18,56 @@ enum PriceFormat {
 struct ModelRowView: View {
     let model: ModelInfo
     @ObservedObject var viewModel: BrowserViewModel
+    @EnvironmentObject private var shell: ShellController
     @State private var isHovered = false
 
-    private static let badgeWidth: CGFloat = 76
-    private static let maxCapabilityIcons = 3
+    private var facts: ModelRowFacts { ModelRowFacts.make(model) }
+    private var isFavorite: Bool { viewModel.favoriteIds.contains(model.id) }
+    private var isComparing: Bool { viewModel.isComparing(model.id) }
 
     var body: some View {
-        HStack(spacing: 12) {
-            // Fixed-width provider column keeps every name on one grid line.
-            Text(model.provider.uppercased())
-                .font(.system(size: 10, weight: .semibold, design: .rounded))
-                .tracking(0.4)
-                .foregroundStyle(providerColor)
-                .lineLimit(1)
-                .minimumScaleFactor(0.8)
-                .frame(width: Self.badgeWidth, height: 22)
-                .background(providerColor.opacity(0.14), in: RoundedRectangle(cornerRadius: 6))
+        HStack(spacing: 10) {
+            avatar
 
-            VStack(alignment: .leading, spacing: 3) {
-                Text(model.modelSlug)
-                    .font(.system(size: 13, weight: .medium))
-                    .lineLimit(1)
-
+            VStack(alignment: .leading, spacing: 2) {
+                HStack(spacing: 5) {
+                    if isFavorite {
+                        Image(systemName: "star.fill")
+                            .font(.system(size: 11))
+                            .foregroundStyle(.yellow)
+                            .accessibilityLabel("Favorite")
+                    }
+                    Text(model.modelSlug)
+                        .font(ORBFont.body.weight(.medium))
+                        .lineLimit(1)
+                }
+                if let line = facts.oneLiner {
+                    Text(line)
+                        .font(ORBFont.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
                 HStack(spacing: 10) {
-                    Text(model.contextLengthFormatted + " ctx")
+                    Text(facts.context + " ctx").monospacedDigit()
+                    Text(facts.price)
                         .monospacedDigit()
-                    if model.isFree {
-                        Text("FREE")
-                            .font(.system(size: 11, weight: .bold))
-                            .foregroundStyle(.green)
-                    } else if let cost = model.promptCostPer1M {
-                        Text("\(PriceFormat.perMillion(cost)) / 1M")
-                            .monospacedDigit()
-                    } else {
-                        Text("Variable price")
-                    }
-                    if let elo = model.bestDesignElo {
-                        Text("Elo \(Int(elo))")
-                    }
+                        .foregroundStyle(model.isFree ? ORBTheme.success : Color.secondary)
+                    if let elo = model.bestDesignElo { Text("Elo \(Int(elo))") }
                     capabilityIcons
                 }
-                .font(.system(size: 11))
+                .font(ORBFont.caption)
                 .foregroundStyle(.secondary)
+                .lineLimit(1)
             }
 
             Spacer(minLength: 8)
 
-            HStack(spacing: 10) {
-                Button {
-                    viewModel.copyModelId(model)
-                } label: {
-                    Image(systemName: viewModel.copiedModelId == model.id ? "checkmark" : "doc.on.doc")
-                        .font(.system(size: 12))
-                        .foregroundStyle(viewModel.copiedModelId == model.id ? Color.green : Color.secondary)
-                }
-                .buttonStyle(.plain)
-                .help("Copy model ID")
-                .opacity(isHovered || viewModel.copiedModelId == model.id ? 1 : 0)
-
-                let isFav = viewModel.favoriteIds.contains(model.id)
-                Button {
-                    viewModel.toggleFavorite(model)
-                } label: {
-                    Image(systemName: isFav ? "star.fill" : "star")
-                        .font(.system(size: 13))
-                        .foregroundStyle(isFav ? Color.yellow : Color.secondary.opacity(0.55))
-                }
-                .buttonStyle(.plain)
-                .help(isFav ? "Remove from favorites" : "Add to favorites")
-            }
+            quickActions
         }
-        .padding(.vertical, 5)
+        .padding(.vertical, 4)
         .contentShape(Rectangle())
         .onHover { isHovered = $0 }
+        .accessibilityElement(children: .contain)
         .contextMenu {
             Button {
                 viewModel.copyModelId(model)
@@ -100,8 +77,20 @@ struct ModelRowView: View {
             Button {
                 viewModel.toggleFavorite(model)
             } label: {
-                Label(viewModel.favoriteIds.contains(model.id) ? "Remove Favorite" : "Add Favorite",
-                      systemImage: viewModel.favoriteIds.contains(model.id) ? "star.slash" : "star")
+                Label(isFavorite ? "Remove Favorite" : "Add Favorite",
+                      systemImage: isFavorite ? "star.slash" : "star")
+            }
+            Button {
+                viewModel.toggleCompare(model.id)
+            } label: {
+                Label(isComparing ? "Remove from Compare" : "Add to Compare", systemImage: "rectangle.split.3x1")
+            }
+            Divider()
+            Button { shell.send(.chatWithModel(model.id)) } label: {
+                Label("Chat with this Model", systemImage: "bubble.left")
+            }
+            Button { shell.send(.agentWithModel(model.id)) } label: {
+                Label("Run in Agent", systemImage: "wand.and.stars")
             }
             Divider()
             Button {
@@ -112,39 +101,76 @@ struct ModelRowView: View {
         }
     }
 
-    /// Neutral glyphs, capped, with the full list in the tooltip — color is
-    /// reserved for the provider badge and price state.
+    private var avatar: some View {
+        Text(facts.avatarLetter)
+            .font(.system(size: 13, weight: .bold, design: .rounded))
+            .foregroundStyle(providerColor)
+            .frame(width: 30, height: 30)
+            .background(providerColor.opacity(0.16), in: Circle())
+            .help(model.provider)
+            .accessibilityLabel("Provider \(model.provider)")
+    }
+
+    private var quickActions: some View {
+        HStack(spacing: 8) {
+            let showHover = isHovered || isComparing
+            Button { viewModel.toggleCompare(model.id) } label: {
+                Image(systemName: isComparing ? "checkmark.square.fill" : "square")
+                    .foregroundStyle(isComparing ? ORBTheme.accent : Color.secondary)
+            }
+            .buttonStyle(.plain)
+            .opacity(showHover || !viewModel.compareIDs.isEmpty ? 1 : 0)
+            .help(isComparing ? "Remove from compare" : "Add to compare")
+            .accessibilityLabel(isComparing ? "Remove from compare" : "Add to compare")
+
+            Button { shell.send(.chatWithModel(model.id)) } label: {
+                Image(systemName: "bubble.left").foregroundStyle(.secondary)
+            }
+            .buttonStyle(.plain)
+            .opacity(isHovered ? 1 : 0)
+            .help("Chat with this model")
+            .accessibilityLabel("Chat with this model")
+
+            Button { viewModel.copyModelId(model) } label: {
+                Image(systemName: viewModel.copiedModelId == model.id ? "checkmark" : "doc.on.doc")
+                    .foregroundStyle(viewModel.copiedModelId == model.id ? ORBTheme.success : Color.secondary)
+            }
+            .buttonStyle(.plain)
+            .opacity(isHovered || viewModel.copiedModelId == model.id ? 1 : 0)
+            .help("Copy model ID")
+            .accessibilityLabel("Copy model ID")
+
+            Button { viewModel.toggleFavorite(model) } label: {
+                Image(systemName: isFavorite ? "star.fill" : "star")
+                    .foregroundStyle(isFavorite ? Color.yellow : Color.secondary.opacity(0.7))
+            }
+            .buttonStyle(.plain)
+            .help(isFavorite ? "Remove from favorites" : "Add to favorites")
+            .accessibilityLabel(isFavorite ? "Remove from favorites" : "Add to favorites")
+        }
+        .font(.system(size: 13))
+    }
+
+    /// Neutral glyphs, capped, with the full list in the tooltip.
     @ViewBuilder
     private var capabilityIcons: some View {
-        let caps = capabilities
+        let caps = facts.capabilities
         if !caps.isEmpty {
             HStack(spacing: 5) {
                 ForEach(Array(caps.prefix(Self.maxCapabilityIcons).enumerated()), id: \.offset) { _, cap in
-                    Image(systemName: cap.icon).font(.system(size: 10))
+                    Image(systemName: cap.icon).font(.system(size: 11)).help(cap.name)
                 }
                 if caps.count > Self.maxCapabilityIcons {
-                    Text("+\(caps.count - Self.maxCapabilityIcons)")
-                        .font(.system(size: 10, weight: .semibold))
-                        .lineLimit(1)
+                    Text("+\(caps.count - Self.maxCapabilityIcons)").lineLimit(1)
                 }
             }
             .fixedSize()
-            .foregroundStyle(.secondary.opacity(0.75))
-            .help(caps.map(\.name).joined(separator: ", "))
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel("Capabilities: " + caps.map(\.name).joined(separator: ", "))
         }
     }
 
-    private var capabilities: [(icon: String, name: String)] {
-        var list: [(String, String)] = []
-        if model.supportsReasoning { list.append(("brain", "Reasoning")) }
-        if model.supportsTools { list.append(("wrench.and.screwdriver", "Tools")) }
-        if model.supportsImages { list.append(("photo", "Image input")) }
-        if model.supportsImageOutput { list.append(("paintbrush", "Image output")) }
-        if model.supportsVideoInput { list.append(("video", "Video input")) }
-        if model.supportsAudioInput || model.supportsAudioOutput { list.append(("waveform", "Audio")) }
-        if model.supportsFileInput { list.append(("doc", "File input")) }
-        return list
-    }
+    private static let maxCapabilityIcons = 4
 
     var providerColor: Color {
         let p = model.provider.lowercased()
@@ -172,27 +198,42 @@ struct ModelRowView: View {
 
 // MARK: - Model Detail
 
+enum ModelDetailTab: String, CaseIterable, Identifiable {
+    case overview = "Overview", providers = "Providers", notes = "Notes"
+    var id: String { rawValue }
+}
+
 struct ModelDetailView: View {
     let model: ModelInfo
     @ObservedObject var viewModel: BrowserViewModel
+    @EnvironmentObject private var shell: ShellController
     @State private var notes: String = ""
     @State private var notesDebounceTask: Task<Void, Never>?
+    @State private var tab: ModelDetailTab = .overview
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 20) {
-                headerSection
-                descriptionSection
-                Divider()
-                statsGrid
-                capabilitySection
-                benchmarksSection
-                providersSection
-                parametersSection
-                notesSection
-                Spacer()
+        VStack(spacing: 0) {
+            stickyHeader
+            Divider()
+            ScrollView {
+                VStack(alignment: .leading, spacing: 20) {
+                    switch tab {
+                    case .overview:
+                        descriptionSection
+                        statsGrid
+                        capabilitySection
+                        benchmarksSection
+                        parametersSection
+                    case .providers:
+                        endpointComparison
+                        providersSection
+                    case .notes:
+                        notesTab
+                    }
+                    Spacer()
+                }
+                .padding(24)
             }
-            .padding(24)
         }
         .onAppear {
             notes = viewModel.db.getNotes(model.id)
@@ -208,92 +249,109 @@ struct ModelDetailView: View {
         }
     }
 
-    // MARK: Header
+    // MARK: Sticky header
 
-    private var headerSection: some View {
-        HStack(alignment: .top) {
-            VStack(alignment: .leading, spacing: 6) {
-                HStack(spacing: 6) {
-                    Text(model.provider.uppercased())
-                        .font(.system(size: 11, weight: .semibold, design: .rounded))
-                        .tracking(0.6)
-                        .foregroundStyle(.secondary)
-                    if model.isUnofficial {
-                        Text("UNOFFICIAL")
-                            .font(.system(size: 10, weight: .bold))
-                            .foregroundStyle(.orange)
-                            .padding(.horizontal, 5)
-                            .padding(.vertical, 2)
-                            .background(.orange.opacity(0.15))
-                            .clipShape(RoundedRectangle(cornerRadius: 4))
-                            .help("This is an unofficial provider mirror on OpenRouter")
-                    }
-                    if model.hasExpired {
-                        Text("EXPIRED")
-                            .font(.system(size: 10, weight: .bold))
-                            .foregroundStyle(.red)
-                            .padding(.horizontal, 5)
-                            .padding(.vertical, 2)
-                            .background(.red.opacity(0.15))
-                            .clipShape(RoundedRectangle(cornerRadius: 4))
-                    }
-                }
-                Text(model.modelSlug)
-                    .font(.system(size: 26, weight: .semibold))
-                Text(model.id)
-                    .font(.system(size: 13, design: .monospaced))
+    private var stickyHeader: some View {
+        let isFav = viewModel.favoriteIds.contains(model.id)
+        return VStack(alignment: .leading, spacing: 10) {
+            HStack(alignment: .firstTextBaseline, spacing: 6) {
+                Text(model.provider.uppercased())
+                    .font(ORBFont.caption.weight(.semibold))
                     .foregroundStyle(.secondary)
-                    .textSelection(.enabled)
+                if model.isUnofficial { Text("UNOFFICIAL").font(ORBFont.caption.weight(.bold)).foregroundStyle(.orange) }
+                if model.hasExpired { Text("EXPIRED").font(ORBFont.caption.weight(.bold)).foregroundStyle(.red) }
             }
-
-            Spacer()
-
-            VStack(spacing: 8) {
-                Button { viewModel.copyModelId(model) } label: {
-                    HStack {
-                        Image(systemName: viewModel.copiedModelId == model.id ? "checkmark" : "doc.on.doc")
-                        Text(viewModel.copiedModelId == model.id ? "Copied!" : "Copy ID")
-                    }
-                    .font(.system(size: 13, weight: .medium))
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 7)
-                    .background(ORBTheme.accent.opacity(0.16))
-                    .foregroundStyle(ORBTheme.accentLink.opacity(1))
-                    .clipShape(RoundedRectangle(cornerRadius: 8))
-                }
-                .buttonStyle(.plain)
-                .keyboardShortcut("c", modifiers: .command)
-
-                let isFav = viewModel.favoriteIds.contains(model.id)
+            Text(model.modelSlug).font(.system(size: 22, weight: .semibold)).lineLimit(2)
+            Text(model.id)
+                .font(.system(size: 12, design: .monospaced))
+                .foregroundStyle(.secondary)
+                .textSelection(.enabled)
+            HStack(spacing: 8) {
+                Button { shell.send(.chatWithModel(model.id)) } label: { Label("Chat", systemImage: "bubble.left") }
+                    .buttonStyle(.borderedProminent).tint(ORBTheme.accent)
+                    .help("Start a chat with this model")
+                Button { shell.send(.agentWithModel(model.id)) } label: { Label("Agent", systemImage: "wand.and.stars") }
+                    .help("Run this model in the Agent")
                 Button { viewModel.toggleFavorite(model) } label: {
-                    HStack {
-                        Image(systemName: isFav ? "star.fill" : "star")
-                        Text(isFav ? "Favorited" : "Favorite")
-                    }
-                    .font(.system(size: 13, weight: .medium))
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 7)
-                    .background(isFav ? Color.yellow.opacity(0.15) : Color.gray.opacity(0.1))
-                    .clipShape(RoundedRectangle(cornerRadius: 8))
+                    Label(isFav ? "Favorited" : "Favorite", systemImage: isFav ? "star.fill" : "star")
                 }
-                .buttonStyle(.plain)
-
+                Button { viewModel.copyModelId(model) } label: {
+                    Label(viewModel.copiedModelId == model.id ? "Copied" : "Copy ID",
+                          systemImage: viewModel.copiedModelId == model.id ? "checkmark" : "doc.on.doc")
+                }
+                .keyboardShortcut("c", modifiers: [.command, .shift])
                 Button {
-                    let url = URL(string: "https://openrouter.ai/\(model.id)")!
-                    NSWorkspace.shared.open(url)
-                } label: {
-                    HStack {
-                        Image(systemName: "safari")
-                        Text("Open on OpenRouter")
-                    }
-                    .font(.system(size: 13, weight: .medium))
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 7)
-                    .background(.gray.opacity(0.1))
-                    .clipShape(RoundedRectangle(cornerRadius: 8))
-                }
-                .buttonStyle(.plain)
+                    NSWorkspace.shared.open(URL(string: "https://openrouter.ai/\(model.id)")!)
+                } label: { Label("Open on OpenRouter", systemImage: "safari") }
+                Spacer(minLength: 0)
             }
+            .controlSize(.regular)
+            Picker("Section", selection: $tab) {
+                ForEach(ModelDetailTab.allCases) { Text($0.rawValue).tag($0) }
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .frame(maxWidth: 360)
+        }
+        .padding(.horizontal, 24)
+        .padding(.vertical, 14)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(.bar)
+    }
+
+    // MARK: Endpoint price/latency comparison
+
+    @ViewBuilder
+    private var endpointComparison: some View {
+        let eps = viewModel.endpoints
+        if eps.count > 1 {
+            let cheapest = eps.compactMap(\.promptCostPer1M).min()
+            let fastest = eps.compactMap(\.latencyLast30m).min()
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Price and latency by provider").font(.headline)
+                Grid(alignment: .leading, horizontalSpacing: 18, verticalSpacing: 6) {
+                    GridRow {
+                        Text("Provider"); Text("Input / 1M"); Text("Output / 1M"); Text("Latency"); Text("Throughput")
+                    }
+                    .font(ORBFont.caption.weight(.semibold)).foregroundStyle(.secondary)
+                    ForEach(eps) { ep in
+                        GridRow {
+                            Text(ep.providerName ?? "Unknown").lineLimit(1)
+                            HStack(spacing: 3) {
+                                Text(ep.promptCostPer1M.map(BrowserFormat.price) ?? "—")
+                                if let c = ep.promptCostPer1M, c == cheapest {
+                                    Image(systemName: "checkmark.seal.fill").foregroundStyle(ORBTheme.success)
+                                        .help("Cheapest input").accessibilityLabel("Cheapest input")
+                                }
+                            }
+                            Text(ep.completionCostPer1M.map(BrowserFormat.price) ?? "—")
+                            HStack(spacing: 3) {
+                                Text(ep.latencyLast30m.map { "\($0) ms" } ?? "—")
+                                if let l = ep.latencyLast30m, l == fastest {
+                                    Image(systemName: "bolt.fill").foregroundStyle(ORBTheme.success)
+                                        .help("Lowest latency").accessibilityLabel("Lowest latency")
+                                }
+                            }
+                            Text(ep.throughputLast30m.map { "\($0) tok/s" } ?? "—")
+                        }
+                        .font(ORBFont.footnote)
+                    }
+                }
+            }
+        }
+    }
+
+    // MARK: Notes tab
+
+    @ViewBuilder
+    private var notesTab: some View {
+        if viewModel.favoriteIds.contains(model.id) {
+            notesSection
+        } else {
+            ORBEmptyState(title: "Notes are for favorites", systemImage: "note.text",
+                          message: "Favorite this model to keep private notes about it.",
+                          actionTitle: "Favorite", action: { viewModel.toggleFavorite(model) })
+                .frame(height: 220)
         }
     }
 

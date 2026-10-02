@@ -83,6 +83,9 @@ enum ShellAction: Equatable, Hashable {
     case showShortcuts
     case showPalette
     case selectModel(String)
+    case compareModels([String])
+    case chatWithModel(String)
+    case agentWithModel(String)
     case openConversation(UUID, PlaygroundMode)
 
     /// The section the action navigates to, if any.
@@ -92,6 +95,9 @@ enum ShellAction: Equatable, Hashable {
         case .newChat: return .chat
         case .newAgent: return .agent
         case .selectModel: return .allModels
+        case .compareModels: return .testSuite
+        case .chatWithModel: return .chat
+        case .agentWithModel: return .agent
         case .openConversation(_, let mode): return mode == .chat ? .chat : .agent
         case .refreshModels, .toggleSidebar, .openSettings, .showShortcuts, .showPalette: return nil
         }

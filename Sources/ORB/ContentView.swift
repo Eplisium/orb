@@ -7,14 +7,39 @@ final class BrowserViewModel: ObservableObject {
     let api: APIService
     let db: DatabaseManager
 
-    init(api: APIService? = nil, db: DatabaseManager = DatabaseManager.shared) {
+    /// `defaults` enables persistence of filters and sort. nil (the default,
+    /// and what tests use) keeps everything in memory.
+    init(api: APIService? = nil, db: DatabaseManager = DatabaseManager.shared, defaults: UserDefaults? = nil) {
         self.api = api ?? APIService()
         self.db = db
+        self.defaults = defaults
+        if let defaults, let prefs = BrowserPrefsStore.load(from: defaults) {
+            filters = prefs.filters
+            sortField = SortField(rawValue: prefs.sortField) ?? .created
+            sortOrder = prefs.ascending ? .ascending : .descending
+            pinFavorites = prefs.pinFavorites
+        }
+    }
+
+    private let defaults: UserDefaults?
+
+    private func persistPrefs() {
+        guard let defaults else { return }
+        BrowserPrefsStore.save(
+            BrowserPrefs(filters: filters, sortField: sortField.rawValue, ascending: sortOrder == .ascending, pinFavorites: pinFavorites),
+            to: defaults
+        )
     }
 
     @Published var searchText = ""
-    @Published var sortField: SortField = .created
-    @Published var sortOrder: SortOrder = .descending
+    @Published var sortField: SortField = .created { didSet { persistPrefs() } }
+    @Published var sortOrder: SortOrder = .descending { didSet { persistPrefs() } }
+    @Published var filters = BrowserFilterState() { didSet { persistPrefs() } }
+    @Published var pinFavorites = true { didSet { persistPrefs() } }
+
+    // Compare selection (Phase 4). Pick order is kept.
+    @Published private(set) var compareIDs: [String] = []
+    @Published private(set) var compareLimitNotice: String?
     @Published var modalityFilter: ModalityFilter = .all
     @Published var providerFilter: String = "All Providers"
     @Published var selectedModel: ModelInfo?
@@ -73,6 +98,10 @@ final class BrowserViewModel: ObservableObject {
         case .freeOnly: result = result.filter { $0.isFree }
         }
 
+        if filters.isActive {
+            result = result.filter(filters.matches)
+        }
+
         if !searchText.isEmpty {
             let q = searchText.lowercased()
             result = result.filter {
@@ -114,7 +143,67 @@ final class BrowserViewModel: ObservableObject {
             return sortOrder == .ascending ? (cmp == .orderedAscending) : (cmp == .orderedDescending)
         }
 
+        if pinFavorites, !favoriteIds.isEmpty {
+            // Stable partition: favourites first, chosen order kept inside each half.
+            result = result.filter { favoriteIds.contains($0.id) } + result.filter { !favoriteIds.contains($0.id) }
+        }
+
         return result
+    }
+
+    var hasActiveRefinements: Bool {
+        !searchText.isEmpty || filters.isActive || modalityFilter != .all || providerFilter != "All Providers"
+    }
+
+    func clearAllFilters() {
+        searchText = ""
+        filters.clear()
+        modalityFilter = .all
+        providerFilter = "All Providers"
+    }
+
+    func toggleSortDirection() {
+        sortOrder = (sortOrder == .ascending) ? .descending : .ascending
+    }
+
+    // MARK: Compare
+
+    var canAddToCompare: Bool { compareIDs.count < TestBatchSelection.maximumModels }
+
+    func isComparing(_ id: String) -> Bool { compareIDs.contains(id) }
+
+    /// Returns whether `id` is selected after the call.
+    @discardableResult
+    func toggleCompare(_ id: String) -> Bool {
+        if let index = compareIDs.firstIndex(of: id) {
+            compareIDs.remove(at: index)
+            compareLimitNotice = nil
+            return false
+        }
+        guard canAddToCompare else {
+            compareLimitNotice = "You can compare up to \(TestBatchSelection.maximumModels) models."
+            return false
+        }
+        compareIDs.append(id)
+        compareLimitNotice = nil
+        return true
+    }
+
+    func clearCompare() {
+        compareIDs = []
+        compareLimitNotice = nil
+    }
+
+    /// Drops IDs that vanished from a loaded catalog (never prunes against an empty one).
+    func pruneCompare() {
+        guard !api.models.isEmpty else { return }
+        let known = Set(api.models.map(\.id))
+        compareIDs.removeAll { !known.contains($0) }
+    }
+
+    var compareModels: [ModelInfo] {
+        let lookup = Dictionary(api.models.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        return compareIDs.compactMap { lookup[$0] }
     }
 
     func loadFavorites() {
@@ -252,7 +341,7 @@ enum SidebarSection: String, CaseIterable, Identifiable {
 // MARK: - ContentView
 
 struct ContentView: View {
-    @StateObject private var vm = BrowserViewModel()
+    @StateObject private var vm = BrowserViewModel(defaults: .standard)
     // Keep independent, root-owned coordinators so an Agent run survives its
     // view disappearing and does not prevent a simultaneous direct Chat run.
     @StateObject private var agentService = ChatService()
@@ -274,6 +363,7 @@ struct ContentView: View {
     @ObservedObject private var appLock = AppLock.shared
     @State private var startedPostUnlockWork = false
     @State private var showOnboarding = false
+    @State private var showFilters = false
     /// `-orb.reviewMode YES`: screenshot review — never touch legacy Keychain items.
     private static let reviewMode = UserDefaults.standard.bool(forKey: "orb.reviewMode")
 
@@ -282,7 +372,7 @@ struct ContentView: View {
     }
 
     enum ShellSheet: String, Identifiable {
-        case palette, shortcuts
+        case palette, shortcuts, compare
         var id: String { rawValue }
     }
 
@@ -415,6 +505,12 @@ struct ContentView: View {
                 }
             case .shortcuts:
                 ShortcutCheatSheet { activeSheet = nil }
+            case .compare:
+                ComparePanel(
+                    vm: vm,
+                    onTestSuite: { ids in activeSheet = nil; perform(.compareModels(ids)) },
+                    onClose: { activeSheet = nil }
+                )
             }
         }
         .onAppear {
@@ -492,11 +588,20 @@ struct ContentView: View {
         case .selectModel(let id):
             select(.allModels)
             vm.searchText = ""
-            vm.modalityFilter = .all
-            vm.providerFilter = "All Providers"
+            vm.clearAllFilters()
             if let model = vm.api.models.first(where: { $0.id == id }) {
                 vm.selectModel(model)
             }
+        case .compareModels(let ids):
+            let eligible = CompareHandoff.batchIDs(from: ids, catalog: vm.api.models)
+            CompareHandoff.shared.stage(eligible)
+            select(.testSuite)
+        case .chatWithModel(let id):
+            select(.chat)
+            _ = chatService.newConversation(modelId: id, mode: .chat)
+        case .agentWithModel(let id):
+            select(.agent)
+            _ = agentService.newConversation(modelId: id, mode: .agent)
         case .openConversation(let id, let mode):
             let service = (mode == .chat) ? chatService : agentService
             select(mode == .chat ? .chat : .agent)
@@ -606,11 +711,29 @@ struct ContentView: View {
     private var modelListColumn: some View {
         VStack(spacing: 0) {
             searchBar
-            filterBar
+            filterRow
+            ActiveFilterChips(vm: vm)
+                .padding(.horizontal, 14)
+                .padding(.bottom, 6)
             statusBar
             Divider()
+            if case .list(let offlineSince?) = listState {
+                OfflineBanner(since: offlineSince) { Task { await vm.refresh() } }
+            }
             modelList
+            CompareBar(vm: vm) { activeSheet = .compare }
         }
+    }
+
+    private var listState: BrowserListState {
+        BrowserListState.resolve(
+            isLoading: vm.api.isLoading,
+            hasModels: !vm.api.models.isEmpty,
+            error: vm.api.errorMessage ?? (vm.api.models.isEmpty ? nil : vm.api.lastRefreshError),
+            resultCount: vm.filteredModels.count,
+            hasRefinements: vm.hasActiveRefinements,
+            lastUpdated: vm.api.lastRefresh
+        )
     }
 
     private var searchBar: some View {
@@ -626,9 +749,11 @@ struct ContentView: View {
                         .foregroundStyle(.secondary)
                 }
                 .buttonStyle(.plain)
+                .help("Clear search")
+                .accessibilityLabel("Clear search")
             }
         }
-        .font(.system(size: 13))
+        .font(ORBFont.body)
         .padding(.horizontal, 10)
         .padding(.vertical, 8)
         .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 9))
@@ -638,103 +763,39 @@ struct ContentView: View {
         .padding(.bottom, 8)
     }
 
-    private var filterBar: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            // Wrapping chips, not a segmented picker: 11 tabs in one line
-            // overflow the column, forcing horizontal scroll that slides the
-            // whole list underneath the sidebar.
-            FlowLayout(spacing: 6) {
-                ForEach(ModalityFilter.allCases) { f in
-                    filterChip(f)
-                }
+    /// One compact row: Filters popover, sort field + direction, pin toggle.
+    private var filterRow: some View {
+        HStack(spacing: 8) {
+            Button { showFilters.toggle() } label: {
+                Label(vm.filters.isActive ? "Filters (\(vm.filters.chips.count))" : "Filters",
+                      systemImage: "line.3.horizontal.decrease.circle\(vm.filters.isActive ? ".fill" : "")")
+                    .font(ORBFont.caption)
             }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+            .help("Filter by capability, price, context and provider")
+            .popover(isPresented: $showFilters, arrowEdge: .bottom) { BrowserFiltersPopover(vm: vm) }
 
-            HStack {
-                // Provider filter
-                Menu {
-                    Picker("Provider", selection: $vm.providerFilter) {
-                        ForEach(vm.providerOptions, id: \.self) { p in
-                            Text(p).tag(p)
-                        }
-                    }
-                } label: {
-                    HStack(spacing: 4) {
-                        Image(systemName: "building.2")
-                        Text(vm.providerFilter)
-                            .lineLimit(1)
-                        Image(systemName: "chevron.up.chevron.down")
-                            .font(.system(size: 9))
-                    }
-                    .font(.caption)
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 4)
-                    .background(.quaternary.opacity(0.5))
-                    .clipShape(RoundedRectangle(cornerRadius: 6))
-                }
-                .menuStyle(.borderlessButton)
-                .fixedSize()
+            Spacer()
 
-                Spacer()
-
-                // Sort menu
-                Menu {
-                    ForEach(SortField.allCases) { field in
-                        Button {
-                            if vm.sortField == field {
-                                vm.sortOrder = vm.sortOrder == .ascending ? .descending : .ascending
-                            } else {
-                                vm.sortField = field
-                                vm.sortOrder = .ascending
-                            }
-                        } label: {
-                            HStack {
-                                Text(field.rawValue)
-                                if vm.sortField == field {
-                                    Image(systemName: vm.sortOrder == .ascending ? "arrow.up" : "arrow.down")
-                                }
-                            }
-                        }
-                    }
-                } label: {
-                    HStack(spacing: 3) {
-                        Image(systemName: "arrow.up.arrow.down")
-                        Text(vm.sortField.rawValue)
-                            .font(.caption)
-                    }
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 4)
-                    .background(.quaternary.opacity(0.5))
-                    .clipShape(RoundedRectangle(cornerRadius: 6))
-                }
-                .menuStyle(.borderlessButton)
-                .fixedSize()
+            Toggle(isOn: $vm.pinFavorites) {
+                Image(systemName: vm.pinFavorites ? "pin.fill" : "pin")
             }
+            .toggleStyle(.button)
+            .buttonStyle(.borderless)
+            .help(vm.pinFavorites ? "Favorites are pinned to the top" : "Pin favorites to the top")
+            .accessibilityLabel("Pin favorites to the top")
+
+            BrowserSortControl(vm: vm)
         }
         .padding(.horizontal, 14)
-        .padding(.bottom, 8)
-    }
-
-    private func filterChip(_ filter: ModalityFilter) -> some View {
-        let isSelected = vm.modalityFilter == filter
-        return Button {
-            vm.modalityFilter = filter
-        } label: {
-            Text(filter.rawValue)
-                .font(.system(size: 12, weight: isSelected ? .semibold : .regular))
-                .padding(.horizontal, 10)
-                .padding(.vertical, 5)
-                .background(isSelected ? ORBTheme.accent.opacity(0.18) : Color.primary.opacity(0.08))
-                .foregroundStyle(isSelected ? ORBTheme.accent : Color.primary)
-                .clipShape(Capsule())
-        }
-        .buttonStyle(.plain)
-        .help("\(filter.rawValue) models")
+        .padding(.bottom, 6)
     }
 
     private var statusBar: some View {
         HStack {
             Text("\(vm.filteredModels.count) models")
-                .font(.system(size: 12, weight: .medium))
+                .font(ORBFont.footnote.weight(.medium))
                 .foregroundStyle(.secondary)
             Spacer()
             if vm.api.isLoading {
@@ -747,10 +808,11 @@ struct ContentView: View {
                 }
                 .buttonStyle(.plain)
                 .help("Refresh models from OpenRouter")
+                .accessibilityLabel("Refresh models")
             }
             if let ts = vm.api.lastRefresh {
                 Text("Updated \(ts.formatted(.relative(presentation: .named)))")
-                    .font(.system(size: 11))
+                    .font(ORBFont.caption)
                     .foregroundStyle(.tertiary)
             }
         }
@@ -760,51 +822,38 @@ struct ContentView: View {
 
     @ViewBuilder
     private var modelList: some View {
-        if vm.api.isLoading && vm.api.models.isEmpty {
-            VStack(spacing: 12) {
-                ProgressView()
-                Text("Loading models from OpenRouter...")
-                    .foregroundStyle(.secondary)
-            }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-        } else if let error = vm.api.errorMessage {
+        switch listState {
+        case .skeleton:
+            SkeletonModelList()
+        case .error(let error):
             VStack(spacing: 12) {
                 Image(systemName: "wifi.exclamationmark")
                     .font(.largeTitle)
                     .foregroundStyle(.secondary)
+                    .accessibilityHidden(true)
                 Text(error)
                     .foregroundStyle(.secondary)
                 Button("Retry") { Task { await vm.refresh() } }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
-        } else if vm.filteredModels.isEmpty {
+        case .noResults:
+            NoResultsView(vm: vm)
+        case .emptySection:
             VStack(spacing: 12) {
-                Image(systemName: "magnifyingglass")
+                Image(systemName: vm.showFavoritesOnly ? "star" : "tray")
                     .font(.system(size: 36))
                     .foregroundStyle(.tertiary)
-                Text("No models found")
-                    .font(.headline)
+                    .accessibilityHidden(true)
+                Text(vm.showFavoritesOnly ? "No favorites yet" : (vm.showNewThisWeek ? "Nothing new this week" : "No models"))
+                    .font(ORBFont.headline)
                     .foregroundStyle(.secondary)
-                if !vm.searchText.isEmpty {
-                    Text("Try a different search term or clear filters")
-                        .font(.caption)
-                        .foregroundStyle(.tertiary)
-                } else if vm.showFavoritesOnly {
-                    Text("Star models with the star icon to add them here")
-                        .font(.caption)
-                        .foregroundStyle(.tertiary)
-                } else if vm.showNewThisWeek {
-                    Text("No models were added in the last 7 days")
-                        .font(.caption)
-                        .foregroundStyle(.tertiary)
-                } else {
-                    Text("Try changing your filters")
-                        .font(.caption)
-                        .foregroundStyle(.tertiary)
-                }
+                Text(vm.showFavoritesOnly ? "Star models to add them here"
+                     : (vm.showNewThisWeek ? "No models were added in the last 7 days" : "Refresh to load the catalog"))
+                    .font(ORBFont.caption)
+                    .foregroundStyle(.tertiary)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
-        } else {
+        case .list:
             List(vm.filteredModels, selection: $vm.selectedModel) { model in
                 ModelRowView(model: model, viewModel: vm)
                     .tag(model)

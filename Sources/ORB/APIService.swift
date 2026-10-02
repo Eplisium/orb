@@ -5,6 +5,8 @@ final class APIService: ObservableObject {
     @Published var models: [ModelInfo] = []
     @Published var isLoading = false
     @Published var errorMessage: String?
+    /// Set when a refresh failed but cached models are being shown (offline).
+    @Published var lastRefreshError: String?
     @Published var lastRefresh: Date?
     @Published var endpointsError: String?
 
@@ -40,6 +42,7 @@ final class APIService: ObservableObject {
         isLoading = true
         defer { isLoading = false }
         errorMessage = nil
+        lastRefreshError = nil
 
         // Try to load from cache first for instant display
         if hasValidCache {
@@ -93,6 +96,7 @@ final class APIService: ObservableObject {
 
     private func loadCacheFallback(errorDescription: String) {
         if models.isEmpty { loadFromCache() }
+        if !models.isEmpty { lastRefreshError = errorDescription }
         if models.isEmpty {
             errorMessage = errorDescription
         } else if lastRefresh == nil {

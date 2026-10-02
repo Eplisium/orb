@@ -43,6 +43,12 @@ struct TestSuiteView: View {
             viewModel.loadFavorites()
             customTests = DatabaseManager.shared.loadCustomTests()
             testRunner.loadSavedResults()
+            // Hand-off from the model browser's Compare panel.
+            if let ids = CompareHandoff.shared.take() {
+                batchSelectedIDs = Set(ids)
+                batchSearch = ""
+                showBatchPicker = true
+            }
         }
         .onChange(of: selectedScenario?.id) { _, _ in
             // Input is scoped to the run the user is looking at.
