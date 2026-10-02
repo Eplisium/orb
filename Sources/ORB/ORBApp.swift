@@ -13,6 +13,7 @@ struct ORBApp: App {
     var body: some Scene {
         WindowGroup {
             ContentView()
+                .orbAppearance()
                 .environmentObject(focusManager)
                 .environmentObject(shell)
                 .environmentObject(environment)

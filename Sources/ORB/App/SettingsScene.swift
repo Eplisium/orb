@@ -8,7 +8,7 @@ struct SettingsSceneView: View {
     var body: some View {
         Group {
             if lock.isUnlocked {
-                SettingsView()
+                SettingsView().orbAppearance()
             } else {
                 ContentUnavailableView(
                     "ORB is locked",

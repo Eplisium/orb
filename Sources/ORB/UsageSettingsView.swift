@@ -1,4 +1,5 @@
 import SwiftUI
+import Charts
 
 /// Settings → Usage: lifetime spend, requests, and tokens from the permanent
 /// usage ledger, broken down by app feature, model, and day.
@@ -61,6 +62,8 @@ struct UsageSettingsView: View {
                     .font(.caption).foregroundStyle(.orange)
             }
 
+            if !features.isEmpty { charts }
+
             if features.isEmpty {
                 Text("No usage recorded in this range yet. New requests appear here automatically.")
                     .font(.callout).foregroundStyle(.secondary).padding(.vertical, 24)
@@ -72,6 +75,49 @@ struct UsageSettingsView: View {
         }
         .task(id: range) { reload() }
         .onChange(of: ledger.revision) { _, _ in reload() }
+    }
+
+    private var chartDays: Int {
+        switch range {
+        case .today: return 1
+        case .week: return 7
+        case .month, .allTime: return 30
+        }
+    }
+
+    @ViewBuilder
+    private var charts: some View {
+        let series = UsageSeries.daily(days, days: chartDays, endingAt: Date())
+        let slices = UsageSeries.topModels(models, limit: 5)
+        VStack(alignment: .leading, spacing: 16) {
+            VStack(alignment: .leading, spacing: 6) {
+                Text("SPEND PER DAY (LAST \(chartDays))").font(.caption.bold()).foregroundStyle(.secondary)
+                Chart(series) { point in
+                    BarMark(x: .value("Day", point.label), y: .value("Spend", point.cost))
+                        .foregroundStyle(accent)
+                }
+                .chartXAxis { AxisMarks(values: .automatic(desiredCount: 4)) }
+                .chartYAxis { AxisMarks { v in AxisGridLine(); AxisValueLabel { if let d = v.as(Double.self) { Text(Self.money(d)) } } } }
+                .frame(height: 120)
+                .accessibilityLabel("Spend per day")
+                .accessibilityValue(UsageSeries.accessibilitySummary(series))
+            }
+            if !slices.isEmpty {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("SPEND BY MODEL").font(.caption.bold()).foregroundStyle(.secondary)
+                    Chart(slices) { slice in
+                        BarMark(x: .value("Spend", slice.cost), y: .value("Model", slice.label))
+                            .foregroundStyle(accent.opacity(0.75))
+                            .annotation(position: .trailing) { Text(Self.money(slice.cost)).font(.caption2.monospacedDigit()).foregroundStyle(.secondary) }
+                    }
+                    .frame(height: CGFloat(slices.count) * 26 + 10)
+                    .accessibilityLabel("Spend by model")
+                    .accessibilityValue(slices.map { "\($0.label) \(Self.money($0.cost))" }.joined(separator: ", "))
+                }
+            }
+        }
+        .padding(14)
+        .background(Color.primary.opacity(0.03), in: RoundedRectangle(cornerRadius: 12))
     }
 
     private func reload() {

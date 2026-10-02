@@ -10,6 +10,7 @@ struct SettingsView: View {
     @State private var showKey = false
     @State private var showRemoveKeyConfirmation = false
     @State private var keyActionError: String?
+    @State private var pane: SettingsPane = SettingsPane.restore()
     @State private var selectedTab: SettingsTab = .apiKey
     // Management key section (F03/W04). The draft lives in a small panel
     // struct so the save/remove rules are unit-testable; the configured state
@@ -31,56 +32,20 @@ struct SettingsView: View {
     }
 
     var body: some View {
-        VStack(spacing: 0) {
-            // Tab bar — compact chips, left-aligned, same look as the model filters.
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 6) {
-                    ForEach(SettingsTab.allCases, id: \.self) { tab in
-                        let selected = selectedTab == tab
-                        Button { selectedTab = tab } label: {
-                            Text(tab.rawValue)
-                                .font(.system(size: 12, weight: selected ? .semibold : .regular))
-                                .padding(.horizontal, 12)
-                                .padding(.vertical, 6)
-                                .background(selected ? ORBTheme.accent.opacity(0.18) : Color.primary.opacity(0.06), in: Capsule())
-                                .foregroundStyle(selected ? ORBTheme.accentLink : Color.primary)
-                        }
-                        .buttonStyle(.plain)
-                        .accessibilityAddTraits(selected ? .isSelected : [])
-                    }
+        // Native toolbar tabs (the standard macOS Settings look).
+        TabView(selection: $pane) {
+            ForEach(SettingsPane.allCases) { item in
+                ScrollView {
+                    paneContent(item)
+                        .padding(24)
+                        .frame(maxWidth: 760, alignment: .leading)
+                        .frame(maxWidth: .infinity, alignment: .leading)
                 }
-                .padding(.horizontal, 24)
-                .padding(.vertical, 14)
-            }
-
-            Divider()
-
-            // Content
-            ScrollView {
-                VStack(alignment: .leading, spacing: 20) {
-                    switch selectedTab {
-                    case .apiKey:
-                        VStack(alignment: .leading, spacing: 24) {
-                            apiKeySection
-                            Divider()
-                            managementKeySection
-                            Divider()
-                            securitySection
-                        }
-                    case .credits: creditsSection
-                    case .usage: UsageSettingsView(accent: ORBTheme.accent)
-                    case .activity: activitySection
-                    case .keyInfo: keyInfoSection
-                    case .providers: providersSection
-                    case .mcp: MCPSettingsView(accent: .accentColor)
-                    case .advanced: NetworkTimeoutsView(accent: .accentColor)
-                    }
-                }
-                .padding(24)
-                .frame(maxWidth: 760, alignment: .leading)
-                .frame(maxWidth: .infinity, alignment: .leading)
+                .tabItem { Label(item.title, systemImage: item.symbol) }
+                .tag(item)
             }
         }
+        .onChange(of: pane) { _, new in new.store() }
         .frame(minWidth: 500, minHeight: 400)
         .task {
             if KeychainManager.hasAPIKey {
@@ -120,6 +85,37 @@ struct SettingsView: View {
             Button("Cancel", role: .cancel) {}
         } message: {
             Text(ManagementKeyPanel.removeMessage)
+        }
+    }
+
+    @ViewBuilder
+    private func paneContent(_ pane: SettingsPane) -> some View {
+        switch pane {
+        case .general:
+            VStack(alignment: .leading, spacing: 24) {
+                AppearanceSettingsSection()
+                Divider()
+                securitySection
+            }
+        case .accounts:
+            VStack(alignment: .leading, spacing: 24) {
+                apiKeySection
+                Divider()
+                managementKeySection
+                Divider()
+                keyInfoSection
+            }
+        case .usage:
+            VStack(alignment: .leading, spacing: 24) {
+                creditsSection
+                Divider()
+                UsageSettingsView(accent: ORBTheme.accent)
+                Divider()
+                activitySection
+            }
+        case .mcp: MCPSettingsView(accent: .accentColor)
+        case .network: NetworkTimeoutsView(accent: .accentColor)
+        case .advanced: providersSection
         }
     }
 
@@ -228,6 +224,11 @@ struct SettingsView: View {
                     .help(showKey ? "Hide key" : "Show key")
                 }
 
+                if let hint = KeyFieldValidation.check(apiKeyInput).message {
+                    Label(hint, systemImage: "info.circle")
+                        .font(.callout).foregroundStyle(.secondary)
+                        .accessibilityLabel("Key format note: \(hint)")
+                }
                 HStack {
                     Button("Save Key") {
                         let trimmed = apiKeyInput.trimmingCharacters(in: .whitespacesAndNewlines)
