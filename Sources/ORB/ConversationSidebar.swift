@@ -86,6 +86,8 @@ struct ConversationRow: View {
     var isSelecting: Bool = false
     var isChecked: Bool = false
     var onToggleCheck: (() -> Void)?
+    var isPinned: Bool = false
+    var onTogglePin: (() -> Void)?
     @State private var showDeleteConfirmation = false
 
     var body: some View {
@@ -136,6 +138,11 @@ struct ConversationRow: View {
         }
         .buttonStyle(.plain)
         .contextMenu {
+            if let onTogglePin {
+                Button(action: onTogglePin) {
+                    Label(isPinned ? "Unpin" : "Pin to Top", systemImage: isPinned ? "pin.slash" : "pin")
+                }
+            }
             if let onExport {
                 Button {
                     onExport()
@@ -147,7 +154,7 @@ struct ConversationRow: View {
                 showDeleteConfirmation = true
             }
         }
-        .accessibilityLabel("Session, \(conversation.title)")
+        .accessibilityLabel("Session, \(conversation.title)\(isPinned ? ", pinned" : "")")
         .confirmationDialog(
             "Delete “\(conversation.title)”?",
             isPresented: $showDeleteConfirmation,

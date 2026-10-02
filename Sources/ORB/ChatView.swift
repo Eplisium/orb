@@ -10,6 +10,9 @@ struct ChatView: View {
 
     @State private var messageText = ""
     @State private var isSelectingSessions = false
+    @State private var sessionQuery = ""
+    @State private var unread = UnreadTracker()
+    @StateObject private var pins = ConversationPinStore(key: "orb.pinned.chat")
     @State private var selectedSessionIDs = Set<UUID>()
     @State private var selectedModelId = ""
     @AppStorage(PlaygroundModelDefaults.chatKey) private var defaultModelId = ""
@@ -116,46 +119,27 @@ struct ChatView: View {
                 }
             )
 
-            ScrollView {
-                LazyVStack(spacing: 8, pinnedViews: [.sectionHeaders]) {
-                    let chatConvs = chatService.conversations.filter { $0.mode == .chat }
-
-                    if chatConvs.isEmpty {
-                        EmptyConversationList(accent: accent)
-                    } else {
-                        Section {
-                            ForEach(chatConvs) { conversation in
-                                ConversationRow(
-                                    conversation: conversation,
-                                    isSelected: chatService.activeConversation?.id == conversation.id,
-                                    isRunning: chatService.isRunning(conversationID: conversation.id),
-                                    accent: accent,
-                                    icon: "bubble.left",
-                                    onSelect: {
-                                        chatService.selectConversation(conversation)
-                                        selectedModelId = conversation.modelId
-                                    },
-                                    onDelete: { chatService.deleteConversation(conversation) },
-                                    onExport: { exportConversation(conversation) },
-                                    isSelecting: isSelectingSessions,
-                                    isChecked: selectedSessionIDs.contains(conversation.id),
-                                    onToggleCheck: {
-                                        if selectedSessionIDs.contains(conversation.id) {
-                                            selectedSessionIDs.remove(conversation.id)
-                                        } else {
-                                            selectedSessionIDs.insert(conversation.id)
-                                        }
-                                    }
-                                )
-                            }
-                        } header: {
-                            sidebarSectionHeader(title: "Chat Sessions", icon: "bubble.left.and.bubble.right", count: chatConvs.count)
-                        }
-                    }
+            ConversationSearchField(text: $sessionQuery)
+            ConversationSectionsList(
+                conversations: chatService.conversations.filter { $0.mode == .chat },
+                query: $sessionQuery,
+                pins: pins,
+                selectedID: chatService.activeConversation?.id,
+                accent: accent,
+                icon: "bubble.left",
+                isRunning: { chatService.isRunning(conversationID: $0) },
+                onSelect: { conversation in
+                    chatService.selectConversation(conversation)
+                    selectedModelId = conversation.modelId
+                },
+                onDelete: { chatService.deleteConversation($0) },
+                onExport: { exportConversation($0) },
+                isSelecting: isSelectingSessions,
+                checked: selectedSessionIDs,
+                onToggleCheck: { id in
+                    if selectedSessionIDs.contains(id) { selectedSessionIDs.remove(id) } else { selectedSessionIDs.insert(id) }
                 }
-                .padding(.horizontal, 8)
-                .padding(.bottom, 12)
-            }
+            )
 
             Spacer(minLength: 0)
             if isSelectingSessions {
@@ -252,6 +236,8 @@ struct ChatView: View {
                 .disabled(chatService.isStreaming)
             }
 
+            ConversationMeterView(conversation: chatService.activeConversation)
+
             modelPickerButton
 
             // Export button
@@ -345,6 +331,7 @@ struct ChatView: View {
                         .monospacedDigit()
                         .foregroundStyle(.secondary)
                 }
+                PresetPicker(temperature: $temperature, accent: accent)
                 Slider(value: $temperature, in: 0...2, step: 0.05)
                 HStack {
                     Text("Max tokens")
@@ -503,7 +490,7 @@ struct ChatView: View {
                             updateFollowsLatest(viewportHeight: viewport.size.height)
                         }
 
-                        if conversationIsRunning && !followsLatest {
+                        if !followsLatest && (conversationIsRunning || unread.unread > 0) {
                             Button {
                                 scrollIntent.reset()
                                 followsLatest = true
@@ -511,7 +498,7 @@ struct ChatView: View {
                                     proxy.scrollTo("chat-message-bottom", anchor: .bottom)
                                 }
                             } label: {
-                                Label("Jump to latest", systemImage: "arrow.down")
+                                Label(UnreadTracker.jumpLabel(unread: unread.unread), systemImage: "arrow.down")
                             }
                             .buttonStyle(.borderedProminent)
                             .controlSize(.small)
@@ -521,6 +508,12 @@ struct ChatView: View {
                     // Watching only the last message's text missed growth from
                     // new messages, streaming tool cards, and activity-row
                     // changes — so long tool-heavy runs stopped following.
+                    .onChange(of: conversation.messages.count) { _, count in
+                        unread.update(messageCount: count, followsLatest: followsLatest)
+                    }
+                    .onChange(of: followsLatest) { _, follows in
+                        unread.update(messageCount: conversation.messages.count, followsLatest: follows)
+                    }
                     .onChange(of: scrollFollowKey(conversation)) { _, _ in
                         guard followsLatest else { return }
                         requestFollowScroll(proxy)
@@ -633,6 +626,10 @@ struct ChatView: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
 
+            SlashCommandMenu(entries: SlashCommand.suggestions(for: messageText)) { entry in
+                messageText = "/" + entry.name + (entry.name == "clear" ? "" : " ")
+            }
+
             VStack(spacing: 0) {
                 TextField(composerPlaceholder, text: $messageText, axis: .vertical)
                     .textFieldStyle(.plain)
@@ -657,6 +654,8 @@ struct ChatView: View {
                     .disabled(chatService.isStreaming)
 
                     Spacer()
+                    if let gauge = contextGauge { ContextGaugeView(gauge: gauge) }
+
                     Text("↩ send")
                         .font(.system(size: 9, weight: .medium))
                         .foregroundStyle(.tertiary)
@@ -766,7 +765,39 @@ struct ChatView: View {
         if currentSessionRunning { chatService.stopStreaming() } else { sendMessage() }
     }
 
+    private var contextGauge: ContextGauge? {
+        let length = viewModel.api.models.first { $0.id == currentModelId }?.contextLength
+        let conversation = chatService.activeConversation
+        return ContextGauge.make(
+            system: conversation?.systemPrompt ?? "",
+            messages: (conversation?.messages ?? []).map(\.content),
+            draft: messageText,
+            contextLength: length
+        )
+    }
+
+    /// Handles `/model`, `/system`, `/clear`. Returns true when the text was a command.
+    private func runSlashCommand(_ text: String) -> Bool {
+        guard let command = SlashCommand.parse(text) else { return false }
+        messageText = ""
+        switch command {
+        case .clear:
+            newConversation()
+        case .model(let query):
+            modelSearchText = query ?? ""
+            showModelPicker = true
+        case .system(let prompt):
+            if let prompt, let conversation = chatService.activeConversation {
+                chatService.updateSystemPrompt(prompt, for: conversation)
+            } else {
+                showSettings = true
+            }
+        }
+        return true
+    }
+
     private func sendMessage() {
+        if !currentSessionRunning, runSlashCommand(messageText) { return }
         guard canSend else {
             if !KeychainManager.hasAPIKey {
                 chatService.lastError = "Add your OpenRouter API key in Account before using Chat."
