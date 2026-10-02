@@ -250,7 +250,7 @@ struct ImagesView: View {
                     .font(.caption2).foregroundStyle(.secondary)
             }
             if !KeychainManager.hasAPIKey {
-                Text("Add an inference API key in Account to generate images.")
+                Text("Add an inference API key in Settings → Accounts & Keys to generate images.")
                     .font(.caption).foregroundStyle(.orange)
             }
 
@@ -322,7 +322,7 @@ struct ImagesView: View {
                             HStack(spacing: 4) {
                                 Text(url.lastPathComponent).lineLimit(1)
                                 Button { referenceURLs.removeAll { $0 == url } } label: {
-                                    Image(systemName: "xmark").font(.system(size: 8, weight: .bold))
+                                    Image(systemName: "xmark").font(.system(size: 11, weight: .bold))
                                 }.buttonStyle(.plain)
                             }
                             .font(.caption)
@@ -446,7 +446,7 @@ struct ImagesView: View {
             }
             VStack(alignment: .leading, spacing: 1) {
                 Text(title).font(.system(size: 15, weight: .semibold))
-                Text(subtitle).font(.system(size: 10)).foregroundStyle(.secondary)
+                Text(subtitle).font(.system(size: 11)).foregroundStyle(.secondary)
             }
         }
     }
@@ -501,7 +501,7 @@ struct ImagesView: View {
 
     private func generate() {
         guard canGenerate else {
-            if !KeychainManager.hasAPIKey { errorMessage = "Add your OpenRouter API key in Account first." }
+            if !KeychainManager.hasAPIKey { errorMessage = "Add your OpenRouter API key in Settings → Accounts & Keys first." }
             return
         }
         errorMessage = nil
@@ -839,7 +839,7 @@ struct VideoView: View {
             }
 
             if !KeychainManager.hasAPIKey {
-                Text("Add an inference API key in Account to generate or resume video.")
+                Text("Add an inference API key in Settings → Accounts & Keys to generate or resume video.")
                     .font(.caption).foregroundStyle(.orange)
             }
             if let errorMessage {
@@ -929,6 +929,18 @@ struct VideoView: View {
     }
 
     private var jobsColumn: some View {
+        VStack(alignment: .trailing, spacing: 0) {
+            JobTrayButton(
+                reload: { service.allJobRecords },
+                onResume: { resumeDurable($0) },
+                onStop: { _ in service.stopPolling() }
+            )
+            .padding(.horizontal, 14).padding(.top, 10)
+            jobsColumnBody
+        }
+    }
+
+    private var jobsColumnBody: some View {
         Group {
             if jobs.isEmpty && resumableRecords.isEmpty && saved.creations.allSatisfy({ $0.kind != .video })
                 && service.durablePersistenceError == nil {
@@ -982,7 +994,7 @@ struct VideoView: View {
         if !resumableRecords.isEmpty || service.durablePersistenceError != nil {
             VStack(alignment: .leading, spacing: 8) {
                 Text("RECOVERABLE JOBS")
-                    .font(.system(size: 9, weight: .bold))
+                    .font(.system(size: 11, weight: .bold))
                     .foregroundStyle(.secondary)
                 ForEach(resumableRecords) { record in
                     resumableRow(record)
@@ -1118,7 +1130,7 @@ struct VideoView: View {
         let color: Color = status == "completed" ? .green
             : status == "failed" || status == "expired" || status == "cancelled" ? .red : .orange
         return Text(status.uppercased())
-            .font(.system(size: 9, weight: .bold))
+            .font(.system(size: 11, weight: .bold))
             .padding(.horizontal, 7).padding(.vertical, 3)
             .background(color.opacity(0.14))
             .foregroundStyle(color)
@@ -1133,7 +1145,7 @@ struct VideoView: View {
             }
             VStack(alignment: .leading, spacing: 1) {
                 Text(title).font(.system(size: 15, weight: .semibold))
-                Text(subtitle).font(.system(size: 10)).foregroundStyle(.secondary)
+                Text(subtitle).font(.system(size: 11)).foregroundStyle(.secondary)
             }
         }
     }
@@ -1147,7 +1159,7 @@ struct VideoView: View {
 
     private func submit() {
         guard canSubmit else {
-            if !KeychainManager.hasAPIKey { errorMessage = "Add your OpenRouter API key in Account first." }
+            if !KeychainManager.hasAPIKey { errorMessage = "Add your OpenRouter API key in Settings → Accounts & Keys first." }
             return
         }
         errorMessage = nil

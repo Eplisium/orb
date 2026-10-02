@@ -592,7 +592,7 @@ struct ProviderRow: View {
                     }
                     if let q = endpoint.quantization, !q.isEmpty, q != "unknown" {
                         Text(q.uppercased())
-                            .font(.system(size: 10, weight: .bold, design: .monospaced))
+                            .font(.system(size: 11, weight: .bold, design: .monospaced))
                             .foregroundStyle(.teal)
                     }
                     if let up = endpoint.uptimeLast1d {
@@ -685,7 +685,7 @@ struct IndexVBar: View {
             }
             .frame(height: 8)
             Text(label)
-                .font(.system(size: 10))
+                .font(.system(size: 11))
                 .foregroundStyle(.secondary)
         }
         .frame(width: 90)

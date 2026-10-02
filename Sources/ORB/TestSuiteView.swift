@@ -183,7 +183,7 @@ struct TestSuiteView: View {
             Text(shortModelName(currentModelId))
                 .lineLimit(1)
             Image(systemName: "chevron.down")
-                .font(.system(size: 8, weight: .bold))
+                .font(.system(size: 11, weight: .bold))
                 .foregroundStyle(.tertiary)
         }
         .font(.system(size: 11, weight: .semibold))
@@ -226,10 +226,10 @@ struct TestSuiteView: View {
                 } header: {
                     HStack(spacing: 6) {
                         Image(systemName: "square.grid.2x2")
-                            .font(.system(size: 10, weight: .semibold))
+                            .font(.system(size: 11, weight: .semibold))
                             .foregroundStyle(accent)
                         Text("CATEGORIES")
-                            .font(.system(size: 10, weight: .bold))
+                            .font(.system(size: 11, weight: .bold))
                         Spacer()
                     }
                     .foregroundStyle(.secondary)
@@ -247,10 +247,10 @@ struct TestSuiteView: View {
         VStack(spacing: 4) {
             HStack(spacing: 6) {
                 Image(systemName: "plus.app")
-                    .font(.system(size: 10, weight: .semibold))
+                    .font(.system(size: 11, weight: .semibold))
                     .foregroundStyle(accent)
                 Text("CUSTOM TESTS")
-                    .font(.system(size: 10, weight: .bold))
+                    .font(.system(size: 11, weight: .bold))
                 Spacer()
             }
             .foregroundStyle(.secondary)
@@ -321,7 +321,7 @@ struct TestSuiteView: View {
                     .lineLimit(1)
                 Spacer(minLength: 0)
                 Text("\(count)")
-                    .font(.system(size: 10, weight: .medium, design: .monospaced))
+                    .font(.system(size: 11, weight: .medium, design: .monospaced))
                     .foregroundStyle(.tertiary)
             }
             .padding(.horizontal, 10)
@@ -361,7 +361,7 @@ struct TestSuiteView: View {
                     Spacer()
                     Text(testRunner.formattedTotalCost)
                 }
-                .font(.system(size: 10, weight: .medium, design: .monospaced))
+                .font(.system(size: 11, weight: .medium, design: .monospaced))
                 .foregroundStyle(.secondary)
             }
         }
@@ -464,7 +464,7 @@ struct TestSuiteView: View {
                 // Scenario cards
                 VStack(alignment: .leading, spacing: 12) {
                     Text("AVAILABLE TESTS")
-                        .font(.system(size: 10, weight: .bold))
+                        .font(.system(size: 11, weight: .bold))
                         .foregroundStyle(.secondary)
 
                     LazyVGrid(columns: [GridItem(.flexible(), spacing: 12), GridItem(.flexible(), spacing: 12)], spacing: 12) {
@@ -485,7 +485,7 @@ struct TestSuiteView: View {
         VStack(alignment: .leading, spacing: 12) {
             HStack {
                 Text("RECENT RESULTS")
-                    .font(.system(size: 10, weight: .bold))
+                    .font(.system(size: 11, weight: .bold))
                     .foregroundStyle(.secondary)
                 Spacer()
                 Button {
@@ -493,14 +493,14 @@ struct TestSuiteView: View {
                     testRunner.clearResults()
                 } label: {
                     Text("Clear All")
-                        .font(.system(size: 10, weight: .medium))
+                        .font(.system(size: 11, weight: .medium))
                         .foregroundStyle(.red)
                 }
                 .buttonStyle(.plain)
             }
 
             Text("Older saved passes may predate artifact checks; rerun to verify them. — cost means zero or unreported; totals are lower bounds.")
-                .font(.system(size: 10)).foregroundStyle(.secondary)
+                .font(.system(size: 11)).foregroundStyle(.secondary)
 
             TestResultsTableView(
                 results: testRunner.results,
@@ -548,12 +548,12 @@ struct TestSuiteView: View {
                             Label("Project", systemImage: "folder.fill")
                         }
                     }
-                    .font(.system(size: 10, weight: .medium, design: .monospaced))
+                    .font(.system(size: 11, weight: .medium, design: .monospaced))
                     .foregroundStyle(.tertiary)
                 }
                 Spacer()
                 Text(testRunner.formattedCost(result.cost))
-                    .font(.system(size: 10, weight: .medium, design: .monospaced))
+                    .font(.system(size: 11, weight: .medium, design: .monospaced))
                     .foregroundStyle(.secondary)
             }
             .padding(.horizontal, 12)
@@ -608,7 +608,7 @@ struct TestSuiteView: View {
                             .font(.system(size: 13, weight: .semibold))
                             .lineLimit(1)
                         Text(scenario.category.rawValue)
-                            .font(.system(size: 10, weight: .medium))
+                            .font(.system(size: 11, weight: .medium))
                             .foregroundStyle(.secondary)
                     }
                     Spacer()
@@ -627,11 +627,11 @@ struct TestSuiteView: View {
                 HStack(spacing: 8) {
                     difficultyTag(scenario.difficulty)
                     Label("\(scenario.estimatedSeconds)s", systemImage: "clock")
-                        .font(.system(size: 10, weight: .medium))
+                        .font(.system(size: 11, weight: .medium))
                         .foregroundStyle(.tertiary)
                     if result?.outputPath != nil {
                         Label("Built", systemImage: "folder.badge.checkmark")
-                            .font(.system(size: 10, weight: .medium))
+                            .font(.system(size: 11, weight: .medium))
                             .foregroundStyle(.green)
                     }
                     Spacer()
@@ -655,9 +655,9 @@ struct TestSuiteView: View {
         let unverified = result.errorMessage == TestRunner.unverifiedMessage
         return HStack(spacing: 3) {
             Image(systemName: unverified ? "questionmark.circle.fill" : result.success ? "checkmark.circle.fill" : "xmark.circle.fill")
-                .font(.system(size: 10))
+                .font(.system(size: 11))
             Text(unverified ? "Review" : result.success ? "Pass" : "Fail")
-                .font(.system(size: 10, weight: .bold))
+                .font(.system(size: 11, weight: .bold))
         }
         .foregroundStyle(unverified ? Color.orange : result.success ? Color.green : Color.red)
         .padding(.horizontal, 6)
@@ -677,7 +677,7 @@ struct TestSuiteView: View {
         }()
 
         return Text(difficulty.rawValue.uppercased())
-            .font(.system(size: 9, weight: .bold))
+            .font(.system(size: 11, weight: .bold))
             .foregroundStyle(color)
             .padding(.horizontal, 6)
             .padding(.vertical, 2)
@@ -741,7 +741,7 @@ struct TestSuiteView: View {
                 // Evaluation Criteria
                 VStack(alignment: .leading, spacing: 8) {
                     Text("REVIEW CRITERIA — NOT AUTOMATICALLY SCORED")
-                        .font(.system(size: 10, weight: .bold))
+                        .font(.system(size: 11, weight: .bold))
                         .foregroundStyle(.secondary)
                     ForEach(scenario.evaluationCriteria, id: \.self) { criterion in
                         HStack(spacing: 6) {
@@ -798,7 +798,7 @@ struct TestSuiteView: View {
                     }
 
                     if !KeychainManager.hasAPIKey {
-                        Text("Add your OpenRouter API key in Account to run tests.")
+                        Text("Add your OpenRouter API key in Settings → Accounts & Keys to run tests.")
                             .font(.system(size: 11))
                             .foregroundStyle(.orange)
                     }
@@ -815,7 +815,7 @@ struct TestSuiteView: View {
 
                 if isEligible && !testRunner.isRunning {
                     Text("Single runs use credits without a ceiling; Compare Models offers a between-run spend limit.")
-                        .font(.system(size: 10))
+                        .font(.system(size: 11))
                         .foregroundStyle(.secondary)
                         .frame(maxWidth: 820, alignment: .leading)
                 }
@@ -827,7 +827,7 @@ struct TestSuiteView: View {
                 let modelResults = testRunner.results.filter { $0.scenarioId == scenario.id }
                 if !modelResults.isEmpty {
                     VStack(alignment: .leading, spacing: 6) {
-                        Text("RESULTS BY MODEL").font(.system(size: 10, weight: .bold))
+                        Text("RESULTS BY MODEL").font(.system(size: 11, weight: .bold))
                         ForEach(modelResults.prefix(10)) { entry in
                             Button {
                                 selectedModelId = entry.modelId
@@ -901,10 +901,10 @@ struct TestSuiteView: View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 6) {
                 Text("YOUR INPUT")
-                    .font(.system(size: 10, weight: .bold))
+                    .font(.system(size: 11, weight: .bold))
                     .foregroundStyle(.secondary)
                 Text("OPTIONAL")
-                    .font(.system(size: 9, weight: .bold))
+                    .font(.system(size: 11, weight: .bold))
                     .foregroundStyle(.tertiary)
                     .padding(.horizontal, 5)
                     .padding(.vertical, 2)
@@ -916,7 +916,7 @@ struct TestSuiteView: View {
                         userInstructions = ""
                     } label: {
                         Text("Clear")
-                            .font(.system(size: 10, weight: .medium))
+                            .font(.system(size: 11, weight: .medium))
                             .foregroundStyle(.secondary)
                     }
                     .buttonStyle(.plain)
@@ -959,14 +959,14 @@ struct TestSuiteView: View {
     private var activityLogView: some View {
         VStack(alignment: .leading, spacing: 6) {
             Text("AGENT ACTIVITY")
-                .font(.system(size: 10, weight: .bold))
+                .font(.system(size: 11, weight: .bold))
                 .foregroundStyle(accent)
             ScrollView {
                 VStack(alignment: .leading, spacing: 3) {
                     ForEach(Array(testRunner.activityLog.enumerated()), id: \.offset) { _, entry in
                         HStack(spacing: 6) {
                             Image(systemName: entry.icon)
-                                .font(.system(size: 10))
+                                .font(.system(size: 11))
                                 .foregroundStyle(accent.opacity(0.7))
                             Text(entry.text)
                                 .font(.system(size: 11, design: .monospaced))
@@ -1005,7 +1005,7 @@ struct TestSuiteView: View {
                 Label("\(result.latencyMs)ms", systemImage: "clock")
                 Label(testRunner.formattedCost(result.cost), systemImage: "dollarsign.circle")
             }
-            .font(.system(size: 10, weight: .medium, design: .monospaced))
+            .font(.system(size: 11, weight: .medium, design: .monospaced))
             .foregroundStyle(.secondary)
 
             if let error = result.errorMessage {
@@ -1028,7 +1028,7 @@ struct TestSuiteView: View {
             if !result.response.isEmpty {
                 VStack(alignment: .leading, spacing: 8) {
                     Text(result.outputPath == nil ? "TEXT RESPONSE (PROJECT NOT VERIFIED)" : "AGENT SUMMARY")
-                        .font(.system(size: 10, weight: .bold))
+                        .font(.system(size: 11, weight: .bold))
                         .foregroundStyle(.secondary)
                     Text(result.response)
                         .font(.system(size: 13))
@@ -1051,7 +1051,7 @@ struct TestSuiteView: View {
     private func projectActionsView(_ projectPath: String, result: TestRunResult) -> some View {
         VStack(alignment: .leading, spacing: 10) {
             Text("PROJECT OUTPUT")
-                .font(.system(size: 10, weight: .bold))
+                .font(.system(size: 11, weight: .bold))
                 .foregroundStyle(.secondary)
 
             HStack(spacing: 12) {
@@ -1123,7 +1123,7 @@ struct TestSuiteView: View {
             if !htmlFiles.isEmpty {
                 VStack(alignment: .leading, spacing: 6) {
                     Text("OPEN IN BROWSER")
-                        .font(.system(size: 9, weight: .bold))
+                        .font(.system(size: 11, weight: .bold))
                         .foregroundStyle(.secondary)
 
                     ForEach(htmlFiles, id: \.self) { file in

@@ -585,6 +585,7 @@ private struct FlowChips: View {
                                 Image(systemName: "xmark.circle.fill").font(.caption2)
                             }
                             .buttonStyle(.plain)
+                            .accessibilityLabel("Remove \(item)")
                         }
                         .padding(.horizontal, 8)
                         .padding(.vertical, 3)

@@ -231,10 +231,10 @@ enum MediaServiceError: Error, LocalizedError, Equatable {
     var errorDescription: String? {
         switch self {
         case .missingAPIKey:
-            return "Add your OpenRouter API key in Account first."
+            return "Add your OpenRouter API key in Settings → Accounts & Keys first."
         case .http(let status, let message):
             switch status {
-            case 401: return "OpenRouter rejected the API key. Check it in Account. \(message)"
+            case 401: return "OpenRouter rejected the API key. Check it in Settings → Accounts & Keys. \(message)"
             case 402: return "OpenRouter credits are exhausted. Add credits, then try again. \(message)"
             case 429: return "OpenRouter rate limit reached. Try again shortly. \(message)"
             default: return "OpenRouter HTTP \(status): \(message)"
@@ -936,6 +936,7 @@ final class VideoGenService: ObservableObject {
         jobController.recordTerminal(
             remoteID: job.id, remoteStatus: job.status, error: job.error, cost: job.cost
         )
+        AppToasts.jobFinished(JobPollingState(remoteStatus: job.status), kind: "video")
         guard job.isSuccess else {
             throw MediaServiceError.transport(job.error ?? "Video generation \(job.status).")
         }
@@ -969,6 +970,7 @@ final class VideoGenService: ObservableObject {
     func stopPolling() {
         if let active = activeJob, !active.isTerminal {
             jobController.recordStoppedLocally(remoteID: active.id)
+            AppToasts.jobFinished(.stoppedLocally, kind: "video")
         }
         pollTask?.cancel()
         pollTask = nil

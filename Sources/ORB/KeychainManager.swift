@@ -32,7 +32,9 @@ enum KeychainManager {
 
     /// Whether an API key is currently stored. Does NOT trigger auth prompts.
     static var hasAPIKey: Bool {
-        KeychainSecrets.exists(account)
+        // Review mode (-orb.reviewMode YES) never touches the Keychain.
+        if UserDefaults.standard.bool(forKey: "orb.reviewMode") { return false }
+        return KeychainSecrets.exists(account)
     }
 
     /// Masked version of the key for display (e.g. "sk-or-v1-abc...xyz").

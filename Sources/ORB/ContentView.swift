@@ -476,6 +476,7 @@ struct ContentView: View {
                 .navigationTitle(selectedSection.title)
         }
         .navigationSplitViewStyle(.balanced)
+        .orbToastHost(AppToasts.center)
         .toolbar {
             ToolbarItemGroup(placement: .primaryAction) {
                 Button {

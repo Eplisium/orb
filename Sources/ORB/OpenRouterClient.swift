@@ -85,7 +85,7 @@ enum OpenRouterClientError: Error, Equatable, LocalizedError {
         case .nonHTTPResponse: return "OpenRouter returned a non-HTTP response."
         case .http(let status, let message, let retryAfter):
             switch status {
-            case 401: return "OpenRouter rejected the API key. Check it in Account. \(message)"
+            case 401: return "OpenRouter rejected the API key. Check it in Settings → Accounts & Keys. \(message)"
             case 402: return "OpenRouter credits are exhausted. Add credits, then try again. \(message)"
             case 408: return "OpenRouter timed out before streaming began. \(message)"
             case 429:

@@ -374,7 +374,7 @@ struct NeedsKeyGate<Content: View>: View {
     var body: some View {
         VStack(spacing: 0) {
             if status.needsKey {
-                NeedsKeyBanner(content: .make(for: studio)) { openSettings() }
+                NeedsKeyBanner(content: .make(for: studio)) { SettingsPane.accounts.store(); openSettings() }
             }
             content()
         }

@@ -123,7 +123,7 @@ struct SuggestionCard: View {
                     Text(suggestion.title)
                         .font(.system(size: 12, weight: .semibold))
                     Text(suggestion.subtitle)
-                        .font(.system(size: 10))
+                        .font(.system(size: 11))
                         .foregroundStyle(.secondary)
                         .lineLimit(2)
                 }
@@ -151,7 +151,7 @@ struct CapabilityPill: View {
 
     var body: some View {
         Label(title, systemImage: icon)
-            .font(.system(size: 10, weight: .semibold))
+            .font(.system(size: 11, weight: .semibold))
             .foregroundStyle(.secondary)
             .padding(.horizontal, 9)
             .padding(.vertical, 5)
@@ -166,6 +166,7 @@ struct CapabilityPill: View {
 /// glow — the "assistant is composing" affordance shown before the first
 /// token arrives.
 struct TypingIndicator: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     let accent: Color
     @State private var phase = 0.0
 
@@ -187,7 +188,7 @@ struct TypingIndicator: View {
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("Assistant is thinking")
         .onAppear {
-            withAnimation(.linear(duration: 1.05).repeatForever(autoreverses: false)) {
+            withAnimation(ORBMotion.looping(.linear(duration: 1.05).repeatForever(autoreverses: false), system: reduceMotion)) {
                 phase = 1
             }
         }
@@ -203,6 +204,7 @@ struct TypingIndicator: View {
 // MARK: - Tool Call Card (expandable)
 
 struct ToolCallCard: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     let toolCall: ToolCallDisplay
     let accent: Color
     @State private var isExpanded = false
@@ -253,11 +255,11 @@ struct ToolCallCard: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             Button {
-                withAnimation(.easeInOut(duration: 0.15)) { isExpanded.toggle() }
+                withAnimation(ORBMotion.oneShot(.easeInOut(duration: 0.15), system: reduceMotion)) { isExpanded.toggle() }
             } label: {
                 HStack(spacing: 8) {
                     Image(systemName: toolIcon)
-                        .font(.system(size: 10, weight: .semibold))
+                        .font(.system(size: 11, weight: .semibold))
                         .foregroundStyle(statusColor)
                         .frame(width: 20, height: 20)
                         .background(statusColor.opacity(0.10))
@@ -280,7 +282,7 @@ struct ToolCallCard: View {
                             .foregroundStyle(toolCall.isError ? Color.red : Color.green)
                     }
                     Image(systemName: "chevron.down")
-                        .font(.system(size: 8, weight: .bold))
+                        .font(.system(size: 11, weight: .bold))
                         .foregroundStyle(.tertiary)
                         .rotationEffect(.degrees(isExpanded ? 180 : 0))
                 }
@@ -338,6 +340,7 @@ struct ToolCallCard: View {
 /// counts) in the header and expands to the full card list on demand. This is
 /// what keeps a 20-tool run from turning into 20 full-height cards.
 struct ToolCallActivityGroup: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     let toolCalls: [ToolCallDisplay]
     let accent: Color
     @State private var isExpanded = false
@@ -356,7 +359,7 @@ struct ToolCallActivityGroup: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
             Button {
-                withAnimation(.easeInOut(duration: 0.15)) { isExpanded.toggle() }
+                withAnimation(ORBMotion.oneShot(.easeInOut(duration: 0.15), system: reduceMotion)) { isExpanded.toggle() }
             } label: {
                 HStack(spacing: 7) {
                     if runningCount > 0 {
@@ -365,7 +368,7 @@ struct ToolCallActivityGroup: View {
                             .tint(accent)
                     } else {
                         Image(systemName: "wrench.and.screwdriver")
-                            .font(.system(size: 10, weight: .semibold))
+                            .font(.system(size: 11, weight: .semibold))
                             .foregroundStyle(accent)
                     }
                     Text(summaryLabel)
@@ -373,7 +376,7 @@ struct ToolCallActivityGroup: View {
                     statusSummary
                     Spacer(minLength: 8)
                     Image(systemName: "chevron.right")
-                        .font(.system(size: 8, weight: .semibold))
+                        .font(.system(size: 11, weight: .semibold))
                         .foregroundStyle(.tertiary)
                         .rotationEffect(.degrees(isExpanded ? 90 : 0))
                 }
@@ -413,7 +416,7 @@ struct ToolCallActivityGroup: View {
                 status("circle.dashed", "\(runningCount)", accent)
             }
         }
-        .font(.system(size: 9, design: .monospaced))
+        .font(.system(size: 11, design: .monospaced))
         .foregroundStyle(.secondary)
     }
 
@@ -489,8 +492,7 @@ struct PlaygroundMessageView: View {
 
     private func copyMessage() {
         guard !message.content.isEmpty else { return }
-        NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(message.content, forType: .string)
+        AppToasts.copy(message.content, what: "Message")
         showCopyCheck = true
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { showCopyCheck = false }
     }
@@ -500,7 +502,7 @@ struct PlaygroundMessageView: View {
         if let action {
             Button(action: action) {
                 Image(systemName: symbol)
-                    .font(.system(size: 9, weight: .semibold))
+                    .font(.system(size: 11, weight: .semibold))
                     .foregroundStyle(.secondary)
                     .frame(width: 24, height: 24)
             }
@@ -514,7 +516,7 @@ struct PlaygroundMessageView: View {
         HStack(spacing: 3) {
             Button(action: copyMessage) {
                 Image(systemName: showCopyCheck ? "checkmark" : "doc.on.doc")
-                    .font(.system(size: 9, weight: .semibold))
+                    .font(.system(size: 11, weight: .semibold))
                     .foregroundStyle(showCopyCheck ? .green : .secondary)
                     .frame(width: 24, height: 24)
             }
@@ -531,7 +533,7 @@ struct PlaygroundMessageView: View {
                     onDelete()
                 } label: {
                     Image(systemName: "trash")
-                        .font(.system(size: 9, weight: .semibold))
+                        .font(.system(size: 11, weight: .semibold))
                         .foregroundStyle(.red.opacity(0.7))
                         .frame(width: 24, height: 24)
                 }
@@ -559,6 +561,7 @@ struct PlaygroundMessageView: View {
 /// collapses the moment real content starts and freezes to "Thought for
 /// 11s". The header can be tapped to expand/collapse at any time.
 struct ReasoningDisclosure: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     let text: String
     let accent: Color
     let isStreaming: Bool
@@ -584,14 +587,14 @@ struct ReasoningDisclosure: View {
         .animation(.spring(response: 0.3, dampingFraction: 0.85), value: effectiveExpansion)
         .onAppear {
             if isStreaming {
-                withAnimation(.easeInOut(duration: 0.9).repeatForever(autoreverses: true)) {
+                withAnimation(ORBMotion.looping(.easeInOut(duration: 0.9).repeatForever(autoreverses: true), system: reduceMotion)) {
                     breathe = true
                 }
             }
         }
         .onChange(of: isStreaming) { _, streaming in
             if streaming {
-                withAnimation(.easeInOut(duration: 0.9).repeatForever(autoreverses: true)) {
+                withAnimation(ORBMotion.looping(.easeInOut(duration: 0.9).repeatForever(autoreverses: true), system: reduceMotion)) {
                     breathe = true
                 }
             } else {
@@ -625,7 +628,7 @@ struct ReasoningDisclosure: View {
                         .foregroundStyle(.secondary)
                 }
                 Image(systemName: "chevron.right")
-                    .font(.system(size: 9, weight: .semibold))
+                    .font(.system(size: 11, weight: .semibold))
                     .foregroundStyle(.tertiary)
                     .rotationEffect(.degrees(effectiveExpansion ? 90 : 0))
             }
@@ -675,6 +678,7 @@ enum ThoughtDurationFormatter {
 
 /// Pulsing accent orb for the run-activity row while the agent works.
 struct ActivityPulseOrb: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     let accent: Color
     let isActive: Bool
     @State private var breathing = false
@@ -701,7 +705,7 @@ struct ActivityPulseOrb: View {
 
     private func updateAnimation(_ active: Bool) {
         if active {
-            withAnimation(.easeInOut(duration: 0.9).repeatForever(autoreverses: true)) {
+            withAnimation(ORBMotion.looping(.easeInOut(duration: 0.9).repeatForever(autoreverses: true), system: reduceMotion)) {
                 breathing = true
             }
         } else {
@@ -832,6 +836,7 @@ extension PlaygroundMessageView {
 /// a disclosure, instead of dumping an internal string like
 /// "invalid JSON arguments for chatcmpl-tool-…" across the top of the window.
 struct PlaygroundErrorBanner: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     let message: String
     let onDismiss: () -> Void
     @State private var showsDetail = false
@@ -840,7 +845,7 @@ struct PlaygroundErrorBanner: View {
     private var summary: (headline: String, hint: String?) {
         let lowered = message.lowercased()
         if lowered.contains("api key") || lowered.contains("401") {
-            return ("OpenRouter rejected your API key", "Update it in Account.")
+            return ("OpenRouter rejected your API key", "Update it in Settings → Accounts & Keys.")
         }
         if lowered.contains("credits") || lowered.contains("402") {
             return ("Your OpenRouter credits are exhausted", "Add credits, then retry.")
@@ -875,32 +880,31 @@ struct PlaygroundErrorBanner: View {
                         .font(.system(size: 11, weight: .semibold))
                     if let hint = summary.hint {
                         Text(hint)
-                            .font(.system(size: 10))
+                            .font(.system(size: 11))
                             .foregroundStyle(.secondary)
                     }
                 }
                 Spacer(minLength: 8)
                 Button {
-                    withAnimation(.easeInOut(duration: 0.15)) { showsDetail.toggle() }
+                    withAnimation(ORBMotion.oneShot(.easeInOut(duration: 0.15), system: reduceMotion)) { showsDetail.toggle() }
                 } label: {
                     Text(showsDetail ? "Hide details" : "Details")
-                        .font(.system(size: 10, weight: .medium))
+                        .font(.system(size: 11, weight: .medium))
                         .foregroundStyle(.secondary)
                 }
                 .buttonStyle(.plain)
                 Button {
-                    NSPasteboard.general.clearContents()
-                    NSPasteboard.general.setString(message, forType: .string)
+                    AppToasts.copy(message, what: "Error details")
                 } label: {
                     Image(systemName: "doc.on.doc")
-                        .font(.system(size: 10))
+                        .font(.system(size: 11))
                         .foregroundStyle(.secondary)
                 }
                 .buttonStyle(.plain)
                 .help("Copy error details")
                 Button(action: onDismiss) {
                     Image(systemName: "xmark")
-                        .font(.system(size: 10, weight: .semibold))
+                        .font(.system(size: 11, weight: .semibold))
                         .foregroundStyle(.secondary)
                 }
                 .buttonStyle(.plain)
@@ -909,7 +913,7 @@ struct PlaygroundErrorBanner: View {
 
             if showsDetail {
                 Text(message)
-                    .font(.system(size: 10, design: .monospaced))
+                    .font(.system(size: 11, design: .monospaced))
                     .foregroundStyle(.secondary)
                     .textSelection(.enabled)
                     .frame(maxWidth: .infinity, alignment: .leading)

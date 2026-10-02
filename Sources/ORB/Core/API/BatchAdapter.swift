@@ -341,7 +341,7 @@ enum BatchAdapterError: Error, Equatable, LocalizedError {
             return "An OpenRouter API key is required."
         case .http(let status, let message):
             switch status {
-            case 401: return "OpenRouter rejected the API key. Check it in Account. \(message)"
+            case 401: return "OpenRouter rejected the API key. Check it in Settings → Accounts & Keys. \(message)"
             case 402: return "OpenRouter credits are exhausted. \(message)"
             case 429: return "OpenRouter rate limit reached. \(message)"
             case 500...599: return "OpenRouter is temporarily unavailable (HTTP \(status)). \(message)"

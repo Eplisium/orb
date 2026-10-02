@@ -193,12 +193,12 @@ struct AgentView: View {
     private func sidebarSectionHeader(title: String, icon: String, count: Int) -> some View {
         HStack(spacing: 6) {
             Image(systemName: icon)
-                .font(.system(size: 9, weight: .semibold))
+                .font(.system(size: 11, weight: .semibold))
                 .foregroundStyle(accent)
             Text(title.uppercased())
-                .font(.system(size: 9, weight: .bold))
+                .font(.system(size: 11, weight: .bold))
             Text("\(count)")
-                .font(.system(size: 8, weight: .bold, design: .monospaced))
+                .font(.system(size: 11, weight: .bold, design: .monospaced))
                 .foregroundStyle(.secondary)
                 .padding(.horizontal, 5)
                 .padding(.vertical, 2)
@@ -224,7 +224,7 @@ struct AgentView: View {
                     Image(systemName: "command")
                     Text("Powered by ORB functions")
                 }
-                .font(.system(size: 10, weight: .medium))
+                .font(.system(size: 11, weight: .medium))
                 .foregroundStyle(.secondary)
             }
 
@@ -237,7 +237,7 @@ struct AgentView: View {
                     Image(systemName: fullComputerAccess ? "desktopcomputer.and.macbook" : "network")
                     Text(fullComputerAccess ? "Computer Access" : "Web Only")
                 }
-                .font(.system(size: 10, weight: .semibold))
+                .font(.system(size: 11, weight: .semibold))
                 .foregroundStyle(fullComputerAccess ? Color.orange : Color.secondary)
                 .padding(.horizontal, 9)
                 .padding(.vertical, 6)
@@ -286,6 +286,7 @@ struct AgentView: View {
                     .clipShape(RoundedRectangle(cornerRadius: 7))
             }
             .buttonStyle(.plain)
+            .accessibilityLabel("Session settings")
             .inspector(isPresented: $showSettings) { settingsPopover.inspectorColumnWidth(min: 280, ideal: 320, max: 420) }
             .sheet(isPresented: $showMCPSettings) { MCPSettingsView(accent: accent, isEmbedded: false) }
         }
@@ -305,10 +306,10 @@ struct AgentView: View {
                 Text(shortModelName(currentModelId))
                     .lineLimit(1)
                 Image(systemName: "chevron.down")
-                    .font(.system(size: 8, weight: .bold))
+                    .font(.system(size: 11, weight: .bold))
                     .foregroundStyle(.tertiary)
             }
-            .font(.system(size: 10, weight: .semibold))
+            .font(.system(size: 11, weight: .semibold))
             .padding(.horizontal, 9)
             .padding(.vertical, 6)
             .background(Color.primary.opacity(0.05))
@@ -344,7 +345,7 @@ struct AgentView: View {
 
             VStack(alignment: .leading, spacing: 7) {
                 Text("WORKSPACE")
-                    .font(.system(size: 9, weight: .bold))
+                    .font(.system(size: 11, weight: .bold))
                     .foregroundStyle(.secondary)
                 Button(action: chooseWorkspace) {
                     HStack {
@@ -374,7 +375,7 @@ struct AgentView: View {
 
             VStack(alignment: .leading, spacing: 7) {
                 Text("SYSTEM PROMPT (OPTIONAL)")
-                    .font(.system(size: 9, weight: .bold))
+                    .font(.system(size: 11, weight: .bold))
                     .foregroundStyle(.secondary)
                 TextEditor(text: Binding(
                     get: { chatService.activeConversation?.systemPrompt ?? "" },
@@ -400,7 +401,7 @@ struct AgentView: View {
 
             VStack(alignment: .leading, spacing: 7) {
                 Text("EXTENSIONS")
-                    .font(.system(size: 9, weight: .bold))
+                    .font(.system(size: 11, weight: .bold))
                     .foregroundStyle(.secondary)
                 Button {
                     showSettings = false
@@ -634,7 +635,7 @@ struct AgentView: View {
                     Text("^[\(toolCount) tool call](inflect: true)")
                 }
             }
-            .font(.system(size: 10))
+            .font(.system(size: 11))
             .foregroundStyle(.secondary)
             Spacer(minLength: 0)
         }
@@ -671,7 +672,7 @@ struct AgentView: View {
                 }
                 if let attachmentContextSummary {
                     Text(attachmentContextSummary)
-                        .font(.system(size: 9, design: .monospaced))
+                        .font(.system(size: 11, design: .monospaced))
                         .foregroundStyle(.secondary)
                         .frame(maxWidth: .infinity, alignment: .leading)
                 }
@@ -683,7 +684,7 @@ struct AgentView: View {
                         Label(warning, systemImage: "exclamationmark.triangle")
                     }
                 }
-                .font(.system(size: 9))
+                .font(.system(size: 11))
                 .foregroundStyle(.orange)
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
@@ -721,7 +722,7 @@ struct AgentView: View {
                             Text(abbreviatedWorkspace)
                                 .lineLimit(1)
                         }
-                        .font(.system(size: 9, weight: .medium))
+                        .font(.system(size: 11, weight: .medium))
                         .foregroundStyle(.secondary)
                     }
                     .buttonStyle(.plain)
@@ -764,7 +765,7 @@ struct AgentView: View {
             Text(fullComputerAccess
                  ? "Full access is on — this app can run commands, edit files, and control this Mac."
                  : "AI can make mistakes. Review important output and actions.")
-                .font(.system(size: 9))
+                .font(.system(size: 11))
                 .foregroundStyle(fullComputerAccess ? Color.orange.opacity(0.85) : Color.secondary)
         }
         .frame(maxWidth: 820)
@@ -783,11 +784,12 @@ struct AgentView: View {
                 refreshAttachmentDiagnostics()
             } label: {
                 Image(systemName: "xmark")
-                    .font(.system(size: 8, weight: .bold))
+                    .font(.system(size: 11, weight: .bold))
             }
             .buttonStyle(.plain)
+            .accessibilityLabel("Remove attachment")
         }
-        .font(.system(size: 9, weight: .medium))
+        .font(.system(size: 11, weight: .medium))
         .padding(.horizontal, 8)
         .padding(.vertical, 5)
         .background(accent.opacity(0.10))
@@ -830,7 +832,7 @@ struct AgentView: View {
 
     private var composerPlaceholder: String {
         if !KeychainManager.hasAPIKey {
-            return "Add your OpenRouter API key in Account…"
+            return "Add your OpenRouter API key in Settings → Accounts & Keys…"
         }
         return "Ask the native agent to build, research, organize, or operate your Mac…"
     }
@@ -916,7 +918,7 @@ struct AgentView: View {
         if !currentSessionRunning, runSlashCommand(messageText) { return }
         guard canSend else {
             if !KeychainManager.hasAPIKey {
-                chatService.lastError = "Add your OpenRouter API key in Account before using the Agent."
+                chatService.lastError = "Add your OpenRouter API key in Settings → Accounts & Keys before using the Agent."
             }
             return
         }

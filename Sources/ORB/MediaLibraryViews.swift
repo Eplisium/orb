@@ -70,11 +70,11 @@ struct ModalityModelField: View {
                     .font(.system(size: 12, design: .monospaced))
             } else {
                 HStack(spacing: 6) {
-                    Text(modelID).font(.system(size: 10, design: .monospaced))
+                    Text(modelID).font(.system(size: 11, design: .monospaced))
                         .foregroundStyle(.tertiary).lineLimit(1).truncationMode(.middle)
                     Spacer(minLength: 0)
                     Button("Enter ID manually") { showsManual = true }
-                        .buttonStyle(.plain).font(.system(size: 10)).foregroundStyle(.secondary)
+                        .buttonStyle(.plain).font(.system(size: 11)).foregroundStyle(.secondary)
                 }
             }
             if let status = choices.status {
@@ -231,7 +231,7 @@ struct FilesView: View {
                     .font(.system(size: 12, weight: .medium))
                     .lineLimit(1)
                 HStack(spacing: 8) {
-                    Text(file.id).font(.system(size: 10, design: .monospaced)).foregroundStyle(.tertiary)
+                    Text(file.id).font(.system(size: 11, design: .monospaced)).foregroundStyle(.tertiary)
                     if let bytes = file.sizeBytes {
                         Text(ByteCountFormatter.string(fromByteCount: Int64(bytes), countStyle: .file))
                             .font(.caption).foregroundStyle(.secondary)
@@ -240,8 +240,7 @@ struct FilesView: View {
             }
             Spacer()
             Button {
-                NSPasteboard.general.clearContents()
-                NSPasteboard.general.setString(file.id, forType: .string)
+                AppToasts.copy(file.id, what: "File ID")
             } label: {
                 Image(systemName: "doc.on.doc").font(.caption)
             }
@@ -659,7 +658,7 @@ struct SpeechView: View {
 
     private func synthesize() {
         guard canSynthesize else {
-            if !KeychainManager.hasAPIKey { errorMessage = "Add your OpenRouter API key in Account first." }
+            if !KeychainManager.hasAPIKey { errorMessage = "Add your OpenRouter API key in Settings → Accounts & Keys first." }
             return
         }
         errorMessage = nil
@@ -741,8 +740,7 @@ struct SpeechView: View {
                             .background(Color.primary.opacity(0.04))
                             .clipShape(RoundedRectangle(cornerRadius: 8))
                         Button("Copy") {
-                            NSPasteboard.general.clearContents()
-                            NSPasteboard.general.setString(transcript, forType: .string)
+                            AppToasts.copy(transcript, what: "Transcript")
                         }
                         .font(.caption)
                     }
@@ -799,7 +797,7 @@ struct SpeechView: View {
 
     private func transcribe() {
         guard canTranscribe, let url = selectedAudioURL else {
-            if !KeychainManager.hasAPIKey { errorMessage = "Add your OpenRouter API key in Account first." }
+            if !KeychainManager.hasAPIKey { errorMessage = "Add your OpenRouter API key in Settings → Accounts & Keys first." }
             return
         }
         errorMessage = nil

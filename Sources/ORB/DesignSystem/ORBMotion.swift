@@ -54,3 +54,21 @@ extension View {
         modifier(ORBAnimationModifier(token: token, value: value))
     }
 }
+
+
+extension ORBMotion {
+    /// Reduce Motion from the OS, or the in-app override set to "Reduce".
+    static func shouldReduce(system: Bool, defaults: UserDefaults = .standard) -> Bool {
+        AppearancePrefs.load(from: defaults).effectiveReduceMotion(system: system)
+    }
+
+    /// Endless pulses and shimmers are removed entirely when motion is reduced.
+    static func looping(_ animation: Animation, system: Bool, defaults: UserDefaults = .standard) -> Animation? {
+        shouldReduce(system: system, defaults: defaults) ? nil : animation
+    }
+
+    /// Short transitions become instant when motion is reduced.
+    static func oneShot(_ animation: Animation, system: Bool, defaults: UserDefaults = .standard) -> Animation? {
+        shouldReduce(system: system, defaults: defaults) ? nil : animation
+    }
+}

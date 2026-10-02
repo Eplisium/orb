@@ -730,7 +730,7 @@ final class ChatService: ObservableObject {
     ) async {
         guard !isStreaming else { lastError = "A generation is already running."; return }
         guard let apiKey = apiKeyProvider(), !apiKey.isEmpty else {
-            lastError = "Add your OpenRouter API key in Account before using Agent mode."
+            lastError = "Add your OpenRouter API key in Settings → Accounts & Keys before using Agent mode."
             return
         }
         ModelRecentsStore().record(modelId)

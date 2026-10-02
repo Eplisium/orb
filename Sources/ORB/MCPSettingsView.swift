@@ -113,6 +113,7 @@ struct MCPSettingsView: View {
                         .foregroundStyle(.secondary)
                 }
                 .buttonStyle(.plain)
+                .accessibilityLabel("Remove server")
             }
 
             TextField("Command (e.g. npx)", text: config.command)
@@ -133,7 +134,7 @@ struct MCPSettingsView: View {
 
             if let message = status[config.wrappedValue.name] {
                 Text(message)
-                    .font(.system(size: 10))
+                    .font(.system(size: 11))
                     .foregroundStyle(message.hasPrefix("✓") ? .green : .red)
             }
         }
@@ -228,10 +229,10 @@ struct MCPSettingsView: View {
         if !stored.isEmpty {
             HStack(spacing: 5) {
                 Image(systemName: "lock.fill")
-                    .font(.system(size: 9))
+                    .font(.system(size: 11))
                     .foregroundStyle(.green)
                 Text("In the Keychain: \(stored.joined(separator: ", "))")
-                    .font(.system(size: 10))
+                    .font(.system(size: 11))
                     .foregroundStyle(.secondary)
             }
         }
@@ -239,15 +240,15 @@ struct MCPSettingsView: View {
         if !candidates.isEmpty {
             VStack(alignment: .leading, spacing: 6) {
                 Text("ENV VALUES")
-                    .font(.system(size: 9, weight: .bold))
+                    .font(.system(size: 11, weight: .bold))
                     .foregroundStyle(.secondary)
                 Text("Selected values move into the macOS Keychain; the settings file keeps only a reference. Values are never shown.")
-                    .font(.system(size: 10))
+                    .font(.system(size: 11))
                     .foregroundStyle(.secondary)
                 ForEach(candidates, id: \.self) { variable in
                     Toggle(isOn: secretSelectionBinding(config, variable)) {
                         Text(variable)
-                            .font(.system(size: 10, design: .monospaced))
+                            .font(.system(size: 11, design: .monospaced))
                     }
                     .toggleStyle(.checkbox)
                 }
@@ -266,7 +267,7 @@ struct MCPSettingsView: View {
                 }
                 if let outcome = migrationOutcomes[config.id] {
                     Text(migrationMessage(outcome))
-                        .font(.system(size: 10))
+                        .font(.system(size: 11))
                         .foregroundStyle(outcome.didSucceed ? .green : .red)
                 }
             }

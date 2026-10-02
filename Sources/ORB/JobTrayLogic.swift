@@ -114,7 +114,7 @@ struct JobTrayButton: View {
             Label("Jobs", systemImage: "tray.full")
                 .overlay(alignment: .topTrailing) {
                     if let badge = JobTray.badgeText(jobs) {
-                        Text(badge).font(.system(size: 10, weight: .bold)).padding(3)
+                        Text(badge).font(.system(size: 11, weight: .bold)).padding(3)
                             .background(ORBTheme.accent, in: Circle()).foregroundStyle(.white).offset(x: 8, y: -6)
                     }
                 }

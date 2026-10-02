@@ -97,8 +97,7 @@ private struct AssistantImageCard: View {
                         .help(promptExpanded ? "Click to collapse" : "Click to show the full prompt")
                     HStack(spacing: 10) {
                         Button {
-                            NSPasteboard.general.clearContents()
-                            NSPasteboard.general.setString(prompt, forType: .string)
+                            AppToasts.copy(prompt, what: "Prompt")
                             promptCopied = true
                             DispatchQueue.main.asyncAfter(deadline: .now() + 2) { promptCopied = false }
                         } label: {
@@ -220,22 +219,22 @@ struct AttachmentDraftChip: View {
     var body: some View {
         HStack(spacing: 5) {
             Image(systemName: draft.iconName)
-                .font(.system(size: 10))
+                .font(.system(size: 11))
             Text(draft.filename)
                 .lineLimit(1)
             Text(draft.typeLabel)
-                .font(.system(size: 8, weight: .bold))
+                .font(.system(size: 11, weight: .bold))
                 .padding(.horizontal, 5)
                 .padding(.vertical, 1)
                 .background(Color.primary.opacity(0.08))
                 .clipShape(Capsule())
             Button(action: onRemove) {
                 Image(systemName: "xmark")
-                    .font(.system(size: 8, weight: .bold))
+                    .font(.system(size: 11, weight: .bold))
             }
             .buttonStyle(.plain)
         }
-        .font(.system(size: 10, weight: .medium))
+        .font(.system(size: 11, weight: .medium))
         .padding(.horizontal, 9)
         .padding(.vertical, 6)
         .background(Color.accentColor.opacity(0.10))
@@ -253,7 +252,7 @@ struct SentAttachmentsLabel: View {
             "\(count) attachment\(count == 1 ? "" : "s")",
             systemImage: "paperclip"
         )
-        .font(.system(size: 10))
+        .font(.system(size: 11))
         .foregroundStyle(.secondary)
     }
 }

@@ -62,7 +62,7 @@ final class AccountService: ObservableObject {
         guard let url = URL(string: "\(baseURL)/credits"),
               let request = authenticatedRequest(url: url, role: .management) else {
             credits = nil
-            creditsError = "Management key required. Account-wide credits need a management key — add one in Account. Your inference key still works for chat."
+            creditsError = "Management key required. Account-wide credits need a management key — add one in Settings → Accounts & Keys. Your inference key still works for chat."
             return
         }
 
@@ -78,7 +78,7 @@ final class AccountService: ObservableObject {
             }
 
             if http.statusCode == 401 {
-                creditsError = "Management key rejected. Check it in Account."
+                creditsError = "Management key rejected. Check it in Settings → Accounts & Keys."
                 isLoadingCredits = false
                 return
             }
@@ -104,7 +104,7 @@ final class AccountService: ObservableObject {
         guard let url = URL(string: "\(baseURL)/activity"),
               let request = authenticatedRequest(url: url, role: .management) else {
             activity = []
-            activityError = "Management key required. Usage history needs a management key — add one in Account. Your inference key still works for chat."
+            activityError = "Management key required. Usage history needs a management key — add one in Settings → Accounts & Keys. Your inference key still works for chat."
             return
         }
 
@@ -120,7 +120,7 @@ final class AccountService: ObservableObject {
             }
 
             if http.statusCode == 401 {
-                activityError = "Management key rejected. Check it in Account."
+                activityError = "Management key rejected. Check it in Settings → Accounts & Keys."
                 isLoadingActivity = false
                 return
             }

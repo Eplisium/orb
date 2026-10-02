@@ -37,7 +37,7 @@ struct CreateTestView: View {
                     Text("Create Custom Test")
                         .font(.system(size: 15, weight: .semibold))
                     Text("The AI agent will build a real project in its own directory")
-                        .font(.system(size: 10))
+                        .font(.system(size: 11))
                         .foregroundStyle(.secondary)
                 }
                 Spacer()
@@ -97,6 +97,8 @@ struct CreateTestView: View {
                                     .frame(width: 36, height: 36)
                                 }
                                 .buttonStyle(.plain)
+                                .accessibilityLabel("Icon: \(iconName)")
+                                .accessibilityAddTraits(icon == iconName ? .isSelected : [])
                             }
                         }
                     }
@@ -106,7 +108,7 @@ struct CreateTestView: View {
                         Text("Task Prompt")
                             .font(.system(size: 11, weight: .semibold))
                         Text("Describe what the AI should build. It will create files and run commands in its own project directory.")
-                            .font(.system(size: 9))
+                            .font(.system(size: 11))
                             .foregroundStyle(.secondary)
                         TextEditor(text: $userPrompt)
                             .font(.system(size: 12))
@@ -132,7 +134,7 @@ struct CreateTestView: View {
                         Text("Evaluation Criteria (one per line)")
                             .font(.system(size: 11, weight: .semibold))
                         Text("Optional — shown as checklist items in the test detail.")
-                            .font(.system(size: 9))
+                            .font(.system(size: 11))
                             .foregroundStyle(.secondary)
                         TextEditor(text: $notes)
                             .font(.system(size: 11))

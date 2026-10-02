@@ -45,6 +45,7 @@ struct SidebarAccountChip: View {
 
     var body: some View {
         Button {
+            SettingsPane.accounts.store()
             openSettings()
         } label: {
             HStack(spacing: 8) {

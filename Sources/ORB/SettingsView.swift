@@ -10,7 +10,10 @@ struct SettingsView: View {
     @State private var showKey = false
     @State private var showRemoveKeyConfirmation = false
     @State private var keyActionError: String?
-    @State private var pane: SettingsPane = SettingsPane.restore()
+    @AppStorage(SettingsPane.storageKey) private var paneRaw = SettingsPane.general.rawValue
+    private var pane: Binding<SettingsPane> {
+        Binding(get: { SettingsPane(rawValue: paneRaw) ?? .general }, set: { paneRaw = $0.rawValue })
+    }
     @State private var selectedTab: SettingsTab = .apiKey
     // Management key section (F03/W04). The draft lives in a small panel
     // struct so the save/remove rules are unit-testable; the configured state
@@ -33,7 +36,7 @@ struct SettingsView: View {
 
     var body: some View {
         // Native toolbar tabs (the standard macOS Settings look).
-        TabView(selection: $pane) {
+        TabView(selection: pane) {
             ForEach(SettingsPane.allCases) { item in
                 ScrollView {
                     paneContent(item)
@@ -45,7 +48,6 @@ struct SettingsView: View {
                 .tag(item)
             }
         }
-        .onChange(of: pane) { _, new in new.store() }
         .frame(minWidth: 500, minHeight: 400)
         .task {
             if KeychainManager.hasAPIKey {
@@ -650,7 +652,7 @@ struct SettingsView: View {
                             Circle().fill(Color.accentColor.opacity(0.6)).frame(width: 7, height: 7)
                             VStack(alignment: .leading, spacing: 1) {
                                 Text(provider.name).font(.system(size: 12, weight: .medium)).lineLimit(1)
-                                Text(provider.slug).font(.system(size: 10, design: .monospaced)).foregroundStyle(.tertiary).lineLimit(1)
+                                Text(provider.slug).font(.system(size: 11, design: .monospaced)).foregroundStyle(.tertiary).lineLimit(1)
                             }
                             Spacer()
                         }

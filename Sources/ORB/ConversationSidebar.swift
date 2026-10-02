@@ -40,7 +40,7 @@ struct ConversationSidebarHeader: View {
                 Text(title)
                     .font(.system(size: 14, weight: .semibold))
                 Text(subtitle)
-                    .font(.system(size: 10, weight: .medium))
+                    .font(.system(size: 11, weight: .medium))
                     .foregroundStyle(.secondary)
             }
             Spacer()
@@ -102,7 +102,7 @@ struct ConversationRow: View {
                             .foregroundStyle(isChecked ? accent : .secondary)
                     }
                     Image(systemName: icon)
-                        .font(.system(size: 10, weight: .semibold))
+                        .font(.system(size: 11, weight: .semibold))
                         .foregroundStyle(isSelected ? accent : .secondary)
                     Text(conversation.title)
                         .font(.system(size: 12, weight: isSelected ? .semibold : .medium))
@@ -122,7 +122,7 @@ struct ConversationRow: View {
                     Text("\(conversation.messages.count)")
                     Image(systemName: "bubble.left")
                 }
-                .font(.system(size: 9, weight: .medium))
+                .font(.system(size: 11, weight: .medium))
                 .foregroundStyle(.tertiary)
             }
             .padding(.horizontal, 10)
@@ -238,12 +238,12 @@ struct ConversationSidebarFooter: View {
                     .frame(width: 7, height: 7)
                     .shadow(color: statusColor.opacity(0.6), radius: 3)
                 Text(statusText)
-                    .font(.system(size: 10, weight: .medium))
+                    .font(.system(size: 11, weight: .medium))
                     .foregroundStyle(.secondary)
                 Spacer()
                 if tokensPerSecond > 0 {
                     Text("\(String(format: "%.1f", tokensPerSecond)) tok/s")
-                        .font(.system(size: 9, weight: .semibold, design: .monospaced))
+                        .font(.system(size: 11, weight: .semibold, design: .monospaced))
                         .foregroundStyle(.orange)
                         .padding(.horizontal, 6)
                         .padding(.vertical, 2)
@@ -257,7 +257,7 @@ struct ConversationSidebarFooter: View {
                     Spacer()
                     Text(formattedCost(conversation.totalCost))
                 }
-                .font(.system(size: 9, weight: .medium, design: .monospaced))
+                .font(.system(size: 11, weight: .medium, design: .monospaced))
                 .foregroundStyle(.secondary)
             }
         }

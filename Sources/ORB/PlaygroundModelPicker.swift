@@ -46,12 +46,12 @@ struct PlaygroundModelPicker: View {
                         Text("Choose a model")
                             .font(.system(size: 15, weight: .semibold))
                         Text(defaultModelId == nil ? "Favorites first, then your most recent models" : "Pin a model to use it for every new \(defaultLabel ?? "playground") session")
-                            .font(.system(size: 10))
+                            .font(.system(size: 11))
                             .foregroundStyle(.secondary)
                     }
                     Spacer()
                     Text("\(resultCount)")
-                        .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                        .font(.system(size: 11, weight: .semibold, design: .monospaced))
                         .foregroundStyle(.secondary)
                         .padding(.horizontal, 7)
                         .padding(.vertical, 4)
@@ -72,6 +72,7 @@ struct PlaygroundModelPicker: View {
                                 .foregroundStyle(.tertiary)
                         }
                         .buttonStyle(.plain)
+                        .accessibilityLabel("Clear search")
                     }
                 }
                 .padding(.horizontal, 10)
@@ -88,7 +89,7 @@ struct PlaygroundModelPicker: View {
                 if let toolCapableOnly {
                     Toggle(isOn: toolCapableOnly) {
                         Label("Only models with function calling", systemImage: "wrench.and.screwdriver")
-                            .font(.system(size: 10, weight: .medium))
+                            .font(.system(size: 11, weight: .medium))
                     }
                     .toggleStyle(.switch)
                     .controlSize(.mini)
@@ -126,7 +127,7 @@ struct PlaygroundModelPicker: View {
                                     Spacer()
                                     Text("\(section.models.count)")
                                 }
-                                .font(.system(size: 9, weight: .bold))
+                                .font(.system(size: 11, weight: .bold))
                                 .foregroundStyle(.secondary)
                                 .padding(.horizontal, 4)
                                 .padding(.vertical, 7)
@@ -164,7 +165,7 @@ struct PlaygroundModelPicker: View {
                 Image(systemName: "arrow.up.arrow.down")
                 Text("Sort: \(sortField.rawValue)")
             }
-            .font(.system(size: 10, weight: .medium))
+            .font(.system(size: 11, weight: .medium))
             .padding(.horizontal, 8)
             .padding(.vertical, 5)
             .background(Color.primary.opacity(0.05))
@@ -180,7 +181,7 @@ struct PlaygroundModelPicker: View {
             sortOrder = (sortOrder == .ascending) ? .descending : .ascending
         } label: {
             Image(systemName: sortOrder == .ascending ? "arrow.up" : "arrow.down")
-                .font(.system(size: 10, weight: .semibold))
+                .font(.system(size: 11, weight: .semibold))
                 .frame(width: 24, height: 24)
                 .background(Color.primary.opacity(0.05))
                 .clipShape(RoundedRectangle(cornerRadius: 6))
@@ -215,7 +216,7 @@ struct PlaygroundModelPicker: View {
                                 .lineLimit(1)
                             if model.isFree {
                                 Text("FREE")
-                                    .font(.system(size: 7, weight: .bold))
+                                    .font(.system(size: 11, weight: .bold))
                                     .foregroundStyle(.green)
                             }
                         }
@@ -230,7 +231,7 @@ struct PlaygroundModelPicker: View {
                                 Image(systemName: "brain")
                             }
                         }
-                        .font(.system(size: 9, weight: .medium))
+                        .font(.system(size: 11, weight: .medium))
                         .foregroundStyle(.secondary)
                     }
                     Spacer(minLength: 4)

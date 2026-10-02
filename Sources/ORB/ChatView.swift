@@ -187,12 +187,12 @@ struct ChatView: View {
     private func sidebarSectionHeader(title: String, icon: String, count: Int) -> some View {
         HStack(spacing: 6) {
             Image(systemName: icon)
-                .font(.system(size: 9, weight: .semibold))
+                .font(.system(size: 11, weight: .semibold))
                 .foregroundStyle(accent)
             Text(title.uppercased())
-                .font(.system(size: 9, weight: .bold))
+                .font(.system(size: 11, weight: .bold))
             Text("\(count)")
-                .font(.system(size: 8, weight: .bold, design: .monospaced))
+                .font(.system(size: 11, weight: .bold, design: .monospaced))
                 .foregroundStyle(.secondary)
                 .padding(.horizontal, 5)
                 .padding(.vertical, 2)
@@ -218,7 +218,7 @@ struct ChatView: View {
                     Image(systemName: "bolt.horizontal")
                     Text("Direct OpenRouter completion")
                 }
-                .font(.system(size: 10, weight: .medium))
+                .font(.system(size: 11, weight: .medium))
                 .foregroundStyle(.secondary)
             }
 
@@ -240,7 +240,7 @@ struct ChatView: View {
                         Image(systemName: "arrow.clockwise")
                         Text("Regenerate")
                     }
-                    .font(.system(size: 10, weight: .semibold))
+                    .font(.system(size: 11, weight: .semibold))
                     .foregroundStyle(accent)
                     .padding(.horizontal, 9)
                     .padding(.vertical, 6)
@@ -289,6 +289,7 @@ struct ChatView: View {
                     .clipShape(RoundedRectangle(cornerRadius: 7))
             }
             .buttonStyle(.plain)
+            .accessibilityLabel("Session settings")
             .inspector(isPresented: $showSettings) { settingsPopover.inspectorColumnWidth(min: 280, ideal: 320, max: 420) }
             .sheet(isPresented: $showAdvancedSettings) {
                 AdvancedSettingsView(accent: accent, settings: $settings)
@@ -310,10 +311,10 @@ struct ChatView: View {
                 Text(shortModelName(currentModelId))
                     .lineLimit(1)
                 Image(systemName: "chevron.down")
-                    .font(.system(size: 8, weight: .bold))
+                    .font(.system(size: 11, weight: .bold))
                     .foregroundStyle(.tertiary)
             }
-            .font(.system(size: 10, weight: .semibold))
+            .font(.system(size: 11, weight: .semibold))
             .padding(.horizontal, 9)
             .padding(.vertical, 6)
             .background(Color.primary.opacity(0.05))
@@ -413,7 +414,7 @@ struct ChatView: View {
 
             VStack(alignment: .leading, spacing: 7) {
                 Text("SYSTEM PROMPT (OPTIONAL)")
-                    .font(.system(size: 9, weight: .bold))
+                    .font(.system(size: 11, weight: .bold))
                     .foregroundStyle(.secondary)
                 TextEditor(text: Binding(
                     get: { chatService.activeConversation?.systemPrompt ?? "" },
@@ -659,7 +660,7 @@ struct ChatView: View {
                         Label(warning, systemImage: "exclamationmark.triangle")
                     }
                 }
-                .font(.system(size: 9))
+                .font(.system(size: 11))
                 .foregroundStyle(.orange)
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
@@ -725,7 +726,7 @@ struct ChatView: View {
             .dropDestination(for: URL.self) { urls, _ in handleDrop(urls) } isTargeted: { dropTargeted = $0 }
 
             Text("AI can make mistakes. Review important output.")
-                .font(.system(size: 9))
+                .font(.system(size: 11))
                 .foregroundStyle(Color.secondary)
         }
         .frame(maxWidth: 820)
@@ -762,7 +763,7 @@ struct ChatView: View {
 
     private var composerPlaceholder: String {
         if !KeychainManager.hasAPIKey {
-            return "Add your OpenRouter API key in Account…"
+            return "Add your OpenRouter API key in Settings → Accounts & Keys…"
         }
         return "Message \(shortModelName(currentModelId))…"
     }
@@ -840,7 +841,7 @@ struct ChatView: View {
         if !currentSessionRunning, runSlashCommand(messageText) { return }
         guard canSend else {
             if !KeychainManager.hasAPIKey {
-                chatService.lastError = "Add your OpenRouter API key in Account before using Chat."
+                chatService.lastError = "Add your OpenRouter API key in Settings → Accounts & Keys before using Chat."
             }
             return
         }

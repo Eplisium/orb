@@ -173,7 +173,7 @@ final class TestRunner: ObservableObject {
         }
         let projectBuild = route == .project && scenario.evaluationMode == .projectBuild
         guard let key = credential(), !key.isEmpty else {
-            return failure("No API key configured. Add one in Account.", scenario: scenario, modelID: modelID, started: started)
+            return failure("No API key configured. Add one in Settings → Accounts & Keys.", scenario: scenario, modelID: modelID, started: started)
         }
         var directory: URL?
         do {

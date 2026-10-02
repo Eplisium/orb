@@ -291,7 +291,7 @@ struct ManagementContractTests {
         for error in errors {
             #expect(error == .managementKeyRequired)
             #expect(error.errorDescription?.contains("Management key required") == true)
-            #expect(error.errorDescription?.contains("add one in Account") == true)
+            #expect(error.errorDescription?.contains("add one in Settings") == true)
         }
         #expect(errors.count == 14)
         // Not a single network call — and never with the inference key.

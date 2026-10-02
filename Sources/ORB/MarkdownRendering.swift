@@ -541,10 +541,10 @@ struct CodeBlockView: View {
         VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 6) {
                 Image(systemName: "chevron.left.forwardslash.chevron.right")
-                    .font(.system(size: 8, weight: .bold))
+                    .font(.system(size: 11, weight: .bold))
                     .foregroundStyle(accent.opacity(0.75))
                 Text((language ?? "code").lowercased())
-                    .font(.system(size: 9, weight: .semibold, design: .monospaced))
+                    .font(.system(size: 11, weight: .semibold, design: .monospaced))
                     .foregroundStyle(.secondary)
                 if isStreaming {
                     ProgressView().controlSize(.mini).scaleEffect(0.6)
@@ -553,7 +553,7 @@ struct CodeBlockView: View {
                 if isHovering || copied {
                     Button(action: copyCode) {
                         Label(copied ? "Copied" : "Copy", systemImage: copied ? "checkmark" : "doc.on.doc")
-                            .font(.system(size: 9, weight: .medium))
+                            .font(.system(size: 11, weight: .medium))
                             .foregroundStyle(copied ? Color.green : Color.secondary)
                     }
                     .buttonStyle(.plain)
@@ -586,8 +586,7 @@ struct CodeBlockView: View {
     }
 
     private func copyCode() {
-        NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(source, forType: .string)
+        AppToasts.copy(source, what: "Code")
         copied = true
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.4) { copied = false }
     }

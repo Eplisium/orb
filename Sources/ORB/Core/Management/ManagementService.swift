@@ -109,7 +109,7 @@ enum ManagementServiceError: Error, Equatable, LocalizedError {
     var errorDescription: String? {
         switch self {
         case .managementKeyRequired:
-            return "Management key required. This account operation needs a management key — add one in Account. Your inference key still works for chat."
+            return "Management key required. This account operation needs a management key — add one in Settings → Accounts & Keys. Your inference key still works for chat."
         case .managementKeyRejected(let status, let message):
             return "OpenRouter rejected the management key (HTTP \(status)). Check the key in Account, or its scopes if this specific read is not entitled. \(message)"
         case .invalidRequest(let message):

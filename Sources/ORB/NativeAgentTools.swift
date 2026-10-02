@@ -831,7 +831,7 @@ enum NativeAgentTools {
             throw ToolError.message("\(url.lastPathComponent) is not an image file.")
         }
         guard let apiKey = KeychainManager.getAPIKey(), !apiKey.isEmpty else {
-            throw ToolError.message("No OpenRouter API key configured. Add one in Account first.")
+            throw ToolError.message("No OpenRouter API key configured. Add one in Settings → Accounts & Keys first.")
         }
         let question = (arguments["question"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
         let promptText = question?.isEmpty == false ? question! : "Describe this image in detail: layout, UI elements with approximate positions, text content, and anything unusual."
@@ -953,7 +953,7 @@ enum NativeAgentTools {
             throw ToolError.missing("query")
         }
         guard let apiKey = KeychainManager.getAPIKey(), !apiKey.isEmpty else {
-            throw ToolError.message("No OpenRouter API key configured. Add one in Account first.")
+            throw ToolError.message("No OpenRouter API key configured. Add one in Settings → Accounts & Keys first.")
         }
         let count: Int = {
             guard let raw = arguments["count"] as? String, let n = Int(raw) else { return 5 }

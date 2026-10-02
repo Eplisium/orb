@@ -8,7 +8,7 @@ struct ORBSkeletonRow: View {
     @State private var phase: CGFloat = -1
 
     /// Whether the shimmer should animate. Exposed for tests.
-    static func shimmers(reduceMotion: Bool) -> Bool { !reduceMotion }
+    static func shimmers(reduceMotion: Bool) -> Bool { !ORBMotion.shouldReduce(system: reduceMotion) }
 
     var body: some View {
         HStack(spacing: ORBMetrics.spacingSM) {
@@ -28,7 +28,7 @@ struct ORBSkeletonRow: View {
         .accessibilityLabel("Loading")
         .onAppear {
             guard Self.shimmers(reduceMotion: reduceMotion) else { return }
-            withAnimation(.linear(duration: 1.4).repeatForever(autoreverses: false)) { phase = 1.5 }
+            withAnimation(ORBMotion.looping(.linear(duration: 1.4).repeatForever(autoreverses: false), system: reduceMotion)) { phase = 1.5 }
         }
     }
 
