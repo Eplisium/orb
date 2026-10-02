@@ -800,6 +800,10 @@ struct TestSuiteView: View {
                         Button("Cancel", role: .destructive) { testRunner.cancel() }
                         Text("\(testRunner.batchCompleted)/\(testRunner.batchTotal) finished · \(testRunner.runningModelId ?? "")")
                             .orbFont(size: 11).lineLimit(1)
+                        CostCeilingBar(progress: CostCeilingProgress(
+                            spent: testRunner.batchSpent, ceiling: testRunner.batchCeilingUSD,
+                            unreportedRuns: testRunner.batchUnreportedRuns))
+                            .frame(maxWidth: 260)
                     }
 
                     if !KeychainManager.hasAPIKey {

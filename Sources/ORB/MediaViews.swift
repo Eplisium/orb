@@ -176,7 +176,21 @@ struct ImagesView: View {
     private var controlsColumn: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 14) {
-                StudioHeader(title: "Images", subtitle: "Text-to-image generation", icon: "photo.fill", accent: accent)
+                StudioHeader(title: "Images", subtitle: "Text-to-image generation", icon: "photo.fill", accent: accent) {
+                    StudioPresetMenu(
+                        studio: .images,
+                        snapshot: {
+                            StudioPreset.imageSettings(model: selectedModelId, count: imageCount, aspect: aspectRatio,
+                                                       resolution: resolution, quality: quality, provider: selectedProviderSlug)
+                        },
+                        apply: { preset in
+                            let v = ImagePresetValues(preset, maxCount: Self.maxImagesPerRun)
+                            if !v.model.isEmpty { selectedModelId = v.model }
+                            imageCount = v.count; aspectRatio = v.aspect
+                            resolution = v.resolution; quality = v.quality
+                            selectedProviderSlug = v.provider
+                        })
+                }
 
             modelPicker
             if !endpoints.isEmpty {
@@ -755,7 +769,20 @@ struct VideoView: View {
     private var controlsColumn: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 14) {
-                StudioHeader(title: "Video", subtitle: "Text-to-video generation", icon: "video.fill", accent: accent)
+                StudioHeader(title: "Video", subtitle: "Text-to-video generation", icon: "video.fill", accent: accent) {
+                    StudioPresetMenu(
+                        studio: .video,
+                        snapshot: {
+                            StudioPreset.videoSettings(model: selectedModelId, aspect: aspectRatio, resolution: resolution,
+                                                       duration: durationText, size: size, audio: generateAudio)
+                        },
+                        apply: { preset in
+                            let v = VideoPresetValues(preset)
+                            if !v.model.isEmpty { selectedModelId = v.model }
+                            aspectRatio = v.aspect; resolution = v.resolution
+                            durationText = v.duration; size = v.size; generateAudio = v.generateAudio
+                        })
+                }
 
             VStack(alignment: .leading, spacing: 6) {
                 StudioLabel("Model")

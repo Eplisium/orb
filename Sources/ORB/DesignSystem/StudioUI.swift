@@ -5,11 +5,17 @@ import SwiftUI
 /// identical across studios and lets option grids flex to the column width
 /// instead of clipping fixed-size pickers.
 
-struct StudioHeader: View {
+struct StudioHeader<Trailing: View>: View {
     let title: String
     let subtitle: String
     let icon: String
     let accent: Color
+    @ViewBuilder var trailing: Trailing
+
+    init(title: String, subtitle: String, icon: String, accent: Color, @ViewBuilder trailing: () -> Trailing) {
+        self.title = title; self.subtitle = subtitle; self.icon = icon; self.accent = accent
+        self.trailing = trailing()
+    }
 
     var body: some View {
         HStack(spacing: ORBMetrics.spacingSM) {
@@ -24,7 +30,14 @@ struct StudioHeader: View {
                 Text(subtitle).font(ORBFont.caption).foregroundStyle(ORBTheme.textSecondary)
             }
             Spacer(minLength: 0)
+            trailing
         }
+    }
+}
+
+extension StudioHeader where Trailing == EmptyView {
+    init(title: String, subtitle: String, icon: String, accent: Color) {
+        self.init(title: title, subtitle: subtitle, icon: icon, accent: accent) { EmptyView() }
     }
 }
 
@@ -138,12 +151,17 @@ struct StudioPrimaryButton: View {
 
 /// Small pill button for secondary actions (Add, Choose, Export…).
 struct StudioChipButtonStyle: ButtonStyle {
+    var isSelected = false
+    var accent: Color = ORBTheme.accent
+
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
-            .font(ORBFont.caption.weight(.medium))
+            .font(ORBFont.caption.weight(isSelected ? .semibold : .medium))
             .foregroundStyle(ORBTheme.textPrimary)
             .padding(.horizontal, 10).padding(.vertical, 5)
-            .background(Color.primary.opacity(configuration.isPressed ? 0.12 : 0.06), in: Capsule())
+            .background(isSelected ? accent.opacity(0.18) : Color.primary.opacity(configuration.isPressed ? 0.12 : 0.06), in: Capsule())
+            // A ring as well as a tint, so selection is not colour alone.
+            .overlay(Capsule().stroke(isSelected ? accent : .clear, lineWidth: 1.5))
     }
 }
 

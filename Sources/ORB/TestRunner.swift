@@ -54,6 +54,10 @@ final class TestRunner: ObservableObject {
     @Published var runningModelId: String?
     @Published var batchCompleted = 0
     @Published var batchTotal = 0
+    /// Known spend and the active ceiling for the current batch, for the progress bar.
+    @Published var batchSpent = 0.0
+    @Published var batchCeilingUSD: Double?
+    @Published var batchUnreportedRuns = 0
     @Published var batchNotice: String?
 
     typealias AgentRun = (String, String, String, URL, String, @escaping @MainActor (String) -> Void) async throws -> NativeAgentRunResult
@@ -117,6 +121,9 @@ final class TestRunner: ObservableObject {
         runningScenarioId = scenario.id
         batchCompleted = 0
         batchTotal = ids.count
+        batchSpent = 0
+        batchUnreportedRuns = 0
+        batchCeilingUSD = ceilingUSD
         let prompt = TestPromptComposer.compose(base: scenario.userPrompt, userInput: userInput)
         activeTask = Task { [weak self] in
             guard let self else { return }
@@ -137,10 +144,12 @@ final class TestRunner: ObservableObject {
                 if Task.isCancelled || self.cancellationRequested { break }
                 if ceilingUSD != nil {
                     guard let cost = self.reportedCostForLastRun else {
+                        self.batchUnreportedRuns += 1
                         self.batchNotice = "Provider did not report cost; remaining models skipped."
                         break
                     }
                     spent += cost
+                    self.batchSpent = spent
                 }
             }
             self.runningModelId = nil

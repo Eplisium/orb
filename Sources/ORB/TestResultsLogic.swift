@@ -241,3 +241,83 @@ struct TestResultsTableView: View {
         }
     }
 }
+
+// MARK: - Spend ceiling progress
+
+struct CostCeilingProgress: Equatable {
+    enum State: CaseIterable, Equatable {
+        case ok, near, reached
+
+        var symbol: String {
+            switch self {
+            case .ok: return "gauge.with.dots.needle.33percent"
+            case .near: return "exclamationmark.triangle"
+            case .reached: return "octagon"
+            }
+        }
+
+        var label: String {
+            switch self {
+            case .ok: return "Within limit"
+            case .near: return "Close to limit"
+            case .reached: return "Limit reached"
+            }
+        }
+    }
+
+    let spent: Double
+    let ceiling: Double?
+    var unreportedRuns = 0
+
+    private var validCeiling: Double? {
+        guard let ceiling, ceiling.isFinite, ceiling > 0 else { return nil }
+        return ceiling
+    }
+
+    var fraction: Double? { validCeiling.map { min(max(spent / $0, 0), 1) } }
+
+    var state: State {
+        guard let c = validCeiling else { return .ok }
+        if spent >= c { return .reached }
+        return spent / c >= 0.8 ? .near : .ok
+    }
+
+    var text: String {
+        guard let c = validCeiling else { return "No spend limit" }
+        let floor = unreportedRuns > 0 ? "≥ " : ""
+        var line = "\(floor)\(Self.money(spent)) of \(Self.money(c)) limit"
+        if spent > c { line += " (over: one request can exceed the limit)" }
+        return line
+    }
+
+    /// Limits are small, so amounts under ten cents keep four decimals.
+    private static func money(_ v: Double) -> String {
+        v > 0 && v < 0.1 ? String(format: "$%.4f", v) : String(format: "$%.2f", v)
+    }
+
+    var accessibilityValue: String {
+        guard let f = fraction else { return "No spend limit" }
+        return "\(Int((f * 100).rounded())) percent of the spend limit"
+    }
+}
+
+struct CostCeilingBar: View {
+    let progress: CostCeilingProgress
+
+    var body: some View {
+        if let fraction = progress.fraction {
+            VStack(alignment: .leading, spacing: 3) {
+                HStack(spacing: 6) {
+                    Label(progress.state.label, systemImage: progress.state.symbol)
+                        .font(ORBFont.caption.weight(.semibold))
+                    Text(progress.text).font(ORBFont.caption.monospacedDigit()).foregroundStyle(.secondary)
+                }
+                ProgressView(value: fraction)
+                    .tint(progress.state == .ok ? ORBTheme.accent : (progress.state == .near ? ORBTheme.warning : ORBTheme.danger))
+            }
+            .accessibilityElement(children: .combine)
+            .accessibilityLabel("Spend limit")
+            .accessibilityValue(progress.accessibilityValue)
+        }
+    }
+}
