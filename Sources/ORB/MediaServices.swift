@@ -468,3 +468,39 @@ final class DirectoryService: ObservableObject {
         }
     }
 }
+
+// MARK: - Local file size preflight
+
+/// Checks a local file's size from metadata before any bytes are read, so a
+/// huge pick fails fast instead of being loaded into memory first.
+enum LocalFilePreflight {
+    /// Largest audio file ORB will send for transcription. Above 25 MB the
+    /// request is base64 JSON (~1.33× in memory), so cap it well below the
+    /// point where a single request would hold hundreds of MB.
+    static let maxTranscriptionBytes = 100 * 1024 * 1024
+
+    /// Size in bytes from `fileSizeKey` (no read). Throws for directories or
+    /// unreadable metadata.
+    static func size(of url: URL) throws -> Int {
+        let values = try url.resourceValues(forKeys: [.fileSizeKey, .isDirectoryKey, .isRegularFileKey])
+        guard values.isDirectory != true, let size = values.fileSize else {
+            throw MediaServiceError.invalidUpload("\"\(url.lastPathComponent)\" is not a regular file.")
+        }
+        return size
+    }
+
+    /// Validates the size against `limit` (and non-empty) without reading.
+    @discardableResult
+    static func check(_ url: URL, limit: Int, purpose: String) throws -> Int {
+        let bytes = try size(of: url)
+        guard bytes > 0 else {
+            throw MediaServiceError.invalidUpload("\"\(url.lastPathComponent)\" is empty.")
+        }
+        guard bytes <= limit else {
+            let fmt = ByteCountFormatter.string(fromByteCount: Int64(bytes), countStyle: .file)
+            let max = ByteCountFormatter.string(fromByteCount: Int64(limit), countStyle: .file)
+            throw MediaServiceError.invalidUpload("\"\(url.lastPathComponent)\" is \(fmt), over the \(max) \(purpose) limit.")
+        }
+        return bytes
+    }
+}

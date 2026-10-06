@@ -208,7 +208,7 @@ struct SpeechView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 14) {
                 modelField(choices: transcriptionModels)
-                Text("Files above 25 MB use base64 JSON upload; smaller files use multipart.").font(.caption2).foregroundStyle(.secondary)
+                Text("Up to 100 MB. Files above 25 MB use base64 JSON upload; smaller files use multipart.").font(.caption2).foregroundStyle(.secondary)
                 StudioCard(title: "Options") {
                     StudioField("Language (ISO-639-1, optional)") {
                         TextField("auto-detect", text: $language).textFieldStyle(.roundedBorder)
@@ -323,6 +323,7 @@ struct SpeechView: View {
             do {
                 let scoped = url.startAccessingSecurityScopedResource()
                 defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+                try LocalFilePreflight.check(url, limit: LocalFilePreflight.maxTranscriptionBytes, purpose: "transcription")
                 let data = try Data(contentsOf: url)
                 let mime = (try? url.resourceValues(forKeys: [.contentTypeKey]).contentType?.preferredMIMEType)
                     ?? "audio/wav"

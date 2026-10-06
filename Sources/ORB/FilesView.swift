@@ -202,6 +202,8 @@ struct FilesView: View {
                     do {
                         let scoped = url.startAccessingSecurityScopedResource()
                         defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+                        // Size from metadata first: never read an oversized file.
+                        try LocalFilePreflight.check(url, limit: FileService.maxUploadBytes, purpose: "upload")
                         let data = try Data(contentsOf: url)
                         let mime = (try? url.resourceValues(forKeys: [.contentTypeKey]).contentType?.preferredMIMEType)
                             ?? "application/octet-stream"

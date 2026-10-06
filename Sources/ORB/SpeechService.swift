@@ -171,6 +171,9 @@ final class SpeechService: ObservableObject {
         guard request.timestampGranularities?.allSatisfy({ ["word", "segment"].contains($0) }) ?? true else {
             throw MediaServiceError.invalidUpload("Timestamp granularity must be word or segment.")
         }
+        guard request.audioData.count <= LocalFilePreflight.maxTranscriptionBytes else {
+            throw MediaServiceError.invalidUpload("\"\(request.filename)\" exceeds the 100 MB transcription limit.")
+        }
         isWorking = true
         defer { isWorking = false }
         if TranscriptionRequest.usesJSONInputAudio(byteCount: request.audioData.count) {
