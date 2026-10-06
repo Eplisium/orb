@@ -194,6 +194,44 @@ open class MediaTransport: @unchecked Sendable {
         return (data, http.value(forHTTPHeaderField: "Content-Type"))
     }
 
+    /// Streams a download straight to a temporary file instead of holding
+    /// the whole body in memory (videos can be hundreds of MB). The caller
+    /// owns the returned file and must move or delete it.
+    open func downloadToFile(_ request: URLRequest) async throws -> (URL, String?) {
+        let (location, response): (URL, URLResponse)
+        do {
+            (location, response) = try await session.download(for: request)
+        } catch let error as URLError where error.code == .cancelled {
+            throw CancellationError()
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            throw MediaServiceError.transport(error.localizedDescription)
+        }
+        // Take ownership immediately in a location ORB controls.
+        let owned = FileManager.default.temporaryDirectory
+            .appendingPathComponent("orb-download-\(UUID().uuidString)", isDirectory: false)
+        do {
+            try FileManager.default.moveItem(at: location, to: owned)
+        } catch {
+            try? FileManager.default.removeItem(at: location)
+            throw MediaServiceError.transport("Could not keep the download: \(error.localizedDescription)")
+        }
+        guard let http = response as? HTTPURLResponse else {
+            try? FileManager.default.removeItem(at: owned)
+            throw MediaServiceError.transport("Invalid response from OpenRouter.")
+        }
+        guard (200..<300).contains(http.statusCode) else {
+            let head = (try? FileHandle(forReadingFrom: owned)).flatMap { handle -> Data? in
+                defer { try? handle.close() }
+                return try? handle.read(upToCount: 4096)
+            } ?? Data()
+            try? FileManager.default.removeItem(at: owned)
+            throw MediaServiceError.http(status: http.statusCode, message: Self.errorMessage(from: head))
+        }
+        return (owned, http.value(forHTTPHeaderField: "Content-Type"))
+    }
+
     private static func errorMessage(from data: Data) -> String {
         if let envelope = try? JSONDecoder().decode(MediaErrorEnvelope.self, from: data) {
             return envelope.error.message
@@ -227,6 +265,17 @@ enum MediaServiceError: Error, LocalizedError, Equatable {
     /// A durable job record cannot be resumed (no remote ID, or already
     /// terminal).
     case resumeUnavailable(String)
+
+    /// Worth retrying on the next poll: network failures, server errors
+    /// (5xx), and rate limits (429). Auth, validation, decoding, and URL
+    /// policy failures are not — retrying cannot fix them.
+    var isTransient: Bool {
+        switch self {
+        case .transport: return true
+        case .http(let status, _): return status == 429 || (500...599).contains(status)
+        default: return false
+        }
+    }
 
     var errorDescription: String? {
         switch self {

@@ -179,7 +179,7 @@ final class DatabaseManager {
         }
     }
 
-    private func execChecked(_ sql: String) throws {
+    func execChecked(_ sql: String) throws {
         guard let db else { throw DatabaseManagerError.notAvailable }
         var error: UnsafeMutablePointer<CChar>?
         guard sqlite3_exec(db, sql, nil, nil, &error) == SQLITE_OK else {
@@ -189,11 +189,11 @@ final class DatabaseManager {
         }
     }
 
-    private func currentError() -> String {
+    func currentError() -> String {
         db.map { String(cString: sqlite3_errmsg($0)) } ?? "database is unavailable"
     }
 
-    private func requireDone(_ statement: OpaquePointer?) throws {
+    func requireDone(_ statement: OpaquePointer?) throws {
         guard sqlite3_step(statement) == SQLITE_DONE else {
             throw DatabaseManagerError.operationFailed(currentError())
         }
@@ -390,6 +390,8 @@ final class DatabaseManager {
             );
             """)
             try execChecked("CREATE INDEX IF NOT EXISTS idx_usage_events_ts ON usage_events(timestamp);")
+            // Media columns (jobs.prompt / jobs.saved_creation_id); additive, no version bump.
+            try migrateMediaColumns()
             try execChecked("PRAGMA user_version=6;")
         } catch {
             // A failed migration must never take the app down. Back up the
@@ -418,7 +420,7 @@ final class DatabaseManager {
         }
     }
 
-    private func addColumnIfMissing(table: String, column: String, definition: String) throws {
+    func addColumnIfMissing(table: String, column: String, definition: String) throws {
         guard !columnExists(table: table, column: column) else { return }
         try execChecked("ALTER TABLE \(table) ADD COLUMN \(column) \(definition);")
     }
@@ -432,7 +434,7 @@ final class DatabaseManager {
         return false
     }
 
-    private func prepare(_ sql: String) -> OpaquePointer? {
+    func prepare(_ sql: String) -> OpaquePointer? {
         guard let db else { return nil }
         var stmt: OpaquePointer?
         if sqlite3_prepare_v2(db, sql, -1, &stmt, nil) != SQLITE_OK {
@@ -1362,14 +1364,14 @@ final class DatabaseManager {
 
     // MARK: - Helpers
 
-    private func columnTextOrNil(_ stmt: OpaquePointer, _ index: Int32) -> String? {
+    func columnTextOrNil(_ stmt: OpaquePointer, _ index: Int32) -> String? {
         if index < 0 { return nil }
         if sqlite3_column_type(stmt, index) == SQLITE_NULL { return nil }
         guard let cStr = sqlite3_column_text(stmt, index) else { return nil }
         return String(cString: cStr)
     }
 
-    private func columnDoubleOrNil(_ stmt: OpaquePointer, _ index: Int32) -> Double? {
+    func columnDoubleOrNil(_ stmt: OpaquePointer, _ index: Int32) -> Double? {
         guard index >= 0, sqlite3_column_type(stmt, index) != SQLITE_NULL else { return nil }
         return sqlite3_column_double(stmt, index)
     }

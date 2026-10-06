@@ -107,10 +107,7 @@ final class AssetStore {
             guard existing.relativePath == Self.relativePath(forChecksum: checksum, mimeType: existing.mimeType) else {
                 throw AssetStoreError.invalidPath(existing.relativePath)
             }
-            let stored = try await self.data(for: existing)
-            guard stored.count == existing.sizeBytes else {
-                throw AssetStoreError.corrupt(relativePath: existing.relativePath)
-            }
+            try verifyStoredFile(existing)
             return existing
         }
 
@@ -130,7 +127,7 @@ final class AssetStore {
                 // its bytes actually match the content-addressed filename.
                 _ = try await self.data(atRelativePath: relativePath, expectedChecksum: checksum)
                 return try recordStoredAsset(
-                    data: data, relativePath: relativePath, mimeType: mimeType,
+                    sizeBytes: data.count, checksum: checksum, relativePath: relativePath, mimeType: mimeType,
                     remoteReference: remoteReference, jobID: jobID, messageID: messageID
                 )
             }
@@ -147,7 +144,7 @@ final class AssetStore {
                 throw error
             }
             return try recordStoredAsset(
-                data: data, relativePath: relativePath, mimeType: mimeType,
+                sizeBytes: data.count, checksum: checksum, relativePath: relativePath, mimeType: mimeType,
                 remoteReference: remoteReference, jobID: jobID, messageID: messageID
             )
         } catch let error as AssetStoreError {
@@ -157,8 +154,88 @@ final class AssetStore {
         }
     }
 
+    /// Stores a file that is already on disk (e.g. a streamed video
+    /// download) without loading it into memory: the checksum is computed
+    /// in fixed-size chunks and the file is MOVED into the library. The
+    /// source file is consumed on success and on dedupe; on failure it is
+    /// left in place so the caller can retry or export it.
+    @discardableResult
+    func store(
+        fileAt source: URL,
+        mimeType: String? = nil,
+        remoteReference: String? = nil,
+        jobID: UUID? = nil,
+        messageID: UUID? = nil
+    ) async throws -> AssetRecord {
+        let checksum: String
+        let size: Int
+        do {
+            checksum = try Self.sha256Hex(fileAt: source)
+            size = (try FileManager.default.attributesOfItem(atPath: source.path)[.size] as? NSNumber)?.intValue ?? 0
+        } catch {
+            throw AssetStoreError.storageFailure(error.localizedDescription)
+        }
+        if let existing = database.findAssetRecord(checksum: checksum) {
+            guard existing.relativePath == Self.relativePath(forChecksum: checksum, mimeType: existing.mimeType) else {
+                throw AssetStoreError.invalidPath(existing.relativePath)
+            }
+            try verifyStoredFile(existing)
+            try? FileManager.default.removeItem(at: source)
+            return existing
+        }
+        let relativePath = Self.relativePath(forChecksum: checksum, mimeType: mimeType)
+        do {
+            let finalURL = try resolvedURL(forRelativePath: relativePath)
+            try FileManager.default.createDirectory(
+                at: finalURL.deletingLastPathComponent(), withIntermediateDirectories: true
+            )
+            _ = try resolvedURL(forRelativePath: relativePath)
+            if FileManager.default.fileExists(atPath: finalURL.path) {
+                guard try Self.sha256Hex(fileAt: finalURL) == checksum else {
+                    throw AssetStoreError.corrupt(relativePath: relativePath)
+                }
+                try? FileManager.default.removeItem(at: source)
+            } else {
+                // Move into the shard under a temporary name first (a copy when
+                // crossing volumes), then rename atomically into place.
+                let temporaryURL = finalURL.deletingLastPathComponent().appendingPathComponent(
+                    ".tmp-\(UUID().uuidString)", isDirectory: false
+                )
+                try FileManager.default.moveItem(at: source, to: temporaryURL)
+                do {
+                    _ = try resolvedURL(forRelativePath: relativePath)
+                    try FileManager.default.moveItem(at: temporaryURL, to: finalURL)
+                } catch {
+                    // Hand the bytes back to the caller rather than losing them.
+                    try? FileManager.default.moveItem(at: temporaryURL, to: source)
+                    throw error
+                }
+            }
+            return try recordStoredAsset(
+                sizeBytes: size, checksum: checksum, relativePath: relativePath, mimeType: mimeType,
+                remoteReference: remoteReference, jobID: jobID, messageID: messageID
+            )
+        } catch let error as AssetStoreError {
+            throw error
+        } catch {
+            throw AssetStoreError.storageFailure(error.localizedDescription)
+        }
+    }
+
+    /// Streams the stored file through SHA-256 (no full read into memory).
+    private func verifyStoredFile(_ record: AssetRecord) throws {
+        let url = try fileURL(forRelativePath: record.relativePath)
+        let actual: String
+        do { actual = try Self.sha256Hex(fileAt: url) }
+        catch { throw AssetStoreError.storageFailure(error.localizedDescription) }
+        guard actual == record.checksum else {
+            throw AssetStoreError.corrupt(relativePath: record.relativePath)
+        }
+    }
+
     private func recordStoredAsset(
-        data: Data,
+        sizeBytes: Int,
+        checksum: String,
         relativePath: String,
         mimeType: String?,
         remoteReference: String?,
@@ -170,8 +247,8 @@ final class AssetStore {
             relativePath: relativePath,
             remoteReference: remoteReference,
             mimeType: mimeType,
-            sizeBytes: data.count,
-            checksum: Self.sha256Hex(data),
+            sizeBytes: sizeBytes,
+            checksum: checksum,
             jobID: jobID,
             messageID: messageID,
             retention: .keep,
@@ -191,6 +268,18 @@ final class AssetStore {
     /// surface as recoverable `AssetStoreError`s, never raw file errors.
     func data(for record: AssetRecord) async throws -> Data {
         try await data(atRelativePath: record.relativePath, expectedChecksum: record.checksum)
+    }
+
+    /// Validated on-disk location of a stored asset, without reading or
+    /// hashing it — for export (copyItem), drag-out, Quick Look, and
+    /// thumbnails. Same containment/symlink rules as reads; throws
+    /// `.missing` when the file is gone.
+    func fileURL(forRelativePath relativePath: String) throws -> URL {
+        let url = try resolvedURL(forRelativePath: relativePath)
+        guard FileManager.default.fileExists(atPath: url.path) else {
+            throw AssetStoreError.missing(relativePath: relativePath)
+        }
+        return url
     }
 
     func data(atRelativePath relativePath: String) async throws -> Data {
@@ -246,6 +335,20 @@ final class AssetStore {
 
     static func sha256Hex(_ data: Data) -> String {
         SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+    }
+
+    /// SHA-256 of a file computed in 1 MiB chunks, so large media never has
+    /// to be resident in memory. Equal to `sha256Hex(Data(contentsOf:))`.
+    static func sha256Hex(fileAt url: URL, chunkSize: Int = 1 << 20) throws -> String {
+        let handle = try FileHandle(forReadingFrom: url)
+        defer { try? handle.close() }
+        var hasher = SHA256()
+        while true {
+            let chunk = try autoreleasepool { try handle.read(upToCount: chunkSize) }
+            guard let chunk, !chunk.isEmpty else { break }
+            hasher.update(data: chunk)
+        }
+        return hasher.finalize().map { String(format: "%02x", $0) }.joined()
     }
 
     private static func fileExtension(forMimeType mimeType: String?) -> String? {

@@ -21,8 +21,6 @@ struct VideoView: View {
     @StudioState("VideoView.errorMessage") private var errorMessage: String? = nil
     @StudioState("VideoView.jobs") private var jobs: [VideoJobRecord] = []
     @StudioState("VideoView.totalCost") private var totalCost = 0.0
-    @StudioState("VideoView.videoBytes") private var videoBytes: [String: Data] = [:]
-    @StudioState("VideoView.videoMIMEs") private var videoMIMEs: [String: String] = [:]
     @StudioState("VideoView.savedVideos") private var savedVideos: [String: SavedCreation] = [:]
     @StudioState("VideoView.downloadErrors") private var downloadErrors: [String: String] = [:]
     @StudioState("VideoView.downloading") private var downloading: Set<String> = []
@@ -30,6 +28,8 @@ struct VideoView: View {
     // Durable jobs that can be resumed (W09 step 3). Refreshed on appear and
     // whenever the service's active job changes (poll ticks, terminal states).
     @StudioState("VideoView.resumableRecords") private var resumableRecords: [JobRecord] = []
+    // Finished jobs whose video was never saved (e.g. app quit mid-download).
+    @StudioState("VideoView.downloadableRecords") private var downloadableRecords: [JobRecord] = []
 
     private let accent = ORBTheme.accent
 
@@ -70,7 +70,12 @@ struct VideoView: View {
 
     private func refreshResumableRecords() {
         resumableRecords = service.resumableRecords
+        downloadableRecords = service.downloadableRecords
     }
+
+    /// Placeholder prompt for rows whose durable record predates prompt storage.
+    private static let unknownPrompt = "(resumed from a previous session)"
+
 
     private var controlsColumn: some View {
         ScrollView {
@@ -181,13 +186,13 @@ struct VideoView: View {
 
             Spacer()
 
-            if let job = service.activeJob, !job.isTerminal,
-               resumableRecords.contains(where: { $0.remoteID == job.id && service.isRunInFlight(for: $0) }) {
+            if !service.inFlightRemoteIDs.isEmpty {
                 HStack(spacing: 8) {
                     ProgressView().controlSize(.small)
-                    Text("Job \(job.status)… polling every 5s")
+                    Text(service.inFlightRemoteIDs.count == 1 ? "1 job polling every 5s"
+                         : "\(service.inFlightRemoteIDs.count) jobs polling every 5s")
                         .font(.caption).foregroundStyle(.secondary)
-                    Button("Stop polling") {
+                    Button("Stop all") {
                         service.stopPolling()
                         refreshResumableRecords()
                     }.font(.caption)
@@ -266,7 +271,17 @@ struct VideoView: View {
             JobTrayButton(
                 reload: { service.allJobRecords },
                 onResume: { resumeDurable($0) },
-                onStop: { _ in service.stopPolling() }
+                onStop: { record in
+                    if let remoteID = record.remoteID { service.stopPolling(remoteID: remoteID) }
+                    refreshResumableRecords()
+                },
+                onDownload: { record in Task { await downloadDurable(record) } },
+                onOpen: { record in
+                    if let id = record.savedCreationID, let creation = saved.creations.first(where: { $0.id == id }) {
+                        CreationActions.reveal(creation, in: saved)
+                    }
+                },
+                isDownloading: { record in record.remoteID.map { service.downloadingRemoteIDs.contains($0) } ?? false }
             )
             .padding(.horizontal, 14).padding(.top, 10)
             jobsColumnBody
@@ -275,7 +290,8 @@ struct VideoView: View {
 
     private var jobsColumnBody: some View {
         Group {
-            if jobs.isEmpty && resumableRecords.isEmpty && saved.creations.allSatisfy({ $0.kind != .video })
+            if jobs.isEmpty && resumableRecords.isEmpty && downloadableRecords.isEmpty
+                && saved.creations.allSatisfy({ $0.kind != .video })
                 && service.durablePersistenceError == nil {
                 VStack(spacing: 14) {
                     ZStack {
@@ -324,6 +340,16 @@ struct VideoView: View {
     /// restarts the owned poll loop — never a new submission.
     @ViewBuilder
     private var durableJobsSection: some View {
+        if !downloadableRecords.isEmpty {
+            VStack(alignment: .leading, spacing: 8) {
+                Text("FINISHED, NOT SAVED")
+                    .orbFont(size: 11, weight: .bold)
+                    .foregroundStyle(.secondary)
+                ForEach(downloadableRecords) { record in
+                    downloadableRow(record)
+                }
+            }
+        }
         if !resumableRecords.isEmpty || service.durablePersistenceError != nil {
             VStack(alignment: .leading, spacing: 8) {
                 Text("RECOVERABLE JOBS")
@@ -377,6 +403,54 @@ struct VideoView: View {
         .accessibilityElement(children: .combine)
     }
 
+    private func downloadableRow(_ record: JobRecord) -> some View {
+        let busy = record.remoteID.map { service.downloadingRemoteIDs.contains($0) } ?? false
+        return HStack(alignment: .top, spacing: 8) {
+            VStack(alignment: .leading, spacing: 3) {
+                HStack(spacing: 6) {
+                    ORBStatusPill(status: .complete)
+                    Text(record.modelID ?? "video").font(.caption.monospacedDigit()).lineLimit(1)
+                }
+                if let prompt = record.prompt { Text(prompt).font(.caption).lineLimit(2) }
+                Text("Finished \(JobTray.ageText(from: record.updatedAt)) · the provider may expire it, so download soon.")
+                    .font(.caption2).foregroundStyle(.tertiary)
+                if let remoteID = record.remoteID, let failure = downloadErrors[remoteID] {
+                    Text("Not saved: \(failure)").font(.caption2).foregroundStyle(.orange)
+                }
+            }
+            Spacer()
+            if busy {
+                ProgressView().controlSize(.small)
+            } else {
+                Button {
+                    Task { await downloadDurable(record) }
+                } label: {
+                    Label("Download", systemImage: "arrow.down.circle").font(.caption.weight(.medium))
+                }
+                .buttonStyle(.bordered).controlSize(.small)
+                .disabled(!KeychainManager.hasAPIKey)
+            }
+        }
+        .padding(10)
+        .background(.orbSurface(0.03))
+        .clipShape(RoundedRectangle(cornerRadius: 10))
+        .accessibilityElement(children: .combine)
+    }
+
+    /// Downloads and saves a finished durable job exactly once.
+    private func downloadDurable(_ record: JobRecord) async {
+        guard let remoteID = record.remoteID else { return }
+        do {
+            let creation = try await service.downloadAndSave(remoteID: remoteID, store: saved)
+            downloadErrors[remoteID] = nil
+            for row in jobs where row.job.id == remoteID { savedVideos[row.id] = creation }
+        } catch is CancellationError {
+        } catch {
+            downloadErrors[remoteID] = error.localizedDescription
+        }
+        refreshResumableRecords()
+    }
+
     /// Resumes a durable record through the service, routing poll updates into
     /// the same job-row update path the submit flow uses.
     private func resumeDurable(_ record: JobRecord) {
@@ -390,8 +464,7 @@ struct VideoView: View {
                     id: record.remoteID ?? "",
                     status: record.lastRemoteStatus ?? "queued"
                 ),
-                // Durable records do not carry the original prompt.
-                prompt: "(resumed from a previous session)",
+                prompt: record.prompt ?? Self.unknownPrompt,
                 modelId: record.modelID ?? "video"
             ), at: 0)
         }
@@ -414,6 +487,7 @@ struct VideoView: View {
             } catch {
                 errorMessage = error.localizedDescription
             }
+            refreshResumableRecords()
         }
     }
 
@@ -431,12 +505,15 @@ struct VideoView: View {
             }
             if record.job.isSuccess {
                 HStack(spacing: 8) {
-                    if downloading.contains(record.id) { ProgressView().controlSize(.small); Text("Saving in ORB…") }
+                    if downloading.contains(record.id) || service.downloadingRemoteIDs.contains(record.job.id) {
+                        ProgressView().controlSize(.small); Text("Saving in ORB…")
+                    }
                     else if savedVideos[record.id] != nil { Label("Saved in ORB", systemImage: "checkmark.circle.fill").foregroundStyle(.green) }
-                    else { Button(videoBytes[record.id] == nil ? "Download & save" : "Retry save") { Task { await keepVideo(record.id) } } }
+                    else { Button("Download & save") { Task { await keepVideo(record.id) } } }
                     Spacer()
-                    if videoBytes[record.id] != nil || savedVideos[record.id] != nil {
-                        Button("Export…") { exportVideo(record.id) }
+                    if let creation = savedVideos[record.id] {
+                        CreationActionsMenu(creation: creation, store: saved) { errorMessage = $0 }
+                        Button("Export…") { exportSaved(creation) }
                     }
                 }
                 if let failure = downloadErrors[record.id] {
@@ -447,8 +524,17 @@ struct VideoView: View {
                     .font(.caption).foregroundStyle(.orange)
             } else if !record.job.isTerminal {
                 HStack(spacing: 8) {
-                    ProgressView().controlSize(.small)
-                    Text("Polling… status: \(record.job.status)").font(.caption).foregroundStyle(.secondary)
+                    if service.inFlightRemoteIDs.contains(record.job.id) {
+                        ProgressView().controlSize(.small)
+                        Text("Polling… status: \(record.job.status)").font(.caption).foregroundStyle(.secondary)
+                        Spacer()
+                        Button("Stop checking") {
+                            service.stopPolling(remoteID: record.job.id)
+                            refreshResumableRecords()
+                        }.font(.caption)
+                    } else {
+                        Text("Not being checked · last status: \(record.job.status)").font(.caption).foregroundStyle(.secondary)
+                    }
                 }
             } else if let error = record.job.error {
                 Text(error).font(.caption).foregroundStyle(.red)
@@ -564,46 +650,29 @@ struct VideoView: View {
         }
     }
 
+    /// Downloads (streamed to disk) and saves a finished row's video once.
     private func keepVideo(_ id: String) async {
         guard savedVideos[id] == nil, !downloading.contains(id),
               let record = jobs.first(where: { $0.id == id }), record.job.isSuccess else { return }
         downloading.insert(id)
         defer { downloading.remove(id) }
         do {
-            if videoBytes[id] == nil {
-                let (data, contentType) = try await service.download(record.job)
-                let mime = contentType?.components(separatedBy: ";").first?
-                    .trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ?? "video/mp4"
-                guard mime == "video/mp4" || mime == "video/webm" || mime == "video/quicktime" else {
-                    throw MediaServiceError.decoding("The download was not a supported video (\(mime)).")
-                }
-                videoBytes[id] = data
-                videoMIMEs[id] = mime
-            }
-            guard let data = videoBytes[id] else { return }
-            let creation = try await saved.save(data, mimeType: videoMIMEs[id] ?? "video/mp4", kind: .video,
-                modelID: record.modelId,
-                prompt: record.prompt == "(resumed from a previous session)" ? nil : record.prompt)
+            let creation = try await service.downloadAndSave(remoteID: record.job.id, store: saved)
             savedVideos[id] = creation
             downloadErrors[id] = nil
+        } catch is CancellationError {
         } catch { downloadErrors[id] = error.localizedDescription }
+        refreshResumableRecords()
     }
 
-    private func exportVideo(_ id: String) {
-        guard let data = videoBytes[id] else {
-            if let creation = savedVideos[id] { exportSaved(creation) }
-            return
-        }
-        export(data, filename: "orb-video.\(videoExtension(videoMIMEs[id] ?? "video/mp4"))")
-    }
-
+    /// Exports by copying the stored file — never re-reading it into memory.
     private func exportSaved(_ creation: SavedCreation) {
-        Task {
-            do {
-                let data = try await saved.data(for: creation)
-                export(data, filename: "orb-video.\(videoExtension(creation.mimeType))")
-            } catch { errorMessage = "Cannot load saved video: \(error.localizedDescription)" }
-        }
+        let panel = NSSavePanel()
+        panel.title = "Export Video"
+        panel.nameFieldStringValue = "orb-video.\(videoExtension(creation.mimeType))"
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        do { try saved.export(creation, to: url) }
+        catch { errorMessage = "Export failed: \(error.localizedDescription)" }
     }
 
     private func videoExtension(_ mime: String) -> String {
@@ -611,17 +680,6 @@ struct VideoView: View {
         case "video/webm": return "webm"
         case "video/quicktime": return "mov"
         default: return "mp4"
-        }
-    }
-
-    private func export(_ data: Data, filename: String) {
-        let panel = NSSavePanel()
-        panel.title = "Export Video"
-        panel.nameFieldStringValue = filename
-        guard panel.runModal() == .OK, let url = panel.url else { return }
-        Task {
-            do { try await Task.detached { try data.write(to: url, options: .atomic) }.value }
-            catch { errorMessage = "Export failed: \(error.localizedDescription)" }
         }
     }
 
