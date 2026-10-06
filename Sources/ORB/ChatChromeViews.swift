@@ -268,12 +268,13 @@ struct EditableTitle: View {
 /// Bottom-of-window toast with an Undo button; dismisses itself.
 struct UndoToastView: View {
     let message: String
+    var symbol: String = "trash"
     let undo: () -> Void
     let dismiss: () -> Void
 
     var body: some View {
         HStack(spacing: 12) {
-            Image(systemName: "trash").accessibilityHidden(true)
+            Image(systemName: symbol).accessibilityHidden(true)
             Text(message).font(ORBFont.footnote.weight(.medium))
             Button("Undo", action: undo).buttonStyle(.link).keyboardShortcut("z", modifiers: .command)
             Button { dismiss() } label: { Image(systemName: "xmark") }

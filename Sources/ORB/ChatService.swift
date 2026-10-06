@@ -344,6 +344,48 @@ final class ChatService: ObservableObject {
         return text
     }
 
+    /// What an edit removed, so the UI can offer Undo, plus the original
+    /// attachments so the resend keeps them.
+    struct ConversationEdit: Equatable {
+        let conversationID: UUID
+        let text: String
+        let parts: [MessageContentPart]?
+        fileprivate let removed: [ChatMessage]
+        /// Message count left after the cut; undo requires nothing was added.
+        fileprivate let keptCount: Int
+        var removedCount: Int { removed.count }
+    }
+
+    /// Non-destructive edit: truncates from the user message (as before) but
+    /// returns everything needed to undo it and to resend with attachments.
+    func beginEdit(from messageID: UUID, in conversationID: UUID) -> ConversationEdit? {
+        guard let index = conversations.firstIndex(where: { $0.id == conversationID }),
+              let cut = conversations[index].messages.firstIndex(where: { $0.id == messageID }) else { return nil }
+        let removed = Array(conversations[index].messages[cut...])
+        let parts = conversations[index].messages[cut].parts
+        guard let text = truncateConversation(from: messageID, in: conversationID) else { return nil }
+        return ConversationEdit(conversationID: conversationID, text: text, parts: parts, removed: removed, keptCount: cut)
+    }
+
+    /// Restores the messages an edit removed. Refused once the conversation
+    /// moved on (a new message was sent) or while it is running.
+    @discardableResult
+    func undoEdit(_ edit: ConversationEdit) -> Bool {
+        guard !isRunning(conversationID: edit.conversationID),
+              let index = conversations.firstIndex(where: { $0.id == edit.conversationID }) else { return false }
+        let existing = Set(conversations[index].messages.map(\.id))
+        guard conversations[index].messages.count == edit.keptCount,
+              !edit.removed.contains(where: { existing.contains($0.id) }) else { return false }
+        conversations[index].messages += edit.removed
+        rebuildAgentHistory(for: edit.conversationID)
+        synchronizeActive(edit.conversationID)
+        do { try saveRecord(edit.conversationID) } catch {
+            lastError = "Could not undo the edit: \(error.localizedDescription)"
+            return false
+        }
+        return true
+    }
+
     /// Bulk delete that hands back what it removed so the UI can offer Undo.
     /// Only conversations whose removal succeeded are in the snapshot.
     func deleteConversationsUndoable(ids: Set<UUID>) -> [StoredConversation]? {

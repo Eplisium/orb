@@ -353,6 +353,10 @@ enum UndoToast {
     static func message(deleted count: Int) -> String {
         "Deleted \(count) session\(count == 1 ? "" : "s")"
     }
+
+    static func editMessage(removed count: Int) -> String {
+        "Editing — removed \(count) message\(count == 1 ? "" : "s")"
+    }
 }
 
 // MARK: Quick sampling ("model default" is a real choice)

@@ -16,6 +16,8 @@ struct AgentView: View {
     @State private var unread = UnreadTracker()
     @AppStorage("playground.requireCommandToSend") private var requireCommandToSend = false
     @State private var undoSnapshot: [StoredConversation]?
+    /// Last edit, for Undo and to carry its attachments into the resend.
+    @State private var pendingEdit: ChatService.ConversationEdit?
     @State private var dropTargeted = false
     @StateObject private var pins = ConversationPinStore(key: "orb.pinned.agent")
     @State private var selectedSessionIDs = Set<UUID>()
@@ -106,6 +108,15 @@ struct AgentView: View {
                     message: UndoToast.message(deleted: snapshot.count),
                     undo: { chatService.restore(snapshot); undoSnapshot = nil },
                     dismiss: { undoSnapshot = nil }
+                )
+                .padding(.bottom, 80)
+                .transition(.move(edge: .bottom).combined(with: .opacity))
+            } else if let edit = pendingEdit {
+                UndoToastView(
+                    message: UndoToast.editMessage(removed: edit.removedCount),
+                    symbol: "pencil",
+                    undo: { undoEdit(edit) },
+                    dismiss: { pendingEdit = nil }
                 )
                 .padding(.bottom, 80)
                 .transition(.move(edge: .bottom).combined(with: .opacity))
@@ -474,7 +485,7 @@ struct AgentView: View {
                                         onRegenerate: regenerateAction(for: message, in: conversation, running: conversationIsRunning),
                                         onEdit: conversationIsRunning || message.role != "user"
                                             ? nil
-                                            : { if let text = chatService.truncateConversation(from: message.id, in: conversation.id) { messageText = text; inputFocused = true } },
+                                            : { beginEdit(message.id, in: conversation.id) },
                                         onBranch: conversationIsRunning
                                             ? nil
                                             : { if let branch = chatService.branchConversation(from: message.id, in: conversation.id) { selectedModelId = branch.modelId } },
@@ -939,6 +950,7 @@ struct AgentView: View {
             return
         }
 
+        pendingEdit = nil
         let sentText = messageText
         let basePrompt = sentText.trimmingCharacters(in: .whitespacesAndNewlines)
         let sentAttachments = attachments
@@ -1005,6 +1017,20 @@ struct AgentView: View {
             attachments.append(contentsOf: panel.urls)
             refreshAttachmentDiagnostics()
         }
+    }
+
+    private func beginEdit(_ messageID: UUID, in conversationID: UUID) {
+        // Agent attachments are inlined into the prompt text, so the edited
+        // text already carries them.
+        guard let edit = chatService.beginEdit(from: messageID, in: conversationID) else { return }
+        pendingEdit = edit
+        messageText = edit.text
+        inputFocused = true
+    }
+
+    private func undoEdit(_ edit: ChatService.ConversationEdit) {
+        if chatService.undoEdit(edit), messageText == edit.text { messageText = "" }
+        pendingEdit = nil
     }
 
     private func attachmentLimits() -> (perFile: Int, total: Int) {

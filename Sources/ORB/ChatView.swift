@@ -14,6 +14,10 @@ struct ChatView: View {
     @State private var unread = UnreadTracker()
     @AppStorage("playground.requireCommandToSend") private var requireCommandToSend = false
     @State private var undoSnapshot: [StoredConversation]?
+    /// Last edit, for Undo and to carry its attachments into the resend.
+    @State private var pendingEdit: ChatService.ConversationEdit?
+    /// Attachments of the message being edited; resent unless removed.
+    @State private var carriedParts: [MessageContentPart]?
     @State private var dropTargeted = false
     @State private var temperatureIsModelDefault = false
     @StateObject private var pins = ConversationPinStore(key: "orb.pinned.chat")
@@ -101,6 +105,15 @@ struct ChatView: View {
                     message: UndoToast.message(deleted: snapshot.count),
                     undo: { chatService.restore(snapshot); undoSnapshot = nil },
                     dismiss: { undoSnapshot = nil }
+                )
+                .padding(.bottom, 80)
+                .transition(.move(edge: .bottom).combined(with: .opacity))
+            } else if let edit = pendingEdit {
+                UndoToastView(
+                    message: UndoToast.editMessage(removed: edit.removedCount),
+                    symbol: "pencil",
+                    undo: { undoEdit(edit) },
+                    dismiss: { pendingEdit = nil }
                 )
                 .padding(.bottom, 80)
                 .transition(.move(edge: .bottom).combined(with: .opacity))
@@ -471,7 +484,7 @@ struct ChatView: View {
                                         onRegenerate: regenerateAction(for: message, in: conversation, running: conversationIsRunning),
                                         onEdit: conversationIsRunning || message.role != "user"
                                             ? nil
-                                            : { if let text = chatService.truncateConversation(from: message.id, in: conversation.id) { messageText = text; inputFocused = true } },
+                                            : { beginEdit(message.id, in: conversation.id) },
                                         onBranch: conversationIsRunning
                                             ? nil
                                             : { if let branch = chatService.branchConversation(from: message.id, in: conversation.id) { selectedModelId = branch.modelId } }
@@ -659,6 +672,19 @@ struct ChatView: View {
                         }
                     }
                     .padding(.horizontal, 2)
+                }
+            }
+
+            if let carried = carriedParts, !carried.isEmpty {
+                HStack(spacing: 6) {
+                    Label("\(carried.count) attachment\(carried.count == 1 ? "" : "s") from the original message", systemImage: "paperclip")
+                        .orbFont(size: 11)
+                        .foregroundStyle(.secondary)
+                    Button { carriedParts = nil } label: { Image(systemName: "xmark.circle.fill") }
+                        .buttonStyle(.plain)
+                        .foregroundStyle(.secondary)
+                        .accessibilityLabel("Remove original attachments")
+                    Spacer()
                 }
             }
 
@@ -860,6 +886,9 @@ struct ChatView: View {
         let drafts = attachmentDrafts
         let modelId = currentModelId
         let settings = requestSettings
+        let carried = carriedParts ?? []
+        carriedParts = nil
+        pendingEdit = nil
         guard drafts.isEmpty else {
             // Build parts first (off-main); the draft is cleared only once the
             // attachments were read, so a failed read never loses the text.
@@ -869,15 +898,32 @@ struct ChatView: View {
                 do {
                     let wireParts = try await ChatAttachmentBuilder.buildParts(for: drafts)
                     clearComposer(ifUnchanged: sentText, drafts: drafts)
-                    chatService.sendMessage(prompt, modelId: modelId, settings: settings, parts: wireParts)
+                    chatService.sendMessage(prompt, modelId: modelId, settings: settings, parts: carried + wireParts)
                 } catch {
+                    if !carried.isEmpty, carriedParts == nil { carriedParts = carried }
                     chatService.lastError = "Could not read attachments: \(error.localizedDescription). Your message was kept."
                 }
             }
             return
         }
         clearComposer(ifUnchanged: sentText, drafts: drafts)
-        chatService.sendMessage(prompt, modelId: modelId, settings: settings, parts: nil)
+        chatService.sendMessage(prompt, modelId: modelId, settings: settings, parts: carried.isEmpty ? nil : carried)
+    }
+
+    private func beginEdit(_ messageID: UUID, in conversationID: UUID) {
+        guard let edit = chatService.beginEdit(from: messageID, in: conversationID) else { return }
+        pendingEdit = edit
+        messageText = edit.text
+        carriedParts = edit.parts
+        inputFocused = true
+    }
+
+    private func undoEdit(_ edit: ChatService.ConversationEdit) {
+        if chatService.undoEdit(edit) {
+            if messageText == edit.text { messageText = "" }
+            carriedParts = nil
+        }
+        pendingEdit = nil
     }
 
     /// Clears what was sent, keeping anything typed while attachments loaded.

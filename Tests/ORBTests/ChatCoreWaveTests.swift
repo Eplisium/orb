@@ -484,3 +484,46 @@ struct MessageMetadataTests {
         #expect((messages[1]["usage"] as? [String: Any])?["totalTokens"] as? Int == 30)
     }
 }
+
+// MARK: - Item 10: non-destructive edit & resend
+
+@Suite("Wave1: edit and resend")
+@MainActor
+struct EditResendTests {
+    @Test("an edit can be undone and carries the original attachments")
+    func undoAndParts() async throws {
+        let store = CountingConversationStore()
+        let service = ChatService(client: WaveScriptedClient([]), store: store, apiKeyProvider: { "fixture" })
+        let image = MessageContentPart.image(url: "data:image/png;base64,AA==")
+        service.sendMessage("look", modelId: "test/model", parts: [image])
+        try await waitUntilIdle(service)
+        service.sendMessage("more", modelId: "test/model")
+        try await waitUntilIdle(service)
+        let conversation = try #require(service.activeConversation)
+        #expect(conversation.messages.count == 4)
+
+        let edit = try #require(service.beginEdit(from: conversation.messages[0].id, in: conversation.id))
+        #expect(edit.text == "look")
+        #expect(edit.parts == [image])
+        #expect(edit.removedCount == 4)
+        #expect(service.activeConversation?.messages.isEmpty == true)
+
+        #expect(service.undoEdit(edit))
+        #expect(service.activeConversation?.messages.map(\.id) == conversation.messages.map(\.id))
+        #expect(store.records[conversation.id]?.conversation.messages.count == 4)
+        #expect(!service.undoEdit(edit), "undo is idempotent")
+    }
+
+    @Test("undo is refused once the edited conversation moved on")
+    func undoRefusedAfterResend() async throws {
+        let service = ChatService(client: WaveScriptedClient([]), store: CountingConversationStore(), apiKeyProvider: { "fixture" })
+        service.sendMessage("a", modelId: "test/model")
+        try await waitUntilIdle(service)
+        let conversation = try #require(service.activeConversation)
+        let edit = try #require(service.beginEdit(from: conversation.messages[0].id, in: conversation.id))
+        service.sendMessage("a2", modelId: "test/model", parts: edit.parts)
+        try await waitUntilIdle(service)
+        #expect(!service.undoEdit(edit), "restoring would interleave old and new turns")
+        #expect(service.activeConversation?.messages.map(\.content) == ["a2", "ok"])
+    }
+}
