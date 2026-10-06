@@ -393,3 +393,27 @@ extension GenerationSettings {
         return validated()
     }
 }
+
+extension GenerationSettings {
+    /// Agent baseline: no temperature (provider default) and nothing else
+    /// forced. The Agent previously hardcoded temperature 0.3.
+    static var agentDefault: GenerationSettings {
+        var settings = GenerationSettings()
+        settings.temperature = nil
+        return settings
+    }
+}
+
+/// The Agent's sampling controls, resolved into request settings.
+struct AgentSamplingPreferences: Equatable {
+    var temperature: Double?
+    /// Raw `ReasoningSettings.Effort` value; empty = model default.
+    var reasoningEffort: String
+
+    var settings: GenerationSettings {
+        var settings = GenerationSettings.agentDefault
+        settings.temperature = temperature
+        settings.reasoning.effort = ReasoningSettings.Effort(rawValue: reasoningEffort)
+        return settings
+    }
+}

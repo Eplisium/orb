@@ -24,6 +24,10 @@ struct AgentView: View {
     @State private var selectedModelId = ""
     @AppStorage(PlaygroundModelDefaults.agentKey) private var defaultModelId = ""
     @AppStorage("playground.agentFullComputerAccess") private var fullComputerAccess = false
+    /// Sampling for Agent runs. Unset = provider default (nothing sent).
+    @AppStorage("playground.agentTemperatureSet") private var agentTemperatureSet = false
+    @AppStorage("playground.agentTemperature") private var agentTemperature = 0.7
+    @AppStorage("playground.agentReasoningEffort") private var agentReasoningEffort = ""
     @AppStorage("playground.agentWorkspace") private var workspace = FileManager.default.homeDirectoryForCurrentUser.path
     @State private var attachments: [URL] = []
     @State private var isPreparingAttachments = false
@@ -407,6 +411,31 @@ struct AgentView: View {
             Toggle("Require ⌘↩ to send", isOn: $requireCommandToSend)
                 .font(.caption)
                 .help("When on, Return inserts a new line and ⌘↩ sends.")
+
+            Divider()
+
+            VStack(alignment: .leading, spacing: 7) {
+                Text("SAMPLING")
+                    .orbFont(size: 11, weight: .bold)
+                    .foregroundStyle(.secondary)
+                Toggle("Override temperature", isOn: $agentTemperatureSet)
+                    .font(.caption)
+                if agentTemperatureSet {
+                    HStack {
+                        Slider(value: $agentTemperature, in: 0...2, step: 0.05)
+                        Text(String(format: "%.2f", agentTemperature)).font(.caption).monospacedDigit()
+                    }
+                } else {
+                    Text("Model default — no temperature is sent.").font(.caption).foregroundStyle(.secondary)
+                }
+                Picker("Reasoning effort", selection: $agentReasoningEffort) {
+                    Text("Model default").tag("")
+                    ForEach(ReasoningSettings.Effort.allCases) { effort in
+                        Text(effort.label).tag(effort.rawValue)
+                    }
+                }
+                .font(.caption)
+            }
 
             Divider()
 
@@ -968,6 +997,7 @@ struct AgentView: View {
         let modelId = currentModelId
         let workspace = workspace
         let fullComputerAccess = fullComputerAccess
+        let settings = agentSettings
         let limits = attachmentLimits()
 
         isPreparingAttachments = !sentAttachments.isEmpty
@@ -994,7 +1024,8 @@ struct AgentView: View {
                 prompt,
                 modelId: modelId,
                 workspace: workspace,
-                fullComputerAccess: fullComputerAccess
+                fullComputerAccess: fullComputerAccess,
+                settings: settings
             )
         }
     }
@@ -1058,6 +1089,13 @@ struct AgentView: View {
     private func undoEdit(_ edit: ChatService.ConversationEdit) {
         if chatService.undoEdit(edit), messageText == edit.text { messageText = "" }
         pendingEdit = nil
+    }
+
+    private var agentSettings: GenerationSettings {
+        AgentSamplingPreferences(
+            temperature: agentTemperatureSet ? agentTemperature : nil,
+            reasoningEffort: agentReasoningEffort
+        ).settings
     }
 
     private func attachmentLimits() -> (perFile: Int, total: Int) {

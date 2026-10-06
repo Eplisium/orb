@@ -601,3 +601,33 @@ struct PasteAttachmentTests {
         #expect(try PasteboardAttachments.urls(from: pasteboard).map(\.standardizedFileURL) == [file.standardizedFileURL])
     }
 }
+
+// MARK: - Item 13: Agent honors GenerationSettings
+
+@Suite("Wave1: agent sampling")
+@MainActor
+struct AgentSamplingTests {
+    @Test("Agent sends no temperature by default and passes chosen settings on every turn")
+    func settingsReachRequests() async throws {
+        let client = WaveScriptedClient([])
+        let service = ChatService(client: client, store: CountingConversationStore(), apiKeyProvider: { "fixture" })
+        await service.sendAgentMessage("a", modelId: "test/model", workspace: workspace, fullComputerAccess: false)
+        try await waitUntilIdle(service)
+        let first = try #require(await client.requests.last)
+        #expect(first.settings.temperature == nil)
+        #expect(first.settings.reasoning.effort == nil)
+
+        let chosen = AgentSamplingPreferences(temperature: 0.4, reasoningEffort: "high").settings
+        await service.sendAgentMessage("b", modelId: "test/model", workspace: workspace, fullComputerAccess: false, settings: chosen)
+        try await waitUntilIdle(service)
+        let second = try #require(await client.requests.last)
+        #expect(second.settings.temperature == 0.4)
+        #expect(second.settings.reasoning.effort == .high)
+    }
+
+    @Test("preferences map empty effort to model default")
+    func preferences() {
+        #expect(AgentSamplingPreferences(temperature: nil, reasoningEffort: "").settings.reasoning.effort == nil)
+        #expect(AgentSamplingPreferences(temperature: nil, reasoningEffort: "").settings.temperature == nil)
+    }
+}

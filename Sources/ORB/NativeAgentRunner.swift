@@ -30,6 +30,9 @@ enum NativeAgentRunner {
         toolExecutor: ToolExecutor? = nil,
         policy: ToolPolicy? = nil,
         approvals: ApprovalCoordinator? = nil,
+        /// Sampling for every turn. Unset values are omitted so the
+        /// provider's defaults apply (never a hardcoded temperature).
+        settings: GenerationSettings = .agentDefault,
         onEvent: @escaping @Sendable (NativeAgentEvent) async -> Void
     ) async throws -> NativeAgentRunResult {
         let effectivePolicy = policy ?? ToolPolicy.legacy(fullComputerAccess: fullComputerAccess)
@@ -95,7 +98,7 @@ enum NativeAgentRunner {
             var request = OpenRouterRequest(
                 apiKey: apiKey, model: modelId, messages: messages,
                 tools: definitions.isEmpty ? nil : definitions,
-                toolChoice: definitions.isEmpty ? nil : "auto", temperature: 0.3
+                toolChoice: definitions.isEmpty ? nil : "auto", settings: settings
             )
             var transientAttempts = 0
             var strippedAlready = false
@@ -158,7 +161,7 @@ enum NativeAgentRunner {
                     messages = AgentTurnRecovery.strippingReasoning(messages)
                     request = OpenRouterRequest(
                         apiKey: request.apiKey, model: request.model, messages: messages,
-                        tools: request.tools, toolChoice: request.toolChoice, temperature: 0.3)
+                        tools: request.tools, toolChoice: request.toolChoice, settings: settings)
                 case .retry(let delay):
                     transientAttempts += 1
                     await onEvent(.retrying(AgentTurnRecovery.label(for: error, attempt: transientAttempts)))
@@ -328,7 +331,7 @@ enum NativeAgentRunner {
         ))
         let finalRequest = OpenRouterRequest(
             apiKey: apiKey, model: modelId, messages: messages,
-            tools: nil, toolChoice: nil, temperature: 0.3
+            tools: nil, toolChoice: nil, settings: settings
         )
         var finalText = ""
         var finalUsage: ChatUsage?

@@ -864,7 +864,8 @@ final class ChatService: ObservableObject {
         _ text: String,
         modelId: String,
         workspace: String,
-        fullComputerAccess: Bool
+        fullComputerAccess: Bool,
+        settings: GenerationSettings = .agentDefault
     ) async {
         guard !isStreaming else { lastError = "A generation is already running."; return }
         guard let apiKey = apiKeyProvider(), !apiKey.isEmpty else {
@@ -936,6 +937,7 @@ final class ChatService: ObservableObject {
                     maximumTurns: self.agentMaximumTurns,
                     policy: policy,
                     approvals: OPMode.approvals(self.approvals),
+                    settings: settings,
                     onEvent: { event in
                         let arrival = NativeAgentRunner.eventArrival ?? Date()
                         await self.receiveAgent(event, context: context, at: arrival)
