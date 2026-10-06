@@ -3,11 +3,11 @@ import Foundation
 import SQLite3
 @testable import ORB
 
-private func cm(_ id: String, prompt: String = "0.000001", cache: String? = nil, maxOut: Int? = nil, iq: Double? = nil, cutoff: String? = nil, params: [String] = []) -> ModelInfo {
+private func cm(_ id: String, prompt: String = "0.000001", cache: String? = nil, pricing: Pricing? = nil, maxOut: Int? = nil, iq: Double? = nil, cutoff: String? = nil, params: [String] = []) -> ModelInfo {
     ModelInfo(
         id: id, canonicalSlug: nil, huggingFaceId: nil, name: "N \(id)", created: nil, description: nil, contextLength: 1000,
         architecture: Architecture(modality: nil, inputModalities: ["text"], outputModalities: ["text"], tokenizer: nil, instructType: nil),
-        pricing: Pricing(prompt: prompt, completion: "0.000002", inputCacheRead: cache),
+        pricing: pricing ?? Pricing(prompt: prompt, completion: "0.000002", inputCacheRead: cache),
         topProvider: TopProvider(contextLength: nil, maxCompletionTokens: maxOut, isModerated: nil),
         supportedParameters: params, reasoning: nil, knowledgeCutoff: cutoff, expirationDate: nil, supportedVoices: nil,
         benchmarks: iq.map { Benchmarks(designArena: nil, artificialAnalysis: ArtificialAnalysis(intelligenceIndex: $0, codingIndex: nil, agenticIndex: nil)) },
@@ -26,6 +26,14 @@ struct ComparePanelDataTests {
         #expect(c.knowledgeCutoff == "2025-06")
         #expect(c.parameters == "seed, tools")
         let empty = ComparisonColumn.make(model: cm("a/2"), endpoints: nil)
+        var p = Pricing(prompt: "0.000001", completion: "0.000002", inputCacheRead: nil)
+        p.overrides = [PricingOverride(minPromptTokens: 200_000, prompt: "0.000002")]
+        p.webSearch = "0.01"
+        let tiered = cm("a/3", pricing: p)
+        let t = ComparisonColumn.make(model: tiered, endpoints: nil)
+        #expect(t.pricingTiers.contains("Above 200K prompt tokens: $2 / 1M in"))
+        #expect(t.pricingTiers.contains("Web search: $0.01 / request"))
+        #expect(empty.pricingTiers == "—")
         #expect(empty.maxOutput == "—" && empty.cachePrice == "—" && empty.intelligence == "—" && empty.parameters == "—")
     }
 

@@ -328,6 +328,8 @@ struct ComparisonColumn: Identifiable, Equatable {
     let inputPrice: String
     let outputPrice: String
     let cachePrice: String
+    /// Override tiers / extra prices ("Above 272K prompt tokens: …"), or "—".
+    let pricingTiers: String
     let context: String
     let maxOutput: String
     let inputModalities: String
@@ -363,6 +365,10 @@ struct ComparisonColumn: Identifiable, Equatable {
             inputPrice: priceText(model.pricing?.prompt, free: free),
             outputPrice: priceText(model.pricing?.completion, free: free),
             cachePrice: cache.map { PriceDisplay.text(perToken: $0, unit: unit) } ?? missing,
+            pricingTiers: model.pricing.map { p in
+                (p.tierLines(unit: unit) + p.extraLines(unit: unit).filter { $0.title != "Cache read" })
+                    .map { "\($0.title): \($0.value)" }.joined(separator: "\n")
+            }.flatMap(\.nonEmpty) ?? missing,
             context: model.contextLength.map(BrowserFormat.context) ?? "N/A",
             maxOutput: maxOut.map(BrowserFormat.context) ?? missing,
             inputModalities: model.inputModalities.joined(separator: ", "),
@@ -407,6 +413,7 @@ struct ComparisonColumn: Identifiable, Equatable {
         ("Input price", { $0.inputPrice }),
         ("Output price", { $0.outputPrice }),
         ("Cache read", { $0.cachePrice }),
+        ("Other pricing", { $0.pricingTiers }),
         ("Context", { $0.context }),
         ("Max output", { $0.maxOutput }),
         ("Intelligence", { $0.intelligence }),

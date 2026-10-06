@@ -53,10 +53,10 @@ struct ModelRowView: View {
                         .font(ORBFont.body.weight(.medium))
                         .lineLimit(1)
                     if model.isAlias {
-                        Text("ALIAS").orbFont(size: 9, weight: .bold).foregroundStyle(ORBTheme.accentLink)
+                        Text("ALIAS").orbFont(size: 11, weight: .bold).foregroundStyle(ORBTheme.accentLink)
                     }
                     if model.hasExpired {
-                        Text("EXPIRED").orbFont(size: 9, weight: .bold).foregroundStyle(.red)
+                        Text("EXPIRED").orbFont(size: 11, weight: .bold).foregroundStyle(.red)
                     }
                 }
                 if let line = facts.oneLiner {

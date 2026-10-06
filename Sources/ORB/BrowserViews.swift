@@ -406,7 +406,7 @@ struct ComparePanel: View {
             ForEach(cols) { col in
                 HStack(spacing: 4) {
                     Text(value(col)).font(ORBFont.footnote).textSelection(.enabled)
-                        .lineLimit(title == "Parameters" ? 6 : 2)
+                        .lineLimit(title == "Parameters" || title == "Other pricing" ? 8 : 2)
                     if highlight == col.id {
                         Image(systemName: "checkmark.seal.fill").foregroundStyle(ORBTheme.success)
                             .help("Best in this comparison").accessibilityLabel("Best")
