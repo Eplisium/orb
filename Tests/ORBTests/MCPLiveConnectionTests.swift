@@ -19,9 +19,13 @@ struct MCPLiveConnectionTests {
         return MCPServerConfig(name: "mock", command: node, args: [script.path])
     }
 
-    @Test("connects, handshakes, and lists tools over real stdio")
+    /// Tests that need the Node mock server report as skipped (not passed) when
+    /// Node is not installed.
+    static var nodeAvailable: Bool { serverConfig() != nil }
+
+    @Test("connects, handshakes, and lists tools over real stdio", .enabled(if: MCPLiveConnectionTests.nodeAvailable, "requires node (or NODE_BINARY) for the mock MCP server"))
     func connectAndList() async throws {
-        guard let config = Self.serverConfig() else { return }
+        let config = try #require(Self.serverConfig())
         let connection = MCPConnection(config: config)
         try await connection.connect()
         defer { Task { await connection.shutdown() } }
@@ -38,9 +42,9 @@ struct MCPLiveConnectionTests {
         #expect(echo.qualifiedName == "mcp__mock__echo")
     }
 
-    @Test("calls a tool and receives its result")
+    @Test("calls a tool and receives its result", .enabled(if: MCPLiveConnectionTests.nodeAvailable, "requires node (or NODE_BINARY) for the mock MCP server"))
     func callTool() async throws {
-        guard let config = Self.serverConfig() else { return }
+        let config = try #require(Self.serverConfig())
         let connection = MCPConnection(config: config)
         try await connection.connect()
         defer { Task { await connection.shutdown() } }
@@ -53,9 +57,9 @@ struct MCPLiveConnectionTests {
         #expect(result.isError == false)
     }
 
-    @Test("nested arguments reach the server unmodified")
+    @Test("nested arguments reach the server unmodified", .enabled(if: MCPLiveConnectionTests.nodeAvailable, "requires node (or NODE_BINARY) for the mock MCP server"))
     func nestedArguments() async throws {
-        guard let config = Self.serverConfig() else { return }
+        let config = try #require(Self.serverConfig())
         let connection = MCPConnection(config: config)
         try await connection.connect()
         defer { Task { await connection.shutdown() } }
@@ -71,9 +75,9 @@ struct MCPLiveConnectionTests {
         #expect(result.content == "MIXED")
     }
 
-    @Test("a tool-level error is surfaced without killing the connection")
+    @Test("a tool-level error is surfaced without killing the connection", .enabled(if: MCPLiveConnectionTests.nodeAvailable, "requires node (or NODE_BINARY) for the mock MCP server"))
     func toolError() async throws {
-        guard let config = Self.serverConfig() else { return }
+        let config = try #require(Self.serverConfig())
         let connection = MCPConnection(config: config)
         try await connection.connect()
         defer { Task { await connection.shutdown() } }
@@ -89,9 +93,9 @@ struct MCPLiveConnectionTests {
         #expect(after.content == "still alive")
     }
 
-    @Test("a JSON-RPC error response throws rather than returning bad data")
+    @Test("a JSON-RPC error response throws rather than returning bad data", .enabled(if: MCPLiveConnectionTests.nodeAvailable, "requires node (or NODE_BINARY) for the mock MCP server"))
     func protocolError() async throws {
-        guard let config = Self.serverConfig() else { return }
+        let config = try #require(Self.serverConfig())
         let connection = MCPConnection(config: config)
         try await connection.connect()
         defer { Task { await connection.shutdown() } }
@@ -101,9 +105,9 @@ struct MCPLiveConnectionTests {
         }
     }
 
-    @Test("concurrent calls are matched to their own responses")
+    @Test("concurrent calls are matched to their own responses", .enabled(if: MCPLiveConnectionTests.nodeAvailable, "requires node (or NODE_BINARY) for the mock MCP server"))
     func concurrentCalls() async throws {
-        guard let config = Self.serverConfig() else { return }
+        let config = try #require(Self.serverConfig())
         let connection = MCPConnection(config: config)
         try await connection.connect()
         defer { Task { await connection.shutdown() } }
@@ -128,9 +132,9 @@ struct MCPLiveConnectionTests {
         }
     }
 
-    @Test("the registry exposes MCP tools as OpenRouter definitions")
+    @Test("the registry exposes MCP tools as OpenRouter definitions", .enabled(if: MCPLiveConnectionTests.nodeAvailable, "requires node (or NODE_BINARY) for the mock MCP server"))
     func registryProbe() async throws {
-        guard let config = Self.serverConfig() else { return }
+        let config = try #require(Self.serverConfig())
         let outcome = await MCPRegistry.shared.probe(config)
         switch outcome {
         case .success(let report):

@@ -913,10 +913,15 @@ struct NativeAgentRunnerTests {
         #expect(response.choices.first?.message.toolCalls?.first?.function.name == "read_file")
     }
 
-    @Test("real OpenRouter agent can invoke an app-owned function")
+    @Test(
+        "real OpenRouter agent can invoke an app-owned function",
+        .enabled(
+            if: ProcessInfo.processInfo.environment["RUN_OPENROUTER_INTEGRATION"] == "1",
+            "Live, paid OpenRouter call; set RUN_OPENROUTER_INTEGRATION=1 to run"
+        )
+    )
     @MainActor
     func realAgentInvokesNativeFunction() async throws {
-        guard ProcessInfo.processInfo.environment["RUN_OPENROUTER_INTEGRATION"] == "1" else { return }
         let apiKey = try #require(KeychainManager.getAPIKey())
         let workspace = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()

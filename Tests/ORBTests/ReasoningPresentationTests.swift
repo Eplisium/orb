@@ -32,11 +32,16 @@ struct ReasoningPresentationTests {
         #expect(message.content == "Answer\nunchanged")
     }
 
-    @Test("Screenshot reasoning reflows into a compact full-width paragraph")
+    // Run opt-in rendering separately from stream timing tests: ImageRenderer
+    // blocks MainActor while scripted deltas continue arriving.
+    @Test(
+        "Screenshot reasoning reflows into a compact full-width paragraph",
+        .enabled(
+            if: ProcessInfo.processInfo.environment["ORB_REASONING_SNAPSHOT"] != nil,
+            "Rendering snapshot; set ORB_REASONING_SNAPSHOT=<png path> and run this suite alone"
+        )
+    )
     func fragmentedReasoningLayout() throws {
-        // Run opt-in rendering separately from stream timing tests: ImageRenderer
-        // blocks MainActor while scripted deltas continue arriving.
-        guard ProcessInfo.processInfo.environment["ORB_REASONING_SNAPSHOT"] != nil else { return }
         let view = ReasoningDisclosure(text: Self.fragmented, accent: .purple,
                                        isStreaming: true, startedAt: nil, duration: nil)
             .padding(20)

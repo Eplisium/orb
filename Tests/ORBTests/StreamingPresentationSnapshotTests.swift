@@ -11,9 +11,15 @@ import Testing
 @Suite("Streaming presentation snapshots")
 @MainActor
 struct StreamingPresentationSnapshotTests {
-    @Test("Chat and Agent streaming states render without a live account")
+    @Test(
+        "Chat and Agent streaming states render without a live account",
+        .enabled(
+            if: ProcessInfo.processInfo.environment["ORB_STREAM_SNAPSHOT_DIR"] != nil,
+            "Rendering snapshot; set ORB_STREAM_SNAPSHOT_DIR=<dir> and run this suite alone"
+        )
+    )
     func renderFixtures() throws {
-        guard let directory = ProcessInfo.processInfo.environment["ORB_STREAM_SNAPSHOT_DIR"] else { return }
+        let directory = try #require(ProcessInfo.processInfo.environment["ORB_STREAM_SNAPSHOT_DIR"])
         try FileManager.default.createDirectory(atPath: directory, withIntermediateDirectories: true)
 
         let thinking = ChatMessage(
