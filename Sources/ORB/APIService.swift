@@ -58,7 +58,7 @@ final class APIService: ObservableObject {
             }
 
             let decoded = try JSONDecoder().decode(OpenRouterResponse.self, from: data)
-            models = decoded.data.sorted { $0.name < $1.name }
+            models = Self.catalogOrder(decoded.data)
             lastRefresh = Date()
             saveToCache(data: data)
         } catch {
@@ -86,12 +86,24 @@ final class APIService: ObservableObject {
         return modDate
     }
 
+    /// Modification date of the cache file whose contents are already in
+    /// `models`, so a fallback in the same refresh never decodes it twice.
+    private var loadedCacheDate: Date?
+
     private func loadFromCache() {
+        let date = cacheDate
+        if let date, date == loadedCacheDate, !models.isEmpty { return }
         guard let data = try? Data(contentsOf: cacheURL),
               let decoded = try? JSONDecoder().decode(OpenRouterResponse.self, from: data) else {
             return
         }
-        models = decoded.data.sorted { $0.name < $1.name }
+        models = Self.catalogOrder(decoded.data)
+        loadedCacheDate = date
+    }
+
+    /// Name order with the id as a tiebreak so equal names never shuffle.
+    static func catalogOrder(_ list: [ModelInfo]) -> [ModelInfo] {
+        list.sorted { $0.name != $1.name ? $0.name < $1.name : $0.id < $1.id }
     }
 
     private func loadCacheFallback(errorDescription: String) {
@@ -105,27 +117,68 @@ final class APIService: ObservableObject {
     }
 
     private func saveToCache(data: Data) {
-        try? data.write(to: cacheURL)
+        try? data.write(to: cacheURL, options: .atomic)
+        loadedCacheDate = cacheDate
     }
 
     // MARK: - Endpoints
 
-    func fetchEndpoints(for modelId: String) async -> [ModelEndpoint] {
-        endpointsError = nil
-        guard let url = URL(string: "https://openrouter.ai/api/v1/models/\(modelId)/endpoints") else {
-            return []
-        }
+    /// Public `/models/{id}/endpoints` URL; nil for ids that cannot form a
+    /// safe path (never force-unwrapped).
+    nonisolated static func endpointsURL(for modelId: String) -> URL? {
+        guard !modelId.isEmpty, !modelId.contains(".."), !modelId.contains("?"), !modelId.contains("#") else { return nil }
+        var allowed = CharacterSet.urlPathAllowed
+        allowed.remove(charactersIn: "?#")
+        guard let path = modelId.addingPercentEncoding(withAllowedCharacters: allowed) else { return nil }
+        return URL(string: "https://openrouter.ai/api/v1/models/\(path)/endpoints")
+    }
+
+    /// Side-effect-free endpoint load (does not touch `endpointsError`), so
+    /// concurrent callers (Compare) cannot overwrite each other's errors.
+    func loadEndpoints(for modelId: String) async -> Result<[ModelEndpoint], EndpointLoadError> {
+        guard let url = Self.endpointsURL(for: modelId) else { return .failure(.invalidModelID) }
         do {
             let (data, response) = try await dataLoader(url)
             guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
-                endpointsError = "HTTP \((response as? HTTPURLResponse)?.statusCode ?? 0) loading providers"
-                return []
+                return .failure(.http((response as? HTTPURLResponse)?.statusCode ?? 0))
             }
             let decoded = try JSONDecoder().decode(EndpointResponse.self, from: data)
-            return decoded.data.endpoints.sorted { ($0.promptCostPer1M ?? .infinity) < ($1.promptCostPer1M ?? .infinity) }
+            let sorted = decoded.data.endpoints.sorted {
+                ($0.promptCostPer1M ?? .infinity, $0.baseID) < ($1.promptCostPer1M ?? .infinity, $1.baseID)
+            }
+            return .success(ModelEndpoint.uniquified(sorted))
         } catch {
-            endpointsError = "Failed to load providers: \(error.localizedDescription)"
+            return .failure(.transport(error.localizedDescription))
+        }
+    }
+
+    func fetchEndpoints(for modelId: String) async -> [ModelEndpoint] {
+        endpointsError = nil
+        switch await loadEndpoints(for: modelId) {
+        case .success(let list): return list
+        case .failure(let error):
+            endpointsError = error.message
             return []
+        }
+    }
+
+    /// Aliases (`~vendor/...-latest`) have no endpoints of their own; load
+    /// the target's instead.
+    func fetchEndpoints(for model: ModelInfo) async -> [ModelEndpoint] {
+        await fetchEndpoints(for: model.endpointsModelID)
+    }
+}
+
+enum EndpointLoadError: Error, Equatable {
+    case invalidModelID
+    case http(Int)
+    case transport(String)
+
+    var message: String {
+        switch self {
+        case .invalidModelID: return "This model id can't be looked up"
+        case .http(let code): return "HTTP \(code) loading providers"
+        case .transport(let detail): return "Failed to load providers: \(detail)"
         }
     }
 }

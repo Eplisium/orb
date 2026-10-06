@@ -9,7 +9,7 @@ struct BrowserSortControl: View {
     var body: some View {
         HStack(spacing: 2) {
             Menu {
-                Picker("Sort by", selection: $vm.sortField) {
+                Picker("Sort by", selection: Binding(get: { vm.sortField }, set: { vm.setSort($0) })) {
                     ForEach(SortField.allCases) { field in Text(field.rawValue).tag(field) }
                 }
                 .pickerStyle(.inline)
@@ -81,6 +81,15 @@ struct BrowserFiltersPopover: View {
             }
             .labelsHidden()
 
+            ORBSectionHeader("Max output price")
+            Picker("Max output price", selection: $vm.filters.maxOutputPrice) {
+                Text("Any").tag(Double?.none)
+                ForEach(BrowserFilterState.outputPriceSteps, id: \.self) { step in
+                    Text("≤ \(BrowserFormat.price(step)) / 1M").tag(Double?.some(step))
+                }
+            }
+            .labelsHidden()
+
             ORBSectionHeader("Min context")
             Picker("Min context", selection: $vm.filters.minContext) {
                 Text("Any").tag(Int?.none)
@@ -89,6 +98,30 @@ struct BrowserFiltersPopover: View {
                 }
             }
             .labelsHidden()
+
+            ORBSectionHeader("Required parameters")
+            FlowLayout(spacing: 6) {
+                ForEach(BrowserFilterState.filterableParameters, id: \.self) { parameter in
+                    let on = vm.filters.requiredParameters.contains(parameter)
+                    Button {
+                        if on { vm.filters.requiredParameters.remove(parameter) } else { vm.filters.requiredParameters.insert(parameter) }
+                    } label: {
+                        Text(parameter)
+                            .orbFont(size: 11, design: .monospaced)
+                            .padding(.horizontal, 7).padding(.vertical, 3)
+                            .background(on ? ORBTheme.accent.opacity(0.18) : Color.primary.opacity(0.08), in: Capsule())
+                            .foregroundStyle(on ? ORBTheme.accentLink : Color.primary)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityAddTraits(on ? .isSelected : [])
+                    .help("\(on ? "Stop requiring" : "Require") the \(parameter) request parameter")
+                }
+            }
+
+            Toggle("Hide expired models", isOn: $vm.filters.hideExpired)
+                .toggleStyle(.checkbox).font(ORBFont.footnote)
+            Toggle("Hide aliases (~…-latest)", isOn: $vm.filters.hideAliases)
+                .toggleStyle(.checkbox).font(ORBFont.footnote)
 
             ORBSectionHeader("Providers")
             TextField("Find a provider", text: $providerSearch)
@@ -110,7 +143,7 @@ struct BrowserFiltersPopover: View {
             .frame(height: 130)
         }
         .padding(ORBMetrics.spacingMD)
-        .frame(width: 320)
+        .frame(width: 340)
     }
 }
 
@@ -210,7 +243,11 @@ struct NoResultsView: View {
         switch kind {
         case .clearSearch: vm.searchText = ""
         case .removeMaxPrice: vm.filters.maxInputPrice = nil
+        case .removeMaxOutputPrice: vm.filters.maxOutputPrice = nil
         case .removeMinContext: vm.filters.minContext = nil
+        case .clearParameters: vm.filters.requiredParameters = []
+        case .showExpired: vm.filters.hideExpired = false
+        case .showAliases: vm.filters.hideAliases = false
         case .clearProviders: vm.filters.providers = []
         case .removeCapability(let c): vm.filters.capabilities.remove(c)
         case .clearAll: vm.clearAllFilters()

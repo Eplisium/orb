@@ -15,15 +15,27 @@ enum PriceFormat {
     }
 }
 
+/// Callbacks a row needs; rows take plain values plus these so a change to
+/// one model's state does not invalidate every row via the whole view model.
+struct ModelRowActions {
+    var toggleFavorite: (ModelInfo) -> Void
+    var toggleCompare: (ModelInfo) -> Void
+    var copyID: (ModelInfo) -> Void
+    var chat: (ModelInfo) -> Void
+    var agent: (ModelInfo) -> Void
+}
+
 struct ModelRowView: View {
     let model: ModelInfo
-    @ObservedObject var viewModel: BrowserViewModel
-    @EnvironmentObject private var shell: ShellController
+    let isFavorite: Bool
+    let isComparing: Bool
+    let anyComparing: Bool
+    let isCopied: Bool
+    let actions: ModelRowActions
+    @AppStorage(PriceUnit.defaultsKey) private var priceUnit: PriceUnit = .perMillion
     @State private var isHovered = false
 
-    private var facts: ModelRowFacts { ModelRowFacts.make(model) }
-    private var isFavorite: Bool { viewModel.favoriteIds.contains(model.id) }
-    private var isComparing: Bool { viewModel.isComparing(model.id) }
+    private var facts: ModelRowFacts { ModelRowFacts.make(model, unit: priceUnit) }
 
     var body: some View {
         HStack(spacing: 10) {
@@ -40,6 +52,12 @@ struct ModelRowView: View {
                     Text(model.modelSlug)
                         .font(ORBFont.body.weight(.medium))
                         .lineLimit(1)
+                    if model.isAlias {
+                        Text("ALIAS").orbFont(size: 9, weight: .bold).foregroundStyle(ORBTheme.accentLink)
+                    }
+                    if model.hasExpired {
+                        Text("EXPIRED").orbFont(size: 9, weight: .bold).foregroundStyle(.red)
+                    }
                 }
                 if let line = facts.oneLiner {
                     Text(line)
@@ -68,35 +86,39 @@ struct ModelRowView: View {
         .contentShape(Rectangle())
         .onHover { isHovered = $0 }
         .accessibilityElement(children: .contain)
+        .accessibilityAction(named: isFavorite ? "Remove from favorites" : "Add to favorites") { actions.toggleFavorite(model) }
+        .accessibilityAction(named: isComparing ? "Remove from compare" : "Add to compare") { actions.toggleCompare(model) }
+        .accessibilityAction(named: "Copy model ID") { actions.copyID(model) }
+        .accessibilityAction(named: "Chat with this model") { actions.chat(model) }
         .contextMenu {
             Button {
-                viewModel.copyModelId(model)
+                actions.copyID(model)
             } label: {
                 Label("Copy Model ID", systemImage: "doc.on.doc")
             }
             Button {
-                viewModel.toggleFavorite(model)
+                actions.toggleFavorite(model)
             } label: {
                 Label(isFavorite ? "Remove Favorite" : "Add Favorite",
                       systemImage: isFavorite ? "star.slash" : "star")
             }
             Button {
-                viewModel.toggleCompare(model.id)
+                actions.toggleCompare(model)
             } label: {
                 Label(isComparing ? "Remove from Compare" : "Add to Compare", systemImage: "rectangle.split.3x1")
             }
             Divider()
-            Button { shell.send(.chatWithModel(model.id)) } label: {
+            Button { actions.chat(model) } label: {
                 Label("Chat with this Model", systemImage: "bubble.left")
             }
-            Button { shell.send(.agentWithModel(model.id)) } label: {
+            Button { actions.agent(model) } label: {
                 Label("Run in Agent", systemImage: "wand.and.stars")
             }
-            Divider()
-            Button {
-                NSWorkspace.shared.open(URL(string: "https://openrouter.ai/\(model.id)")!)
-            } label: {
-                Label("Open on OpenRouter", systemImage: "safari")
+            if let url = model.openRouterURL {
+                Divider()
+                Button { NSWorkspace.shared.open(url) } label: {
+                    Label("Open on OpenRouter", systemImage: "safari")
+                }
             }
         }
     }
@@ -113,34 +135,34 @@ struct ModelRowView: View {
 
     private var quickActions: some View {
         HStack(spacing: 8) {
-            let showHover = isHovered || isComparing
-            Button { viewModel.toggleCompare(model.id) } label: {
+            let compareVisible = isHovered || isComparing || anyComparing
+            Button { actions.toggleCompare(model) } label: {
                 Image(systemName: isComparing ? "checkmark.square.fill" : "square")
                     .foregroundStyle(isComparing ? ORBTheme.accent : Color.secondary)
             }
             .buttonStyle(.plain)
-            .opacity(showHover || !viewModel.compareIDs.isEmpty ? 1 : 0)
+            .hiddenUnless(compareVisible)
             .help(isComparing ? "Remove from compare" : "Add to compare")
             .accessibilityLabel(isComparing ? "Remove from compare" : "Add to compare")
 
-            Button { shell.send(.chatWithModel(model.id)) } label: {
+            Button { actions.chat(model) } label: {
                 Image(systemName: "bubble.left").foregroundStyle(.secondary)
             }
             .buttonStyle(.plain)
-            .opacity(isHovered ? 1 : 0)
+            .hiddenUnless(isHovered)
             .help("Chat with this model")
             .accessibilityLabel("Chat with this model")
 
-            Button { viewModel.copyModelId(model) } label: {
-                Image(systemName: viewModel.copiedModelId == model.id ? "checkmark" : "doc.on.doc")
-                    .foregroundStyle(viewModel.copiedModelId == model.id ? ORBTheme.success : Color.secondary)
+            Button { actions.copyID(model) } label: {
+                Image(systemName: isCopied ? "checkmark" : "doc.on.doc")
+                    .foregroundStyle(isCopied ? ORBTheme.success : Color.secondary)
             }
             .buttonStyle(.plain)
-            .opacity(isHovered || viewModel.copiedModelId == model.id ? 1 : 0)
+            .hiddenUnless(isHovered || isCopied)
             .help("Copy model ID")
             .accessibilityLabel("Copy model ID")
 
-            Button { viewModel.toggleFavorite(model) } label: {
+            Button { actions.toggleFavorite(model) } label: {
                 Image(systemName: isFavorite ? "star.fill" : "star")
                     .foregroundStyle(isFavorite ? Color.yellow : Color.secondary.opacity(0.7))
             }
@@ -196,6 +218,16 @@ struct ModelRowView: View {
     }
 }
 
+private extension View {
+    /// Invisible controls must not be clickable or read by VoiceOver; the
+    /// row exposes the same actions as accessibility actions instead.
+    func hiddenUnless(_ visible: Bool) -> some View {
+        opacity(visible ? 1 : 0)
+            .allowsHitTesting(visible)
+            .accessibilityHidden(!visible)
+    }
+}
+
 // MARK: - Model Detail
 
 enum ModelDetailTab: String, CaseIterable, Identifiable {
@@ -207,6 +239,7 @@ struct ModelDetailView: View {
     let model: ModelInfo
     @ObservedObject var viewModel: BrowserViewModel
     @EnvironmentObject private var shell: ShellController
+    @AppStorage(PriceUnit.defaultsKey) private var priceUnit: PriceUnit = .perMillion
     @State private var notes: String = ""
     @State private var notesDebounceTask: Task<Void, Never>?
     @State private var tab: ModelDetailTab = .overview
@@ -259,7 +292,22 @@ struct ModelDetailView: View {
                     .font(ORBFont.caption.weight(.semibold))
                     .foregroundStyle(.secondary)
                 if model.isUnofficial { Text("UNOFFICIAL").font(ORBFont.caption.weight(.bold)).foregroundStyle(.orange) }
-                if model.hasExpired { Text("EXPIRED").font(ORBFont.caption.weight(.bold)).foregroundStyle(.red) }
+                if model.isAlias { Text("ALIAS").font(ORBFont.caption.weight(.bold)).foregroundStyle(ORBTheme.accentLink) }
+                if model.hasExpired {
+                    Text("EXPIRED").font(ORBFont.caption.weight(.bold)).foregroundStyle(.red)
+                } else if let warning = model.expirationWarning() {
+                    Label(warning, systemImage: "clock.badge.exclamationmark")
+                        .font(ORBFont.caption.weight(.semibold)).foregroundStyle(.orange)
+                        .help("Expires \(model.expirationDate ?? "")")
+                }
+            }
+            if let target = model.aliasTarget {
+                Button { shell.send(.selectModel(target.slug)) } label: {
+                    Text("Alias of \(target.name ?? target.slug) →")
+                        .font(ORBFont.footnote)
+                }
+                .buttonStyle(.link)
+                .help("Currently routes to \(target.slug). Open that model.")
             }
             Text(model.modelSlug).orbFont(size: 22, weight: .semibold).lineLimit(2)
             Text(model.id)
@@ -279,10 +327,10 @@ struct ModelDetailView: View {
                     Label(viewModel.copiedModelId == model.id ? "Copied" : "Copy ID",
                           systemImage: viewModel.copiedModelId == model.id ? "checkmark" : "doc.on.doc")
                 }
-                .keyboardShortcut("c", modifiers: [.command, .shift])
-                Button {
-                    NSWorkspace.shared.open(URL(string: "https://openrouter.ai/\(model.id)")!)
-                } label: { Label("Open on OpenRouter", systemImage: "safari") }
+
+                if let url = model.openRouterURL {
+                    Button { NSWorkspace.shared.open(url) } label: { Label("Open on OpenRouter", systemImage: "safari") }
+                }
                 Spacer(minLength: 0)
             }
             .controlSize(.regular)
@@ -306,25 +354,26 @@ struct ModelDetailView: View {
         let eps = viewModel.endpoints
         if eps.count > 1 {
             let cheapest = eps.compactMap(\.promptCostPer1M).min()
+            let unit = priceUnit
             let fastest = eps.compactMap(\.latencyLast30m).min()
             VStack(alignment: .leading, spacing: 6) {
                 Text("Price and latency by provider").font(.headline)
                 Grid(alignment: .leading, horizontalSpacing: 18, verticalSpacing: 6) {
                     GridRow {
-                        Text("Provider"); Text("Input / 1M"); Text("Output / 1M"); Text("Latency"); Text("Throughput")
+                        Text("Provider"); Text("Input / \(unit.suffix)"); Text("Output / \(unit.suffix)"); Text("Latency"); Text("Throughput")
                     }
                     .font(ORBFont.caption.weight(.semibold)).foregroundStyle(.secondary)
                     ForEach(eps) { ep in
                         GridRow {
-                            Text(ep.providerName ?? "Unknown").lineLimit(1)
+                            Text(ep.displayName).lineLimit(1)
                             HStack(spacing: 3) {
-                                Text(ep.promptCostPer1M.map(BrowserFormat.price) ?? "—")
+                                Text(PriceDisplay.perToken(ep.pricing?.prompt).map { PriceDisplay.amount(perToken: $0, unit: unit) } ?? "—")
                                 if let c = ep.promptCostPer1M, c == cheapest {
                                     Image(systemName: "checkmark.seal.fill").foregroundStyle(ORBTheme.success)
                                         .help("Cheapest input").accessibilityLabel("Cheapest input")
                                 }
                             }
-                            Text(ep.completionCostPer1M.map(BrowserFormat.price) ?? "—")
+                            Text(PriceDisplay.perToken(ep.pricing?.completion).map { PriceDisplay.amount(perToken: $0, unit: unit) } ?? "—")
                             HStack(spacing: 3) {
                                 Text(ep.latencyLast30m.map { "\($0) ms" } ?? "—")
                                 if let l = ep.latencyLast30m, l == fastest {
@@ -369,6 +418,7 @@ struct ModelDetailView: View {
 
     // MARK: Stats Grid
 
+    @ViewBuilder
     private var statsGrid: some View {
         LazyVGrid(columns: [
             GridItem(.flexible()),
@@ -386,17 +436,19 @@ struct ModelDetailView: View {
             if model.isFree {
                 StatCard(title: "Price", value: "Free", icon: "gift", color: .green)
             } else {
-                if let p = model.promptCostPer1M {
-                    StatCard(title: "Input $/1M", value: PriceFormat.perMillion(p), icon: "arrow.down.circle", color: .orange)
+                if let p = PriceDisplay.perToken(model.pricing?.prompt), p > 0 {
+                    StatCard(title: "Input $/\(priceUnit.suffix)", value: PriceDisplay.amount(perToken: p, unit: priceUnit), icon: "arrow.down.circle", color: .orange)
                 }
-                if let c = model.completionCostPer1M {
-                    StatCard(title: "Output $/1M", value: PriceFormat.perMillion(c), icon: "arrow.up.circle", color: .red)
+                if let c = PriceDisplay.perToken(model.pricing?.completion), c > 0 {
+                    StatCard(title: "Output $/\(priceUnit.suffix)", value: PriceDisplay.amount(perToken: c, unit: priceUnit), icon: "arrow.up.circle", color: .red)
+                }
+                if PriceDisplay.perToken(model.pricing?.prompt) == nil, model.pricing?.prompt != nil {
+                    StatCard(title: "Price", value: "Variable", icon: "arrow.triangle.swap", color: .orange)
                 }
             }
-            if let cr = model.cacheReadCostPer1M {
-                StatCard(title: "Cached In $/1M", value: PriceFormat.perMillion(cr), icon: "bolt", color: .yellow)
+            ForEach(model.pricing?.extraLines(unit: priceUnit) ?? []) { line in
+                StatCard(title: line.title, value: line.value, icon: "dollarsign.circle", color: .yellow)
             }
-
             StatCard(title: "Added", value: model.createdFormatted, icon: "calendar", color: .teal)
             StatCard(title: "Knowledge", value: model.knowledgeCutoffFormatted, icon: "book.closed", color: .indigo)
 
@@ -406,6 +458,25 @@ struct ModelDetailView: View {
 
             if model.topProvider?.isModerated == true {
                 StatCard(title: "Moderated", value: "Yes", icon: "shield", color: .yellow)
+            }
+        }
+        pricingTiersSection
+    }
+
+    /// Override tiers (long-context or time-window prices).
+    @ViewBuilder
+    private var pricingTiersSection: some View {
+        let tiers = model.pricing?.tierLines(unit: priceUnit) ?? []
+        if !tiers.isEmpty {
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Pricing tiers").font(.headline)
+                ForEach(tiers) { tier in
+                    HStack(alignment: .firstTextBaseline) {
+                        Text(tier.title).font(ORBFont.footnote).foregroundStyle(.secondary)
+                        Spacer(minLength: 8)
+                        Text(tier.value).font(ORBFont.footnote).monospacedDigit().textSelection(.enabled)
+                    }
+                }
             }
         }
     }
@@ -512,7 +583,7 @@ struct ModelDetailView: View {
             } else {
                 VStack(spacing: 6) {
                     ForEach(viewModel.endpoints) { ep in
-                        ProviderRow(endpoint: ep)
+                        ProviderRow(endpoint: ep, unit: priceUnit)
                     }
                 }
             }
@@ -573,6 +644,7 @@ struct ModelDetailView: View {
 
 struct ProviderRow: View {
     let endpoint: ModelEndpoint
+    var unit: PriceUnit = .perMillion
 
     var body: some View {
         HStack(spacing: 12) {
@@ -582,7 +654,7 @@ struct ProviderRow: View {
                 .frame(width: 8, height: 8)
 
             VStack(alignment: .leading, spacing: 2) {
-                Text(endpoint.providerName ?? "Unknown")
+                Text(endpoint.displayName)
                     .orbFont(size: 13, weight: .semibold)
                     .lineLimit(1)
                 HStack(spacing: 10) {
@@ -610,9 +682,13 @@ struct ProviderRow: View {
             Spacer()
 
             VStack(alignment: .trailing, spacing: 2) {
-                if let p = endpoint.promptCostPer1M, let c = endpoint.completionCostPer1M {
-                    Text("\(PriceFormat.perMillion(p)) in")
-                    Text("\(PriceFormat.perMillion(c)) out")
+                if let p = PriceDisplay.perToken(endpoint.pricing?.prompt),
+                   let c = PriceDisplay.perToken(endpoint.pricing?.completion) {
+                    Text("\(PriceDisplay.amount(perToken: p, unit: unit)) in")
+                    Text("\(PriceDisplay.amount(perToken: c, unit: unit)) out")
+                    ForEach(endpoint.pricing?.extraLines(unit: unit).prefix(2) ?? []) { line in
+                        Text("\(line.title): \(line.value)").foregroundStyle(.secondary)
+                    }
                 } else {
                     Text("—")
                 }

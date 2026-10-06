@@ -99,6 +99,7 @@ enum AgentModelCatalog {
         case .completionCost: return model.completionCostPer1M == nil
         case .created: return model.created == nil
         case .designElo: return model.bestDesignElo == nil
+        default: return ModelSorter.key(model, field) == nil
         }
     }
 
@@ -119,6 +120,8 @@ enum AgentModelCatalog {
             return compareValues(lhs.created, rhs.created)
         case .designElo:
             return compareValues(lhs.bestDesignElo, rhs.bestDesignElo)
+        default:
+            return compareValues(ModelSorter.key(lhs, field), ModelSorter.key(rhs, field))
         }
     }
 
