@@ -118,7 +118,7 @@ ORB_STREAM_SNAPSHOT_DIR=/tmp/orb-snapshots swift test --filter StreamingPresenta
 ORB_REASONING_SNAPSHOT=/tmp/reasoning.png swift test --filter ReasoningPresentationTests
 ```
 
-Strict concurrency checking (`StrictConcurrency`) is enabled as warnings in `Package.swift`. The package still builds in Swift 5 language mode.
+Strict concurrency checking (`StrictConcurrency=targeted`) is enabled as warnings in `Package.swift`. The package still builds in Swift 5 language mode.
 
 ### Continuous integration
 

@@ -10,7 +10,7 @@ All notable changes to ORB are listed here. The format is based on [Keep a Chang
 - Version now comes from `VERSION` (`CFBundleShortVersionString`), and `CFBundleVersion` is the commit count.
 - The app icon is now committed as `Resources/AppIcon.icns`. The generator moved to `scripts/make_icon.swift`.
 - `orb://` URL scheme registered in the bundle's Info.plist.
-- Swift strict concurrency checking enabled as warnings.
+- Swift strict concurrency checking (`targeted`) enabled as warnings.
 - Opt-in integration and snapshot tests now report as **skipped** rather than silently passing.
 - Expanded `.gitignore` coverage for signing material, env files, local databases, and agent workspaces.
 - New README, architecture notes, contributing and security guides, and issue/PR templates.
