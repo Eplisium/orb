@@ -247,3 +247,26 @@ struct SettingsRenderTests {
         }
     }
 }
+
+
+@Suite("Wave 1 settings: account panels gate on the right key")
+struct AccountPanelGatingTests {
+    @Test("Credits and activity need the management key; key info needs the inference key")
+    func roles() {
+        #expect(AccountPanel.credits.requiredRole == .management)
+        #expect(AccountPanel.activity.requiredRole == .management)
+        #expect(AccountPanel.keyInfo.requiredRole == .inference)
+        #expect(!AccountPanel.credits.isAvailable(hasInferenceKey: true, hasManagementKey: false))
+        #expect(AccountPanel.credits.isAvailable(hasInferenceKey: false, hasManagementKey: true))
+        #expect(!AccountPanel.keyInfo.isAvailable(hasInferenceKey: false, hasManagementKey: true))
+        #expect(AccountPanel.keyInfo.isAvailable(hasInferenceKey: true, hasManagementKey: false))
+    }
+
+    @Test("Only panels with their key are refreshed")
+    func refresh() {
+        #expect(AccountPanel.panelsToRefresh(hasInferenceKey: true, hasManagementKey: false) == [.keyInfo])
+        #expect(AccountPanel.panelsToRefresh(hasInferenceKey: false, hasManagementKey: true) == [.credits, .activity])
+        #expect(AccountPanel.panelsToRefresh(hasInferenceKey: false, hasManagementKey: false).isEmpty)
+        #expect(AccountPanel.credits.missingKeyMessage.contains("management key"))
+    }
+}

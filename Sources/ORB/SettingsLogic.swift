@@ -243,6 +243,38 @@ enum SaveStatus: Equatable {
     var afterDisplayTime: SaveStatus { self == .saved ? .idle : self }
 }
 
+// MARK: Account panel gating
+
+/// Which credential each Settings account panel needs. Credits and activity
+/// are management-key endpoints; `GET /key` describes the inference key.
+enum AccountPanel: CaseIterable {
+    case credits, activity, keyInfo
+
+    var requiredRole: CredentialRole {
+        switch self {
+        case .credits, .activity: return .management
+        case .keyInfo: return .inference
+        }
+    }
+
+    func isAvailable(hasInferenceKey: Bool, hasManagementKey: Bool) -> Bool {
+        requiredRole == .management ? hasManagementKey : hasInferenceKey
+    }
+
+    /// Shown in place of the panel when its key is missing.
+    var missingKeyMessage: String {
+        switch requiredRole {
+        case .management: return "Add a management key in Settings → Accounts to see credits and activity."
+        case .inference: return "Add an API key in Settings → Accounts to see details about it."
+        }
+    }
+
+    /// Panels to load on appear for the keys that exist.
+    static func panelsToRefresh(hasInferenceKey: Bool, hasManagementKey: Bool) -> [AccountPanel] {
+        allCases.filter { $0.isAvailable(hasInferenceKey: hasInferenceKey, hasManagementKey: hasManagementKey) }
+    }
+}
+
 // MARK: Inline validation
 
 enum FieldCheck: Equatable {
