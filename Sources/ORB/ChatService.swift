@@ -708,9 +708,13 @@ final class ChatService: ObservableObject {
                                   eventID: context.runID.uuidString)
         conversations[index].totalCost += usage.cost ?? 0
         conversations[index].totalTokens += usage.totalTokens ?? 0
+        let elapsed = max(Date().timeIntervalSince(context.startedAt), 0.001)
         if let completion = usage.completionTokens {
-            let elapsed = max(Date().timeIntervalSince(context.startedAt), 0.001)
             tokensPerSecond = Double(completion) / elapsed
+        }
+        if let messageIndex = conversations[index].messages.firstIndex(where: { $0.id == context.assistantMessageID }) {
+            conversations[index].messages[messageIndex].usage = MessageUsage(usage, elapsed: elapsed)
+            synchronizeActive(context.conversationID)
         }
     }
 

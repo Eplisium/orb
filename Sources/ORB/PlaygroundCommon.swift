@@ -473,12 +473,24 @@ struct PlaygroundMessageView: View, Equatable {
                 Text(isUser ? "You" : assistantName)
                     .orbFont(size: 12, weight: .semibold)
                     .foregroundStyle(isUser ? Color.secondary : Color.primary)
+                Text(MessageMetaFormat.timestamp(message.createdAt))
+                    .orbFont(size: 11)
+                    .foregroundStyle(.tertiary)
+                    .opacity(isHovering ? 1 : 0)
+                    .help(message.createdAt.formatted(date: .complete, time: .standard))
                 Spacer()
                 messageActions
                     .opacity(isHovering || showCopyCheck ? 1 : 0)
                     .disabled(isStreaming)
             }
             messageBubble
+            if !isUser, !isStreaming, let usage = message.usage, !usage.summary.isEmpty {
+                Text(usage.summary)
+                    .orbFont(size: 11, design: .monospaced)
+                    .foregroundStyle(.tertiary)
+                    .opacity(isHovering ? 1 : 0.55)
+                    .help(MessageMetaFormat.usageDetail(usage))
+            }
         }
         .padding(.horizontal, isUser ? 18 : 0)
         .padding(.vertical, isUser ? 15 : 8)
@@ -945,3 +957,23 @@ struct PlaygroundErrorBanner: View {
     }
 }
 
+
+/// Formatting for per-message metadata (timestamps, usage).
+enum MessageMetaFormat {
+    /// Time only for today, otherwise date + time.
+    static func timestamp(_ date: Date, now: Date = .now, calendar: Calendar = .current) -> String {
+        calendar.isDate(date, inSameDayAs: now)
+            ? date.formatted(date: .omitted, time: .shortened)
+            : date.formatted(date: .abbreviated, time: .shortened)
+    }
+
+    static func usageDetail(_ usage: MessageUsage) -> String {
+        var lines: [String] = []
+        if let p = usage.promptTokens { lines.append("Prompt: \(p.formatted()) tokens") }
+        if let c = usage.completionTokens { lines.append("Completion: \(c.formatted()) tokens") }
+        if let r = usage.reasoningTokens, r > 0 { lines.append("Reasoning: \(r.formatted()) tokens") }
+        if let cost = usage.cost { lines.append(String(format: "Cost: $%.6f", cost)) }
+        if let tps = usage.tokensPerSecond { lines.append(String(format: "Speed: %.1f tok/s", tps)) }
+        return lines.joined(separator: "\n")
+    }
+}

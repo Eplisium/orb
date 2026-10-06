@@ -422,3 +422,65 @@ struct PlaygroundPerfTests {
         #expect(!(try dbStore.loadRecords(mode: .chat).map(\.conversation.id).contains(agent.id)))
     }
 }
+
+// MARK: - Items 8/9/14: timestamps, per-message usage, unified export
+
+@Suite("Wave1: message metadata and export")
+@MainActor
+struct MessageMetadataTests {
+    @Test("createdAt survives a rewrite; usage round-trips through SQLite")
+    func persistence() throws {
+        let database = DatabaseManager()
+        let store = DatabaseConversationStore(database: database)
+        let created = Date(timeIntervalSince1970: 1_700_000_000)
+        var conversation = ChatConversation(modelId: "m", mode: .chat)
+        let usage = MessageUsage(promptTokens: 10, completionTokens: 20, totalTokens: 30, cost: 0.002, tokensPerSecond: 40)
+        conversation.messages = [
+            ChatMessage(role: "user", content: "q", createdAt: created),
+            ChatMessage(role: "assistant", content: "a", createdAt: created.addingTimeInterval(5), usage: usage),
+        ]
+        try store.saveRecord(.init(conversation: conversation, agentHistory: []))
+        try store.saveRecord(.init(conversation: conversation, agentHistory: []))
+        let loaded = try #require(try store.loadRecords().first { $0.conversation.id == conversation.id })
+        #expect(loaded.conversation.messages.map(\.createdAt) == [created, created.addingTimeInterval(5)])
+        #expect(loaded.conversation.messages[1].usage == usage)
+    }
+
+    @Test("usage from the stream is stored on the assistant message")
+    func usageStored() async throws {
+        let usage = ChatUsage(promptTokens: 5, completionTokens: 7, totalTokens: 12, cost: 0.01)
+        let client = WaveScriptedClient([.init(events: [.contentDelta(choiceIndex: 0, text: "hi"), .usage(usage), .done])])
+        let service = ChatService(client: client, store: CountingConversationStore(), apiKeyProvider: { "fixture" })
+        service.sendMessage("q", modelId: "test/model")
+        try await waitUntilIdle(service)
+        let stored = try #require(service.activeConversation?.messages.last?.usage)
+        #expect(stored.totalTokens == 12)
+        #expect(stored.cost == 0.01)
+        #expect(stored.tokensPerSecond != nil)
+        #expect(stored.summary.contains("12 tokens"))
+    }
+
+    @Test("exports include timestamps, reasoning, tool calls, and usage")
+    func exportContents() throws {
+        var conversation = ChatConversation(modelId: "m", mode: .agent)
+        conversation.title = "T"
+        conversation.messages = [
+            ChatMessage(role: "user", content: "q"),
+            ChatMessage(role: "assistant", content: "a",
+                        toolCalls: [ToolCallDisplay(id: "1", name: "read_file", argumentsSummary: "{}", arguments: "{\"path\":\"x\"}", result: "data")],
+                        reasoning: "think", reasoningDuration: 1.5,
+                        usage: MessageUsage(totalTokens: 30, cost: 0.002)),
+        ]
+        let md = ConversationExporter.markdown(conversation)
+        #expect(md.contains("Reasoning (1.5s)"))
+        #expect(md.contains("`read_file`"))
+        #expect(md.contains("\"path\":\"x\""))
+        #expect(md.contains("30 tokens"))
+        let json = try JSONSerialization.jsonObject(with: ConversationExporter.json(conversation)) as? [String: Any]
+        let messages = try #require(json?["messages"] as? [[String: Any]])
+        #expect(messages[0]["createdAt"] is String)
+        #expect(messages[1]["reasoning"] as? String == "think")
+        #expect((messages[1]["toolCalls"] as? [[String: Any]])?.first?["result"] as? String == "data")
+        #expect((messages[1]["usage"] as? [String: Any])?["totalTokens"] as? Int == 30)
+    }
+}

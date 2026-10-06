@@ -926,39 +926,12 @@ struct ChatView: View {
     }
 
     private func exportConversationJSON(_ conv: ChatConversation) {
-        let panel = NSSavePanel()
-        panel.title = "Export Conversation as JSON"
-        panel.nameFieldStringValue = "\(conv.title).json"
-        panel.allowedContentTypes = [.json]
-        guard panel.runModal() == .OK, let url = panel.url else { return }
-        let payload: [String: Any] = [
-            "title": conv.title, "model": conv.modelId, "mode": conv.mode.rawValue,
-            "systemPrompt": conv.systemPrompt,
-            "messages": conv.messages.map { ["role": $0.role, "content": $0.content] },
-        ]
-        do {
-            let data = try JSONSerialization.data(withJSONObject: payload, options: [.prettyPrinted, .sortedKeys])
-            try data.write(to: url, options: .atomic)
-        } catch {
-            chatService.lastError = "Could not export: \(error.localizedDescription)"
-        }
+        if let error = ConversationExporter.saveWithPanel(conv, as: .json) { chatService.lastError = error }
     }
 
     private func exportConversation(_ conv: ChatConversation) {
-        let markdown = DatabaseManager.shared.exportConversationMarkdown(conv)
-        let panel = NSSavePanel()
-        panel.title = "Export Conversation"
-        panel.nameFieldStringValue = "\(conv.title).md"
-        panel.allowedContentTypes = [UTType(filenameExtension: "md") ?? .plainText]
-        if panel.runModal() == .OK, let url = panel.url {
-            do {
-                try markdown.write(to: url, atomically: true, encoding: .utf8)
-            } catch {
-                chatService.lastError = "Could not export conversation: \(error.localizedDescription)"
-            }
-        }
+        if let error = ConversationExporter.saveWithPanel(conv, as: .markdown) { chatService.lastError = error }
     }
-
 
     /// Composite key covering every source of content growth during a run:
     /// message count, the streaming text, reasoning length, tool-call count
