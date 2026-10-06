@@ -45,6 +45,7 @@ struct ChatView: View {
     @State private var lastScrollRequest: ContinuousClock.Instant?
     @FocusState private var inputFocused: Bool
     @State private var searchFocusRequest = 0
+    @State private var pasteMonitor = ComposerPasteMonitor()
 
     private let accent = PlaygroundTheme.chatAccent
 
@@ -67,6 +68,14 @@ struct ChatView: View {
         }
         .background(playgroundBackground)
         .focusedSceneValue(\.conversationActions, conversationActions)
+        .onAppear {
+            pasteMonitor.install(
+                isActive: { inputFocused && !chatService.isStreaming },
+                onAttach: { urls in _ = attachFiles(urls) },
+                onError: { chatService.lastError = $0 }
+            )
+        }
+        .onDisappear { pasteMonitor.remove() }
         .task {
             chatService.activateConversation(for: .chat)
             selectedModelId = PlaygroundModelDefaults.initialSelection(
@@ -938,6 +947,11 @@ struct ChatView: View {
 
     private func handleDrop(_ urls: [URL]) -> Bool {
         guard !chatService.isStreaming, !urls.isEmpty else { return false }
+        return attachFiles(urls)
+    }
+
+    /// Shared by drop and ⌘V paste.
+    private func attachFiles(_ urls: [URL]) -> Bool {
         let result = ChatAttachmentBuilder.classify(urls: urls)
         attachmentDrafts.append(contentsOf: result.drafts)
         refreshAttachmentWarnings(extra: result.warnings)

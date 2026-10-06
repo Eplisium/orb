@@ -1,6 +1,7 @@
 import Foundation
 import Testing
 import SwiftUI
+import AppKit
 @testable import ORB
 
 // Shared fixtures for the Wave 1 chat-core behaviors: MCP policy wiring,
@@ -558,5 +559,45 @@ struct ConversationCommandsTests {
         ]
         #expect(ConversationActionLogic.lastReply(in: conversation) == "first")
         #expect(ConversationActionLogic.lastReply(in: nil) == nil)
+    }
+}
+
+// MARK: - Item 12: paste images
+
+@Suite("Wave1: paste attachments")
+@MainActor
+struct PasteAttachmentTests {
+    @Test("image data on the pasteboard becomes a PNG attachment; text wins over images")
+    func pastedImage() throws {
+        let pasteboard = NSPasteboard(name: .init("orb-test-\(UUID().uuidString)"))
+        defer { pasteboard.releaseGlobally() }
+        let image = NSImage(size: NSSize(width: 4, height: 4))
+        image.lockFocus(); NSColor.red.setFill(); NSRect(x: 0, y: 0, width: 4, height: 4).fill(); image.unlockFocus()
+        pasteboard.clearContents()
+        pasteboard.writeObjects([image])
+        #expect(PasteboardAttachments.hasAttachments(pasteboard))
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("orb-paste-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let urls = try PasteboardAttachments.urls(from: pasteboard, directory: directory)
+        let url = try #require(urls.first)
+        #expect(url.pathExtension == "png")
+        #expect(ChatAttachmentBuilder.classify(urls: urls).drafts.first?.kind == .image(mimeType: "image/png"))
+
+        pasteboard.clearContents()
+        pasteboard.setString("plain text", forType: .string)
+        #expect(!PasteboardAttachments.hasAttachments(pasteboard))
+    }
+
+    @Test("copied Finder files pass through as URLs")
+    func pastedFiles() throws {
+        let pasteboard = NSPasteboard(name: .init("orb-test-\(UUID().uuidString)"))
+        defer { pasteboard.releaseGlobally() }
+        let file = FileManager.default.temporaryDirectory.appendingPathComponent("orb-\(UUID().uuidString).txt")
+        try Data("x".utf8).write(to: file)
+        defer { try? FileManager.default.removeItem(at: file) }
+        pasteboard.clearContents()
+        pasteboard.writeObjects([file as NSURL])
+        #expect(PasteboardAttachments.hasAttachments(pasteboard))
+        #expect(try PasteboardAttachments.urls(from: pasteboard).map(\.standardizedFileURL) == [file.standardizedFileURL])
     }
 }

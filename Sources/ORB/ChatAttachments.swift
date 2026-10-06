@@ -1,5 +1,6 @@
 import Foundation
 import UniformTypeIdentifiers
+import AppKit
 
 /// NSOpenPanel content types for chat attachments. Kept out of the view so
 /// the literal list doesn't burden the view's type checker.
@@ -204,5 +205,78 @@ enum AttachmentCapability {
         if hasVideo, !model.supportsVideoInput { out.append("This model cannot watch video — it will be ignored upstream.") }
         if hasFile, !model.supportsFileInput { out.append("This model takes no file input — documents will be ignored upstream.") }
         return out
+    }
+}
+
+// MARK: - Pasted attachments (⌘V)
+
+/// Turns pasteboard contents into attachment files: copied Finder files pass
+/// through as URLs; raw image data (screenshots via ⌃⇧⌘4, images copied from
+/// a browser) is written as a PNG into a private temp folder.
+enum PasteboardAttachments {
+    /// True when ⌘V should attach rather than paste text: file URLs or image
+    /// data, and no plain text competing for the paste.
+    static func hasAttachments(_ pasteboard: NSPasteboard) -> Bool {
+        let hasFiles = pasteboard.canReadObject(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true])
+        let hasImage = pasteboard.canReadItem(withDataConformingToTypes: [UTType.png.identifier, UTType.tiff.identifier])
+        let hasText = pasteboard.string(forType: .string)?.isEmpty == false
+        return hasFiles || (hasImage && !hasText)
+    }
+
+    static func urls(from pasteboard: NSPasteboard, directory: URL = defaultDirectory) throws -> [URL] {
+        if let files = pasteboard.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL],
+           !files.isEmpty {
+            return files
+        }
+        guard let png = pngData(from: pasteboard) else { return [] }
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let stamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "-")
+        let url = directory.appendingPathComponent("Pasted image \(stamp)-\(UUID().uuidString.prefix(4)).png")
+        try png.write(to: url, options: .atomic)
+        return [url]
+    }
+
+    static var defaultDirectory: URL {
+        FileManager.default.temporaryDirectory.appendingPathComponent("ORB-pasted", isDirectory: true)
+    }
+
+    private static func pngData(from pasteboard: NSPasteboard) -> Data? {
+        if let png = pasteboard.data(forType: .png) { return png }
+        guard let tiff = pasteboard.data(forType: .tiff), let rep = NSBitmapImageRep(data: tiff) else { return nil }
+        return rep.representation(using: .png, properties: [:])
+    }
+}
+
+/// Intercepts ⌘V while `isActive()` (the composer has focus) when the
+/// pasteboard holds files or an image, and hands them over as URLs. Text
+/// pastes fall through to the text field untouched.
+@MainActor
+final class ComposerPasteMonitor {
+    private var monitor: Any?
+
+    func install(isActive: @escaping @MainActor () -> Bool, onAttach: @escaping @MainActor ([URL]) -> Void,
+                 onError: @escaping @MainActor (String) -> Void) {
+        remove()
+        monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+            guard event.modifierFlags.intersection(.deviceIndependentFlagsMask) == .command,
+                  event.charactersIgnoringModifiers?.lowercased() == "v" else { return event }
+            return MainActor.assumeIsolated {
+                let pasteboard = NSPasteboard.general
+                guard isActive(), PasteboardAttachments.hasAttachments(pasteboard) else { return event }
+                do {
+                    let urls = try PasteboardAttachments.urls(from: pasteboard)
+                    guard !urls.isEmpty else { return event }
+                    onAttach(urls)
+                } catch {
+                    onError("Could not paste the image: \(error.localizedDescription)")
+                }
+                return nil
+            }
+        }
+    }
+
+    func remove() {
+        if let monitor { NSEvent.removeMonitor(monitor) }
+        monitor = nil
     }
 }

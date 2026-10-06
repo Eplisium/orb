@@ -45,6 +45,7 @@ struct AgentView: View {
     @State private var lastScrollRequest: ContinuousClock.Instant?
     @FocusState private var inputFocused: Bool
     @State private var searchFocusRequest = 0
+    @State private var pasteMonitor = ComposerPasteMonitor()
 
     private let accent = PlaygroundTheme.agentAccent
 
@@ -58,6 +59,14 @@ struct AgentView: View {
         }
         .background(playgroundBackground)
         .focusedSceneValue(\.conversationActions, conversationActions)
+        .onAppear {
+            pasteMonitor.install(
+                isActive: { inputFocused && !chatService.isStreaming },
+                onAttach: { urls in attachPasted(urls) },
+                onError: { chatService.lastError = $0 }
+            )
+        }
+        .onDisappear { pasteMonitor.remove() }
         .task {
             chatService.activateConversation(for: .agent)
             selectedModelId = PlaygroundModelDefaults.initialSelection(
@@ -987,6 +996,22 @@ struct AgentView: View {
                 workspace: workspace,
                 fullComputerAccess: fullComputerAccess
             )
+        }
+    }
+
+    /// Agent attachments are inlined as text, so pasted images are saved and
+    /// referenced by path in the prompt (the agent can open them with its
+    /// image tool); pasted text files attach normally.
+    private func attachPasted(_ urls: [URL]) {
+        let images = urls.filter { (UTType(filenameExtension: $0.pathExtension)?.conforms(to: .image)) == true }
+        let others = urls.filter { !images.contains($0) }
+        if !images.isEmpty {
+            let lines = images.map { "[Pasted image: \($0.path)]" }.joined(separator: "\n")
+            messageText += (messageText.isEmpty || messageText.hasSuffix("\n") ? "" : "\n") + lines
+        }
+        if !others.isEmpty {
+            attachments.append(contentsOf: others)
+            refreshAttachmentDiagnostics()
         }
     }
 
