@@ -1,5 +1,6 @@
 import Foundation
 import Testing
+import SwiftUI
 @testable import ORB
 
 // Shared fixtures for the Wave 1 chat-core behaviors: MCP policy wiring,
@@ -525,5 +526,37 @@ struct EditResendTests {
         try await waitUntilIdle(service)
         #expect(!service.undoEdit(edit), "restoring would interleave old and new turns")
         #expect(service.activeConversation?.messages.map(\.content) == ["a2", "ok"])
+    }
+}
+
+// MARK: - Item 11: conversation commands
+
+@Suite("Wave1: conversation commands")
+struct ConversationCommandsTests {
+    @Test("shortcuts do not collide with shell or Model-menu shortcuts")
+    func noCollisions() {
+        let taken: [KeyboardShortcut] = [
+            .init("n", modifiers: .command), .init("n", modifiers: [.command, .shift]),
+            .init("f", modifiers: .command), .init("k", modifiers: .command), .init("r", modifiers: .command),
+            .init("/", modifiers: .command), .init("d", modifiers: .command), .init("c", modifiers: [.command, .shift]),
+            .init(.return, modifiers: .command), .init("z", modifiers: .command),
+        ] + (1...9).map { .init(KeyEquivalent(Character("\($0)")), modifiers: .command) }
+        let ours = [ConversationShortcuts.stop, ConversationShortcuts.regenerate, ConversationShortcuts.copyLastReply,
+                    ConversationShortcuts.export, ConversationShortcuts.searchSessions]
+        func key(_ s: KeyboardShortcut) -> String { "\(s.key.character)-\(s.modifiers.rawValue)" }
+        #expect(Set(ours.map(key)).count == ours.count)
+        #expect(Set(ours.map(key)).isDisjoint(with: taken.map(key)))
+    }
+
+    @Test("last reply skips empty and non-assistant rows")
+    func lastReply() {
+        var conversation = ChatConversation(modelId: "m", mode: .chat)
+        conversation.messages = [
+            ChatMessage(role: "assistant", content: "first"),
+            ChatMessage(role: "user", content: "q"),
+            ChatMessage(role: "assistant", content: "", status: .failed),
+        ]
+        #expect(ConversationActionLogic.lastReply(in: conversation) == "first")
+        #expect(ConversationActionLogic.lastReply(in: nil) == nil)
     }
 }

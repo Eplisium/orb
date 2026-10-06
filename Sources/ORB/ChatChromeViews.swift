@@ -4,6 +4,9 @@ import SwiftUI
 
 struct ConversationSearchField: View {
     @Binding var text: String
+    /// Bumped by the Conversation ▸ Search Sessions command to take focus.
+    var focusRequest: Int = 0
+    @FocusState private var focused: Bool
 
     var body: some View {
         HStack(spacing: 6) {
@@ -11,6 +14,8 @@ struct ConversationSearchField: View {
             TextField("Search sessions", text: $text)
                 .textFieldStyle(.plain)
                 .font(ORBFont.footnote)
+                .focused($focused)
+                .onChange(of: focusRequest) { _, _ in focused = true }
             if !text.isEmpty {
                 Button { text = "" } label: { Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary) }
                     .buttonStyle(.plain)
@@ -201,8 +206,9 @@ struct AgentRunStatusStrip: View {
                         .accessibilityLabel("\(s.failedToolCalls) tool calls failed")
                 }
                 Spacer()
+                // ⌘. lives in the Conversation menu (ConversationCommands).
                 Button("Cancel run", action: cancel).controlSize(.small)
-                    .keyboardShortcut(".", modifiers: .command)
+                    .help("Cancel run (⌘.)")
             }
             .padding(.horizontal, 18).padding(.vertical, 6)
             .background(ORBTheme.accentSubtle)

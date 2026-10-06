@@ -44,6 +44,7 @@ struct ChatView: View {
     /// stacking scroll requests faster than ~30fps.
     @State private var lastScrollRequest: ContinuousClock.Instant?
     @FocusState private var inputFocused: Bool
+    @State private var searchFocusRequest = 0
 
     private let accent = PlaygroundTheme.chatAccent
 
@@ -65,6 +66,7 @@ struct ChatView: View {
             mainArea
         }
         .background(playgroundBackground)
+        .focusedSceneValue(\.conversationActions, conversationActions)
         .task {
             chatService.activateConversation(for: .chat)
             selectedModelId = PlaygroundModelDefaults.initialSelection(
@@ -155,7 +157,7 @@ struct ChatView: View {
                 }
             )
 
-            ConversationSearchField(text: $sessionQuery)
+            ConversationSearchField(text: $sessionQuery, focusRequest: searchFocusRequest)
             ConversationSectionsList(
                 conversations: chatService.conversations.filter { $0.mode == .chat },
                 query: $sessionQuery,
@@ -969,6 +971,24 @@ struct ChatView: View {
         return {
             Task { await chatService.regenerateLastResponse(modelId: currentModelId, settings: requestSettings) }
         }
+    }
+
+    /// Menu-bar actions for this playground (Conversation menu).
+    private var conversationActions: ConversationActions {
+        let conversation = chatService.activeConversation
+        let regenerate: (() -> Void)? = {
+            guard let conversation, let last = conversation.messages.last else { return nil }
+            return regenerateAction(for: last, in: conversation, running: currentSessionRunning)
+        }()
+        return ConversationActions(
+            stop: currentSessionRunning ? { chatService.stopStreaming() } : nil,
+            regenerate: regenerate,
+            copyLastReply: ConversationActionLogic.lastReply(in: conversation).map { text in
+                { ConversationActionLogic.copyToPasteboard(text) }
+            },
+            export: conversation.map { conv in { exportConversation(conv) } },
+            searchSessions: { searchFocusRequest += 1 }
+        )
     }
 
     private func exportConversationJSON(_ conv: ChatConversation) {

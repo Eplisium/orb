@@ -44,6 +44,7 @@ struct AgentView: View {
     /// stacking scroll requests faster than ~30fps.
     @State private var lastScrollRequest: ContinuousClock.Instant?
     @FocusState private var inputFocused: Bool
+    @State private var searchFocusRequest = 0
 
     private let accent = PlaygroundTheme.agentAccent
 
@@ -56,6 +57,7 @@ struct AgentView: View {
             mainArea
         }
         .background(playgroundBackground)
+        .focusedSceneValue(\.conversationActions, conversationActions)
         .task {
             chatService.activateConversation(for: .agent)
             selectedModelId = PlaygroundModelDefaults.initialSelection(
@@ -158,7 +160,7 @@ struct AgentView: View {
                 }
             )
 
-            ConversationSearchField(text: $sessionQuery)
+            ConversationSearchField(text: $sessionQuery, focusRequest: searchFocusRequest)
             ConversationSectionsList(
                 conversations: chatService.conversations.filter { $0.mode == .agent },
                 query: $sessionQuery,
@@ -1061,6 +1063,21 @@ struct AgentView: View {
 
     /// Agent runs have side effects, so they are never silently replayed.
     private func regenerateAction(for message: ChatMessage, in conversation: ChatConversation, running: Bool) -> (() -> Void)? { nil }
+
+    /// Menu-bar actions for this playground (Conversation menu).
+    private var conversationActions: ConversationActions {
+        let conversation = chatService.activeConversation
+        let regenerate: (() -> Void)? = nil  // Agent runs have side effects; never replayed.
+        return ConversationActions(
+            stop: currentSessionRunning ? { chatService.stopStreaming() } : nil,
+            regenerate: regenerate,
+            copyLastReply: ConversationActionLogic.lastReply(in: conversation).map { text in
+                { ConversationActionLogic.copyToPasteboard(text) }
+            },
+            export: conversation.map { conv in { exportConversation(conv) } },
+            searchSessions: { searchFocusRequest += 1 }
+        )
+    }
 
     private func exportConversationJSON(_ conv: ChatConversation) {
         if let error = ConversationExporter.saveWithPanel(conv, as: .json) { chatService.lastError = error }

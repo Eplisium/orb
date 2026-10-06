@@ -26,6 +26,7 @@ struct ORBApp: App {
         .windowToolbarStyle(.unified)
         .commands {
             ShellCommands(shell: shell, focusManager: focusManager)
+            ConversationCommands()
         }
 
         Settings {
