@@ -62,8 +62,12 @@ struct AgentView: View {
             viewModel.loadFavorites()
             inputFocused = true
         }
-        .onChange(of: selectedModelId) { _, _ in
+        .onChange(of: selectedModelId) { _, newValue in
             if !attachments.isEmpty { refreshAttachmentDiagnostics() }
+            // A picker change switches this session's model in place.
+            if let id = chatService.activeConversation?.id, !newValue.isEmpty {
+                chatService.switchModel(newValue, for: id)
+            }
         }
         .onChange(of: chatService.activeConversation?.id) { _, _ in resetFollowState() }
     }

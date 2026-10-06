@@ -69,6 +69,12 @@ struct ChatView: View {
             viewModel.loadFavorites()
             inputFocused = true
         }
+        .onChange(of: selectedModelId) { _, newValue in
+            // A picker change switches this session's model in place.
+            if let id = chatService.activeConversation?.id, !newValue.isEmpty {
+                chatService.switchModel(newValue, for: id)
+            }
+        }
         .onChange(of: chatService.activeConversation?.id) { _, _ in resetFollowState() }
     }
 

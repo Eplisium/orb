@@ -68,6 +68,11 @@ final class ChatService: ObservableObject {
     private let store: any ConversationStore
     private let apiKeyProvider: () -> String?
     private let agentMaximumTurns: Int
+    /// Source of MCP server configs for the Agent tool policy. Injected so
+    /// tests never read the user's real MCP settings.
+    private let mcpServerProvider: () -> [MCPServerConfig]
+    /// The policy handed to the most recent Agent run (diagnostics/tests).
+    private(set) var lastAgentPolicy: ToolPolicy?
     /// Risky agent tools (terminal, computer control, MCP) wait here for the user.
     let approvalPresenter = ApprovalPresenter()
     private let approvals = ApprovalCoordinator()
@@ -85,21 +90,34 @@ final class ChatService: ObservableObject {
     private var agentToolPreviewCoalescer: StreamPublishCoalescer<[AssembledAgentToolCall]>?
     private var regenerationBackups: [UUID: ChatMessage] = [:]
     private var lastCheckpoint: ContinuousClock.Instant?
+    /// Messages created during the current run besides its assistant row
+    /// (Agent tool results). Checkpoints upsert exactly these plus the
+    /// assistant, never the whole conversation.
+    private var runInsertedMessageIDs: Set<UUID> = []
+    /// Debounced system-prompt save (the editor writes on every keystroke).
+    private var pendingPromptSave: (conversationID: UUID, task: Task<Void, Never>)?
+    static let systemPromptSaveDelay: Duration = .milliseconds(600)
 
     convenience init() {
-        self.init(client: OpenRouterClient(), store: DatabaseConversationStore(), apiKeyProvider: { KeychainManager.getAPIKey() })
+        self.init(
+            client: OpenRouterClient(), store: DatabaseConversationStore(),
+            apiKeyProvider: { KeychainManager.getAPIKey() },
+            mcpServerProvider: { MCPRegistry.loadConfigs() }
+        )
     }
 
     init(
         client: any OpenRouterClientProtocol,
         store: any ConversationStore,
         apiKeyProvider: @escaping () -> String?,
-        agentMaximumTurns: Int = 100
+        agentMaximumTurns: Int = 100,
+        mcpServerProvider: @escaping () -> [MCPServerConfig] = { [] }
     ) {
         self.client = client
         self.store = store
         self.apiKeyProvider = apiKeyProvider
         self.agentMaximumTurns = agentMaximumTurns
+        self.mcpServerProvider = mcpServerProvider
         installApprovalHandler()
         loadPersistedConversations()
     }
@@ -134,7 +152,33 @@ final class ChatService: ObservableObject {
         return conversation
     }
 
+    /// Ensures a send has a conversation of the right mode. Changing the
+    /// model mid-chat switches the active conversation's model in place
+    /// (and persists it) instead of silently starting a new session.
+    private func prepareActiveConversation(modelId: String, mode: PlaygroundMode) {
+        guard let active = activeConversation, active.mode == mode,
+              let index = conversations.firstIndex(where: { $0.id == active.id }) else {
+            _ = newConversation(modelId: modelId, mode: mode)
+            return
+        }
+        guard conversations[index].modelId != modelId else { return }
+        conversations[index].modelId = modelId
+        synchronizeActive(active.id)
+        persistMeta(active.id)
+    }
+
+    /// Switches the model of an existing conversation (picker change).
+    func switchModel(_ modelId: String, for conversationID: UUID) {
+        guard !isRunning(conversationID: conversationID),
+              let index = conversations.firstIndex(where: { $0.id == conversationID }),
+              conversations[index].modelId != modelId else { return }
+        conversations[index].modelId = modelId
+        synchronizeActive(conversationID)
+        persistMeta(conversationID)
+    }
+
     func selectConversation(_ conversation: ChatConversation) {
+        flushPendingEdits()
         activeConversation = conversations.first(where: { $0.id == conversation.id }) ?? conversation
     }
 
@@ -318,11 +362,31 @@ final class ChatService: ObservableObject {
         conversations.sort { $0.createdAt > $1.createdAt }
     }
 
+    /// Bound to a TextEditor, so this fires per keystroke. Memory updates
+    /// immediately; the conversation row is written once typing pauses (or
+    /// when `flushPendingEdits` runs on navigation/send).
     func updateSystemPrompt(_ prompt: String, for conversation: ChatConversation) {
         guard let index = conversations.firstIndex(where: { $0.id == conversation.id }) else { return }
+        guard conversations[index].systemPrompt != prompt else { return }
         conversations[index].systemPrompt = prompt
         synchronizeActive(conversation.id)
-        persist(conversation.id)
+        if let pending = pendingPromptSave, pending.conversationID != conversation.id { flushPendingEdits() }
+        pendingPromptSave?.task.cancel()
+        let id = conversation.id
+        let task = Task { [weak self] in
+            try? await Task.sleep(for: Self.systemPromptSaveDelay)
+            guard !Task.isCancelled else { return }
+            self?.flushPendingEdits()
+        }
+        pendingPromptSave = (id, task)
+    }
+
+    /// Writes any debounced edit now. Safe to call repeatedly.
+    func flushPendingEdits() {
+        guard let pending = pendingPromptSave else { return }
+        pendingPromptSave = nil
+        pending.task.cancel()
+        persistMeta(pending.conversationID)
     }
 
     func sendMessage(
@@ -348,9 +412,8 @@ final class ChatService: ObservableObject {
             return nil
         }
         ModelRecentsStore().record(modelId)
-        if activeConversation == nil || activeConversation?.modelId != modelId || activeConversation?.mode != .chat {
-            _ = newConversation(modelId: modelId, mode: .chat)
-        }
+        flushPendingEdits()
+        prepareActiveConversation(modelId: modelId, mode: .chat)
         guard let conversationID = activeConversation?.id,
               let conversationIndex = conversations.firstIndex(where: { $0.id == conversationID }) else { return nil }
 
@@ -381,9 +444,7 @@ final class ChatService: ObservableObject {
         var messages: [AgentAPIMessage] = []
         let conversation = conversations[conversationIndex]
         if !conversation.systemPrompt.isEmpty { messages.append(.init(role: "system", content: conversation.systemPrompt)) }
-        messages += conversation.messages.dropLast().filter { $0.role == "user" || $0.role == "assistant" }.map {
-            wireMessage(for: $0)
-        }
+        messages += Self.wireHistory(Array(conversation.messages.dropLast())).map { wireMessage(for: $0) }
 
         let context = PlaygroundRunContext(
             runID: UUID(), conversationID: conversationID, assistantMessageID: assistant.id,
@@ -398,6 +459,7 @@ final class ChatService: ObservableObject {
         tokensPerSecond = 0
         contentPublishCount = 0
         lastCheckpoint = nil
+        runInsertedMessageIDs = []
         let request = OpenRouterRequest(
             apiKey: apiKey, model: modelId, messages: messages,
             settings: settings
@@ -438,22 +500,25 @@ final class ChatService: ObservableObject {
             self?.publishReasoningDetails(details, context: context)
         }
         do {
-            let stream = try await client.stream(request)
+            let stream = try await StreamArrivalRelay.stream(client, request)
             try Task.checkCancellation()
             guard owns(context.runID) else { return }
             runState.phase = .streaming
             activityLabel = "Streaming…"
-            for try await event in stream {
+            var lastArrival = Date()
+            for try await timed in stream {
                 try Task.checkCancellation()
                 guard owns(context.runID) else { return }
+                let event = timed.event
+                lastArrival = timed.arrivedAt
                 switch event {
                 case .contentDelta(let choice, let text) where choice == 0:
-                    if !text.isEmpty { freezeReasoningDuration(context) }
+                    if !text.isEmpty { freezeReasoningDuration(context, at: timed.arrivedAt) }
                     reasoningCoalescer.flush()
                     fullContent += text
                     contentCoalescer.submit(fullContent, addedCharacters: text.count)
                 case .reasoningDelta(let choice, let text) where choice == 0:
-                    if !text.isEmpty { markReasoningStarted(context) }
+                    if !text.isEmpty { markReasoningStarted(context, at: timed.arrivedAt) }
                     contentCoalescer.flush()
                     reasoningContent += text
                     reasoningCoalescer.submit(reasoningContent, addedCharacters: text.count)
@@ -480,6 +545,7 @@ final class ChatService: ObservableObject {
                 default: break
                 }
             }
+            freezeReasoningDuration(context, at: lastArrival)
             contentCoalescer.flush()
             reasoningCoalescer.flush()
             detailCoalescer.flush()
@@ -535,21 +601,26 @@ final class ChatService: ObservableObject {
     /// Track only active reasoning segments, not time spent showing an answer
     /// or using tools between Agent turns. Each boundary publishes once, while
     /// the many deltas inside a segment remain coalesced by the frame timer.
-    private func markReasoningStarted(_ context: PlaygroundRunContext) {
+    ///
+    /// Boundaries are stamped with the event's network arrival time, not the
+    /// moment the main actor got around to processing it: a busy main actor
+    /// drains queued events back to back and would otherwise collapse a long
+    /// thinking phase into milliseconds.
+    private func markReasoningStarted(_ context: PlaygroundRunContext, at instant: Date = Date()) {
         guard owns(context.runID), reasoningActiveRunID != context.runID else { return }
         reasoningActiveRunID = context.runID
         _ = mutateMessage(context) { message in
-            message.reasoningStartedAt = Date()
+            message.reasoningStartedAt = instant
         }
     }
 
-    private func freezeReasoningDuration(_ context: PlaygroundRunContext) {
+    private func freezeReasoningDuration(_ context: PlaygroundRunContext, at instant: Date = Date()) {
         guard owns(context.runID), reasoningActiveRunID == context.runID else { return }
         reasoningActiveRunID = nil
         _ = mutateMessage(context) { message in
             guard let start = message.reasoningStartedAt else { return }
             message.reasoningDuration = (message.reasoningDuration ?? 0)
-                + max(0, Date().timeIntervalSince(start))
+                + max(0, instant.timeIntervalSince(start))
         }
     }
 
@@ -637,12 +708,23 @@ final class ChatService: ObservableObject {
         }
     }
 
+    /// Crash-safety snapshot while a run streams: upserts the conversation row
+    /// and only the rows this run touches (assistant + inserted tool results).
+    /// The full record is written once at start and once at terminal cleanup.
     private func checkpoint(_ context: PlaygroundRunContext, force: Bool = false) {
         guard owns(context.runID) else { return }
         let now = ContinuousClock.now
         if !force, let lastCheckpoint,
            lastCheckpoint.duration(to: now) < Self.streamCheckpointInterval { return }
-        persist(context.conversationID)
+        guard let conversation = conversations.first(where: { $0.id == context.conversationID }) else { return }
+        do {
+            try store.saveMessages(
+                runInsertedMessageIDs.union([context.assistantMessageID]),
+                of: .init(conversation: conversation, agentHistory: agentHistories[context.conversationID] ?? [])
+            )
+        } catch {
+            lastError = "Could not save conversation: \(error.localizedDescription)"
+        }
         lastCheckpoint = now
     }
 
@@ -738,9 +820,8 @@ final class ChatService: ObservableObject {
             return
         }
         ModelRecentsStore().record(modelId)
-        if activeConversation == nil || activeConversation?.modelId != modelId || activeConversation?.mode != .agent {
-            _ = newConversation(modelId: modelId, mode: .agent)
-        }
+        flushPendingEdits()
+        prepareActiveConversation(modelId: modelId, mode: .agent)
         guard let conversationID = activeConversation?.id,
               let index = conversations.firstIndex(where: { $0.id == conversationID }) else { return }
         conversations[index].messages.append(ChatMessage(role: "user", content: text))
@@ -763,6 +844,7 @@ final class ChatService: ObservableObject {
         agentCumulativeUsage = nil
         agentToolPreviews = []
         lastCheckpoint = nil
+        runInsertedMessageIDs = []
         agentContentCoalescer = StreamPublishCoalescer<String>(
             interval: Self.streamFrameInterval,
             characterBackstop: Self.streamFlushCharacters
@@ -789,6 +871,8 @@ final class ChatService: ObservableObject {
         }
         let history = agentHistories[conversationID] ?? []
         let customPrompt = conversations[index].systemPrompt
+        let policy = ToolPolicy.agentSession(fullComputerAccess: fullComputerAccess, mcpServers: mcpServerProvider())
+        lastAgentPolicy = policy
         streamTask = Task { [weak self] in
             guard let self else { return }
             do {
@@ -798,8 +882,12 @@ final class ChatService: ObservableObject {
                     systemPromptOverride: customPrompt.isEmpty ? nil : customPrompt,
                     client: self.client,
                     maximumTurns: self.agentMaximumTurns,
+                    policy: policy,
                     approvals: OPMode.approvals(self.approvals),
-                    onEvent: { event in await self.receiveAgent(event, context: context) }
+                    onEvent: { event in
+                        let arrival = NativeAgentRunner.eventArrival ?? Date()
+                        await self.receiveAgent(event, context: context, at: arrival)
+                    }
                 )
                 guard self.owns(context.runID) else { return }
                 self.flushAgentStreams()
@@ -839,14 +927,14 @@ final class ChatService: ObservableObject {
         }
     }
 
-    private func receiveAgent(_ event: NativeAgentEvent, context: PlaygroundRunContext) {
+    private func receiveAgent(_ event: NativeAgentEvent, context: PlaygroundRunContext, at arrival: Date = Date()) {
         guard owns(context.runID), !Task.isCancelled else { return }
         switch event {
         case .usage(_, let cumulative):
             agentCumulativeUsage = cumulative
         case .modelTurnStarted:
             flushAgentStreams()
-            freezeReasoningDuration(context)
+            freezeReasoningDuration(context, at: arrival)
             agentToolPreviewCoalescer?.flush()
             agentToolPreviews.removeAll(keepingCapacity: true)
             agentNeedsTurnSeparator = !agentPendingContent.isEmpty
@@ -855,7 +943,7 @@ final class ChatService: ObservableObject {
         case .textDelta(let text):
             agentReasoningCoalescer?.flush()
             agentToolPreviewCoalescer?.flush()
-            if !text.isEmpty { freezeReasoningDuration(context) }
+            if !text.isEmpty { freezeReasoningDuration(context, at: arrival) }
             var addedCharacters = text.count
             if agentNeedsTurnSeparator && !text.isEmpty {
                 agentPendingContent += "\n\n"
@@ -869,7 +957,7 @@ final class ChatService: ObservableObject {
         case .reasoningDelta(let text):
             agentContentCoalescer?.flush()
             agentToolPreviewCoalescer?.flush()
-            if !text.isEmpty { markReasoningStarted(context) }
+            if !text.isEmpty { markReasoningStarted(context, at: arrival) }
             agentReasoningContent += text
             agentReasoningCoalescer?.submit(agentReasoningContent, addedCharacters: text.count)
             if !text.isEmpty, activityLabel != "Thinking…" { activityLabel = "Thinking…" }
@@ -880,7 +968,7 @@ final class ChatService: ObservableObject {
         case .toolCallUpdated(let call):
             agentContentCoalescer?.flush()
             agentReasoningCoalescer?.flush()
-            freezeReasoningDuration(context)
+            freezeReasoningDuration(context, at: arrival)
             let addedCharacters: Int
             if let index = agentToolPreviews.firstIndex(where: { $0.id == call.id }) {
                 let previous = agentToolPreviews[index]
@@ -922,11 +1010,11 @@ final class ChatService: ObservableObject {
             activityLabel = "Tool complete · continuing…"
         case .turnFinished:
             flushAgentStreams()
-            freezeReasoningDuration(context)
+            freezeReasoningDuration(context, at: arrival)
             agentToolPreviewCoalescer?.flush()
         case .finalizing:
             flushAgentStreams()
-            freezeReasoningDuration(context)
+            freezeReasoningDuration(context, at: arrival)
             // This tool-free summary starts a new model turn without
             // .modelTurnStarted; keep earlier visible prose as its own block.
             agentNeedsTurnSeparator = !agentPendingContent.isEmpty
@@ -990,6 +1078,32 @@ final class ChatService: ObservableObject {
         return DatabaseManager.shared.exportConversationMarkdown(conversation)
     }
 
+    /// Chat replay history. Failed or empty assistant turns are display-only:
+    /// strict providers reject an empty assistant message, and a failed
+    /// partial answer is not something the model actually said. Image-only
+    /// replies are skipped too: they would replay as an empty string.
+    static func wireHistory(_ messages: [ChatMessage]) -> [ChatMessage] {
+        var result: [ChatMessage] = []
+        for message in messages {
+            switch message.role {
+            case "assistant":
+                guard Self.isReplayableAssistant(message) else { continue }
+                result.append(message)
+            case "user":
+                result.append(message)
+            default:
+                continue
+            }
+        }
+        return result
+    }
+
+    static func isReplayableAssistant(_ message: ChatMessage) -> Bool {
+        guard message.role == "assistant" else { return false }
+        if message.status == .failed || message.status == .streaming { return false }
+        return !message.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
     private func owns(_ runID: UUID) -> Bool { runState.context?.runID == runID }
 
     private func mutateMessage(_ context: PlaygroundRunContext, mutation: (inout ChatMessage) -> Void) -> Bool {
@@ -1003,6 +1117,7 @@ final class ChatService: ObservableObject {
         guard let conversationIndex = conversations.firstIndex(where: { $0.id == conversationID }),
               let messageIndex = conversations[conversationIndex].messages.firstIndex(where: { $0.id == messageID }) else { return }
         conversations[conversationIndex].messages.insert(message, at: messageIndex)
+        runInsertedMessageIDs.insert(message.id)
         synchronizeActive(conversationID)
     }
 
@@ -1048,7 +1163,7 @@ final class ChatService: ObservableObject {
                     history.append(.init(role: "tool", content: result.content, toolCallId: call.id, name: call.name))
                 }
             }
-            if !message.content.isEmpty {
+            if !message.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, message.status != .failed {
                 history.append(.init(
                     role: "assistant",
                     content: message.content
@@ -1059,7 +1174,18 @@ final class ChatService: ObservableObject {
     }
 
     private func persist(_ conversationID: UUID) {
+        if pendingPromptSave?.conversationID == conversationID {
+            pendingPromptSave?.task.cancel()
+            pendingPromptSave = nil
+        }
         do { try saveRecord(conversationID) }
+        catch { lastError = "Could not save conversation: \(error.localizedDescription)" }
+    }
+
+    /// Conversation row only (title/model/prompt/totals) — no message rows.
+    private func persistMeta(_ conversationID: UUID) {
+        guard let conversation = conversations.first(where: { $0.id == conversationID }) else { return }
+        do { try store.saveConversationMeta(.init(conversation: conversation, agentHistory: agentHistories[conversationID] ?? [])) }
         catch { lastError = "Could not save conversation: \(error.localizedDescription)" }
     }
 

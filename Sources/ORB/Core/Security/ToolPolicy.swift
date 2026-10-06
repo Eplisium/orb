@@ -78,6 +78,19 @@ struct ToolPolicy: Sendable, Equatable {
         fullComputerAccess ? .computerControl : .webOnly
     }
 
+    /// The policy for an interactive Agent run. Enabling an MCP server in
+    /// Settings is the per-server approval; every MCP call still prompts
+    /// unless the user approves it for the run. Web Only never gains MCP
+    /// (it lacks the `.mcp` capability), so the list is ignored there.
+    static func agentSession(fullComputerAccess: Bool, mcpServers: [MCPServerConfig]) -> ToolPolicy {
+        var policy = legacy(fullComputerAccess: fullComputerAccess)
+        guard policy.capabilities.contains(.mcp) else { return policy }
+        policy.approvedMCPServers = Set(
+            mcpServers.filter(\.isEnabled).map { MCPToolNaming.sanitize($0.name) }
+        )
+        return policy
+    }
+
     /// Preset for autonomous experiments: build and verify projects in the
     /// workspace with a terminal, without computer control or MCP. Replaces the
     /// previous hardcoded full-access shortcut in the test-suite runner.

@@ -660,6 +660,25 @@ final class DatabaseManager {
         }
     }
 
+    /// Incremental save: conversation row + the given message rows only, in
+    /// one transaction. Other message rows are left untouched.
+    func saveConversationMessagesChecked(
+        _ conv: ChatConversation, agentHistoryJSON: String,
+        messages: [(message: ChatMessage, sortOrder: Int)]
+    ) throws {
+        try execChecked("BEGIN IMMEDIATE;")
+        do {
+            try saveConversationChecked(conv, agentHistoryJSON: agentHistoryJSON)
+            for row in messages {
+                try saveMessageChecked(row.message, conversationId: conv.id, sortOrder: row.sortOrder)
+            }
+            try execChecked("COMMIT;")
+        } catch {
+            try? execChecked("ROLLBACK;")
+            throw error
+        }
+    }
+
     func loadConversations() -> [(conversation: ChatConversation, agentHistoryJSON: String)] {
         let sql = "SELECT * FROM conversations ORDER BY created_at DESC;"
         guard let stmt = prepare(sql) else { return [] }
