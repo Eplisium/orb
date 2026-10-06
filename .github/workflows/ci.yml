@@ -71,6 +71,7 @@ jobs:
           bash scripts/count_warnings.sh "$LOG_DIR/build.log" --summary > "$LOG_DIR/warnings-summary.txt"
 
       - name: Test
+        timeout-minutes: 15 # fail fast if a test hangs instead of burning the job timeout
         run: |
           set -o pipefail
           swift test --skip-build 2>&1 | tee "$LOG_DIR/test.log"
