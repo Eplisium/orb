@@ -307,6 +307,24 @@ enum RangeValidation {
 
 // MARK: Views
 
+/// General → Prices: one display unit for every price in the model browser.
+struct PriceUnitSettingsSection: View {
+    @AppStorage(PriceUnit.defaultsKey) private var unit: PriceUnit = .perMillion
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Label("Prices", systemImage: "dollarsign.circle").font(.title3.weight(.semibold))
+            Picker("Show token prices", selection: $unit) {
+                ForEach(PriceUnit.allCases) { Text($0.title).tag($0) }
+            }
+            .pickerStyle(.segmented)
+            .frame(maxWidth: 320)
+            Text("Applies to the model list, details, Compare and exports. Filters stay in $ per 1M tokens.")
+                .font(.caption).foregroundStyle(.secondary)
+        }
+    }
+}
+
 /// General → Appearance. Changes apply live to every window.
 struct AppearanceSettingsSection: View {
     @AppStorage(AppearancePrefs.schemeKey) private var scheme = AppearancePrefs.Scheme.system.rawValue

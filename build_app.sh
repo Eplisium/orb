@@ -63,6 +63,11 @@ cat > "$APP_BUNDLE/Contents/Info.plist" << PLIST
 </plist>
 PLIST
 
+# --- orb:// URL scheme (deep links: orb://model/<id>, orb://chat?model=<id>, orb://compare?ids=a,b) ---
+plutil -insert CFBundleURLTypes -json \
+    '[{"CFBundleURLName":"com.eplisium.orb.deeplink","CFBundleURLSchemes":["orb"],"CFBundleTypeRole":"Viewer"}]' \
+    "$APP_BUNDLE/Contents/Info.plist"
+
 # --- Generate app icon ---
 echo "Generating app icon..."
 export PROJECT_DIR APP_NAME

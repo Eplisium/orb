@@ -101,6 +101,8 @@ struct SettingsView: View {
             VStack(alignment: .leading, spacing: 24) {
                 AppearanceSettingsSection()
                 Divider()
+                PriceUnitSettingsSection()
+                Divider()
                 NotificationSettingsSection()
                 Divider()
                 securitySection

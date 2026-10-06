@@ -305,8 +305,30 @@ final class BrowserViewModel: ObservableObject {
         }
     }
 
+    /// Id from a deep link that arrived before the catalog loaded.
+    private(set) var pendingSelectionID: String?
+
+    /// Selects by id. Before the catalog loads the id is remembered and
+    /// applied after the next refresh; returns false only for an id that a
+    /// loaded catalog doesn't contain.
+    @discardableResult
+    func select(id: String) -> Bool {
+        if let model = api.models.first(where: { $0.id == id }) {
+            pendingSelectionID = nil
+            selectModel(model)
+            return true
+        }
+        guard api.models.isEmpty else { return false }
+        pendingSelectionID = id
+        return true
+    }
+
     func refresh() async {
         await api.fetchModels()
+        if let pending = pendingSelectionID {
+            pendingSelectionID = nil
+            select(id: pending)
+        }
         loadFavorites()
         newThisWeekCount = api.models.filter { isNewThisWeek($0) }.count
         // Refetch the selected model's endpoints explicitly; routing through
@@ -487,6 +509,16 @@ struct ContentView: View {
                 focusManager.searchFocused = false
             }
         }
+        .onChange(of: vm.selectedModel?.id, initial: true) { _, id in
+            shell.focusedModelID = selectedSection.isBrowser ? id : nil
+            shell.focusedModelIsFavorite = id.map(vm.favoriteIds.contains) ?? false
+        }
+        .onChange(of: vm.favoriteIds) { _, ids in
+            shell.focusedModelIsFavorite = shell.focusedModelID.map(ids.contains) ?? false
+        }
+        .onChange(of: selectedSection) { _, section in
+            shell.focusedModelID = section.isBrowser ? vm.selectedModel?.id : nil
+        }
         .onChange(of: shell.pending) { _, request in
             guard let request else { return }
             shell.pending = nil
@@ -622,8 +654,8 @@ struct ContentView: View {
             select(.allModels)
             vm.searchText = ""
             vm.clearAllFilters()
-            if let model = vm.api.models.first(where: { $0.id == id }) {
-                vm.selectModel(model)
+            if !vm.select(id: id) {
+                AppToasts.center.show("No model with id \(id)", kind: .warning, duration: 3)
             }
         case .compareModels(let ids):
             let eligible = CompareHandoff.batchIDs(from: ids, catalog: vm.api.models)
@@ -641,6 +673,23 @@ struct ContentView: View {
             if let conversation = service.conversations.first(where: { $0.id == id }) {
                 service.selectConversation(conversation)
             }
+        case .toggleFavorite(let id):
+            vm.toggleFavorite(id: id)
+        case .toggleCompare(let id):
+            vm.toggleCompare(id)
+        case .copyModelID(let id):
+            AppToasts.copy(id, what: "Model ID")
+        case .openOnOpenRouter(let id):
+            if let url = ModelInfo.openRouterURL(for: id) { NSWorkspace.shared.open(url) }
+        case .openCompare:
+            if !selectedSection.isBrowser { select(.allModels) }
+            activeSheet = .compare
+        case .openCompareWith(let ids):
+            vm.setCompare(ids)
+            if !selectedSection.isBrowser { select(.allModels) }
+            activeSheet = .compare
+        case .exportModels(let format):
+            ModelExportPanel.present(text: vm.exportFilteredModels(as: format), format: format)
         }
     }
 
@@ -830,6 +879,19 @@ struct ContentView: View {
             Text("\(vm.filteredModels.count) models")
                 .font(ORBFont.footnote.weight(.medium))
                 .foregroundStyle(.secondary)
+            Menu {
+                ForEach(ModelExportFormat.allCases) { format in
+                    Button("Export as \(format.title)…") { perform(.exportModels(format)) }
+                }
+            } label: {
+                Image(systemName: "square.and.arrow.up").font(.caption)
+            }
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
+            .fixedSize()
+            .disabled(vm.filteredModels.isEmpty)
+            .help("Export the models shown as CSV or JSON")
+            .accessibilityLabel("Export model list")
             Spacer()
             if vm.api.isLoading {
                 ProgressView()
