@@ -21,6 +21,12 @@ struct TestSuiteView: View {
     @StudioState("TestSuiteView.batchSelectedIDs") private var batchSelectedIDs: Set<String> = []
     @StudioState("TestSuiteView.batchSearch") private var batchSearch = ""
     @StudioState("TestSuiteView.batchCeiling") private var batchCeiling = "1.00"
+    @State private var showClearConfirmation = false
+    /// Pending rerun awaiting cost confirmation (single row or failed/unverified batch).
+    @State private var pendingRerun: [TestRerunBatch] = []
+    @State private var showRerunConfirmation = false
+    @State private var leaderboard: [ModelLeaderboardRow] = []
+    @State private var resultsNotice: String?
 
     private let accent = PlaygroundTheme.testAccent
 
@@ -55,6 +61,23 @@ struct TestSuiteView: View {
             userInstructions = ""
         }
         .sheet(isPresented: $showBatchPicker) { batchPicker }
+        .confirmationDialog("Delete all \(testRunner.totalResultCount) saved test results?",
+                            isPresented: $showClearConfirmation, titleVisibility: .visible) {
+            Button("Delete \(testRunner.totalResultCount) Results", role: .destructive) {
+                DatabaseManager.shared.clearTestResults()
+                testRunner.clearResults()
+            }
+        } message: {
+            Text("This can't be undone. Experiment records used by the leaderboard are kept.")
+        }
+        .confirmationDialog(rerunTitle, isPresented: $showRerunConfirmation, titleVisibility: .visible) {
+            Button("Run \(TestRerunPlanner.modelCount(pendingRerun)) model run\(TestRerunPlanner.modelCount(pendingRerun) == 1 ? "" : "s")") {
+                startPendingRerun()
+            }
+            Button("Cancel", role: .cancel) { pendingRerun = [] }
+        } message: {
+            Text("Inference may cost money. Known spend is checked before each model against the $\(batchCeiling) ceiling (set in Compare models); one request may exceed it. Unknown cost stops the run.")
+        }
         .confirmationDialog("Run selected models?", isPresented: $showBatchConfirmation) {
             Button("Run \(batchSelectedIDs.count) models") {
                 guard let scenario = selectedScenario, let ceiling = Double(batchCeiling) else { return }
@@ -488,15 +511,37 @@ struct TestSuiteView: View {
                     .orbFont(size: 11, weight: .bold)
                     .foregroundStyle(.secondary)
                 Spacer()
+                let rerunBatches = TestRerunPlanner.batches(from: testRunner.results)
+                if !rerunBatches.isEmpty {
+                    Button("Rerun failed/unverified (\(TestRerunPlanner.modelCount(rerunBatches)))") {
+                        confirmRerun(rerunBatches)
+                    }
+                    .disabled(testRunner.isRunning)
+                    .help("Reruns the latest failed or unverified result for each scenario and model.")
+                }
+                Menu("Export") {
+                    Button("Results as CSV…") { exportResultsCSV() }
+                    Button("Experiment Records as JSON…") { exportExperimentJSON() }
+                }
+                .menuStyle(.borderlessButton).fixedSize()
                 Button {
-                    DatabaseManager.shared.clearTestResults()
-                    testRunner.clearResults()
+                    showClearConfirmation = true
                 } label: {
                     Text("Clear All")
                         .orbFont(size: 11, weight: .medium)
                         .foregroundStyle(.red)
                 }
                 .buttonStyle(.plain)
+            }
+
+            if let notice = TestResultsPaging.notice(shown: testRunner.results.count, total: testRunner.totalResultCount) {
+                HStack {
+                    Text(notice).orbFont(size: 11).foregroundStyle(.secondary)
+                    Button("Load all") { testRunner.loadAllResults() }.buttonStyle(.link).orbFont(size: 11)
+                }
+            }
+            if let resultsNotice {
+                PlaygroundErrorBanner(message: resultsNotice) { self.resultsNotice = nil }
             }
 
             Text("Older saved passes may predate artifact checks; rerun to verify them. — cost means zero or unreported; totals are lower bounds.")
@@ -506,6 +551,14 @@ struct TestSuiteView: View {
                 CompareMatrixView(results: testRunner.results).padding(.top, 6)
             }
             .font(ORBFont.footnote)
+
+            DisclosureGroup("Model leaderboard (all recorded runs)") {
+                ModelLeaderboardView(rows: leaderboard).padding(.top, 6)
+            }
+            .font(ORBFont.footnote)
+            .task(id: testRunner.totalResultCount) {
+                leaderboard = ModelLeaderboard.rows(DatabaseManager.shared.loadExperimentRunSummaries())
+            }
 
             TestResultsTableView(
                 results: testRunner.results,
@@ -518,6 +571,9 @@ struct TestSuiteView: View {
                 onDelete: { result in
                     DatabaseManager.shared.deleteTestResult(result.id)
                     testRunner.loadSavedResults()
+                },
+                onRerun: { result in
+                    confirmRerun([TestRerunBatch(scenarioID: result.scenarioId, modelIDs: [result.modelId])])
                 }
             )
         }
@@ -1126,47 +1182,65 @@ struct TestSuiteView: View {
     }
 
     private func htmlFileButtons(_ projectPath: String) -> some View {
-        let htmlFiles = findHTMLFiles(in: projectPath)
+        ProjectHTMLButtons(projectPath: projectPath, accent: accent, controlRadius: controlRadius)
+    }
 
-        return Group {
-            if !htmlFiles.isEmpty {
-                VStack(alignment: .leading, spacing: 6) {
-                    Text("OPEN IN BROWSER")
-                        .orbFont(size: 11, weight: .bold)
-                        .foregroundStyle(.secondary)
+    // MARK: - Results actions
 
-                    ForEach(htmlFiles, id: \.self) { file in
-                        Button {
-                            NSWorkspace.shared.open(URL(fileURLWithPath: file))
-                        } label: {
-                            HStack(spacing: 5) {
-                                Image(systemName: "safari.fill")
-                                Text(URL(fileURLWithPath: file).lastPathComponent)
-                                    .lineLimit(1)
-                            }
-                            .orbFont(size: 11, weight: .medium)
-                            .padding(.horizontal, 10)
-                            .padding(.vertical, 6)
-                            .background(accent.opacity(0.10))
-                            .clipShape(RoundedRectangle(cornerRadius: controlRadius))
-                        }
-                        .buttonStyle(.plain)
-                    }
-                }
-            }
+    private var rerunTitle: String {
+        let n = TestRerunPlanner.modelCount(pendingRerun)
+        let scenarios = Set(pendingRerun.map(\.scenarioID)).count
+        return "Rerun \(n) model run\(n == 1 ? "" : "s") across \(scenarios) scenario\(scenarios == 1 ? "" : "s")?"
+    }
+
+    /// Resolves scenarios (built-in or custom); missing ones are reported.
+    private func scenario(id: String) -> TestScenario? {
+        TestCatalog.scenario(id: id) ?? customTests.map { $0.toScenario() }.first { $0.id == id }
+    }
+
+    private func confirmRerun(_ batches: [TestRerunBatch]) {
+        guard !testRunner.isRunning else { return }
+        guard let ceiling = Double(batchCeiling), ceiling.isFinite, ceiling > 0 else {
+            resultsNotice = "Set a positive spend ceiling in Compare models before rerunning."
+            return
+        }
+        pendingRerun = batches
+        showRerunConfirmation = true
+    }
+
+    private func startPendingRerun() {
+        let batches = pendingRerun
+        pendingRerun = []
+        var plan: [(scenario: TestScenario, modelIDs: [String])] = []
+        var missing = 0
+        for batch in batches {
+            if let s = scenario(id: batch.scenarioID) { plan.append((s, batch.modelIDs)) } else { missing += 1 }
+        }
+        if missing > 0 { resultsNotice = "\(missing) scenario\(missing == 1 ? " no longer exists" : "s no longer exist") and will be skipped." }
+        guard !plan.isEmpty, let ceiling = Double(batchCeiling) else { return }
+        testRunner.start(plan: plan, models: viewModel.api.models, ceilingUSD: ceiling)
+    }
+
+    private func exportResultsCSV() {
+        let rows = testRunner.showsAllResults ? testRunner.results : DatabaseManager.shared.loadAllTestResults()
+        save(text: TestResultsCSV.encode(rows), name: "orb-test-results.csv")
+    }
+
+    private func exportExperimentJSON() {
+        do {
+            let json = try ExperimentExport.encodeJSON(records: DatabaseManager.shared.loadExperimentRunRecords())
+            save(text: json, name: "orb-experiment-runs.json")
+        } catch {
+            resultsNotice = "Export failed: \(error.localizedDescription)"
         }
     }
 
-    private func findHTMLFiles(in dir: String) -> [String] {
-        let fm = FileManager.default
-        guard let enumerator = fm.enumerator(atPath: dir) else { return [] }
-        var htmls: [String] = []
-        for case let file as String in enumerator {
-            if file.hasSuffix(".html") || file.hasSuffix(".htm") {
-                htmls.append((dir as NSString).appendingPathComponent(file))
-            }
-        }
-        return htmls.sorted()
+    private func save(text: String, name: String) {
+        let panel = NSSavePanel()
+        panel.nameFieldStringValue = name
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        do { try Data(text.utf8).write(to: url, options: .atomic) }
+        catch { resultsNotice = "Export failed: \(error.localizedDescription)" }
     }
 
     // MARK: - Actions

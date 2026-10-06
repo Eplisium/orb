@@ -164,6 +164,7 @@ struct TestResultsTableView: View {
     let results: [TestRunResult]
     let onOpen: (TestRunResult) -> Void
     let onDelete: (TestRunResult) -> Void
+    var onRerun: ((TestRunResult) -> Void)? = nil
     @State private var field: TestResultsTable.Field = .when
     @State private var ascending = false
     @State private var verdict: TestVerdictKind?
@@ -228,6 +229,12 @@ struct TestResultsTableView: View {
                 Text("\(r.latencyMs) ms").monospacedDigit().frame(maxWidth: .infinity, alignment: .leading)
                 Text("\(r.totalTokens)").monospacedDigit().frame(maxWidth: .infinity, alignment: .leading)
                 Text(r.timestamp.formatted(date: .abbreviated, time: .shortened)).lineLimit(1).frame(maxWidth: .infinity, alignment: .leading)
+                if let onRerun {
+                    Button { onRerun(r) } label: { Image(systemName: "arrow.clockwise") }
+                        .buttonStyle(.borderless)
+                        .help("Rerun this scenario with this model")
+                        .accessibilityLabel("Rerun \(r.scenarioTitle) with \(shortModelName(r.modelId))")
+                }
             }
             .font(ORBFont.footnote)
             .padding(.horizontal, 10).padding(.vertical, 6)
@@ -237,6 +244,10 @@ struct TestResultsTableView: View {
         .buttonStyle(.plain)
         .help(TestVerdictKind.of(r).explanation)
         .contextMenu {
+            if let onRerun {
+                Button("Rerun") { onRerun(r) }
+                Divider()
+            }
             Button("Delete Result", role: .destructive) { onDelete(r) }
         }
     }
