@@ -1,0 +1,67 @@
+name: Bug report
+description: Something in ORB doesn't work as expected
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting! **Remove API keys** from logs and screenshots.
+        For security vulnerabilities, use a private advisory instead (see SECURITY.md).
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: What you did, what you expected, and what happened instead.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Open Agent
+        2. Select model …
+        3. …
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Model browser
+        - Chat
+        - Agent
+        - MCP
+        - Generate / Library
+        - Account / Settings
+        - Test Suite
+        - Build / packaging
+        - Other
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: ORB version
+      description: About ORB, or `VERSION` + commit hash if built from source.
+    validations:
+      required: true
+  - type: input
+    id: macos
+    attributes:
+      label: macOS version
+      placeholder: e.g. macOS 15.4 (Apple silicon)
+    validations:
+      required: true
+  - type: input
+    id: model
+    attributes:
+      label: Model ID (if relevant)
+      placeholder: e.g. anthropic/claude-sonnet-4
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs or screenshots
+      description: Console output, crash reports, or screenshots (keys removed).
+      render: text
