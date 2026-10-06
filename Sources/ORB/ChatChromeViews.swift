@@ -40,9 +40,10 @@ struct ConversationSectionsList: View {
     var isSelecting = false
     var checked: Set<UUID> = []
     let onToggleCheck: (UUID) -> Void
+    @State private var sectionsCache = ConversationSectionsCache()
 
     var body: some View {
-        let sections = ConversationListModel.sections(conversations, query: query, pinned: pins.ids, pinOrder: pins.order)
+        let sections = sectionsCache.sections(conversations, query: query, pinned: pins.ids, pinOrder: pins.order)
         ScrollView {
             LazyVStack(spacing: 8, pinnedViews: [.sectionHeaders]) {
                 if conversations.isEmpty {

@@ -480,6 +480,7 @@ struct AgentView: View {
                                             : { if let branch = chatService.branchConversation(from: message.id, in: conversation.id) { selectedModelId = branch.modelId } },
                                         showToolCalls: true
                                     )
+                                    .equatable()
                                     .id(message.id)
                                 }
 

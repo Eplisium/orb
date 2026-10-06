@@ -679,10 +679,17 @@ final class DatabaseManager {
         }
     }
 
-    func loadConversations() -> [(conversation: ChatConversation, agentHistoryJSON: String)] {
-        let sql = "SELECT * FROM conversations ORDER BY created_at DESC;"
+    /// All conversations, or only one mode's (each playground service loads
+    /// just its own sessions and their messages).
+    func loadConversations(mode: PlaygroundMode? = nil) -> [(conversation: ChatConversation, agentHistoryJSON: String)] {
+        let sql = mode == nil
+            ? "SELECT * FROM conversations ORDER BY created_at DESC;"
+            : "SELECT * FROM conversations WHERE mode = ? ORDER BY created_at DESC;"
         guard let stmt = prepare(sql) else { return [] }
         defer { sqlite3_finalize(stmt) }
+        if let mode {
+            sqlite3_bind_text(stmt, 1, mode.rawValue, -1, unsafeBitCast(-1, to: sqlite3_destructor_type.self))
+        }
         var results: [(ChatConversation, String)] = []
         while sqlite3_step(stmt) == SQLITE_ROW {
             let idStr = String(cString: sqlite3_column_text(stmt, 0))

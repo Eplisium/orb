@@ -97,12 +97,16 @@ final class ChatService: ObservableObject {
     /// Debounced system-prompt save (the editor writes on every keystroke).
     private var pendingPromptSave: (conversationID: UUID, task: Task<Void, Never>)?
     static let systemPromptSaveDelay: Duration = .milliseconds(600)
+    private let loadMode: PlaygroundMode?
 
-    convenience init() {
+    /// `loadMode` limits which persisted sessions (and their messages) load;
+    /// the root view owns one service per playground.
+    convenience init(loadMode: PlaygroundMode? = nil) {
         self.init(
             client: OpenRouterClient(), store: DatabaseConversationStore(),
             apiKeyProvider: { KeychainManager.getAPIKey() },
-            mcpServerProvider: { MCPRegistry.loadConfigs() }
+            mcpServerProvider: { MCPRegistry.loadConfigs() },
+            loadMode: loadMode
         )
     }
 
@@ -111,8 +115,10 @@ final class ChatService: ObservableObject {
         store: any ConversationStore,
         apiKeyProvider: @escaping () -> String?,
         agentMaximumTurns: Int = 100,
-        mcpServerProvider: @escaping () -> [MCPServerConfig] = { [] }
+        mcpServerProvider: @escaping () -> [MCPServerConfig] = { [] },
+        loadMode: PlaygroundMode? = nil
     ) {
+        self.loadMode = loadMode
         self.client = client
         self.store = store
         self.apiKeyProvider = apiKeyProvider
@@ -125,7 +131,7 @@ final class ChatService: ObservableObject {
     private func loadPersistedConversations() {
         do {
             try store.recoverInterruptedRecords()
-            let records = try store.loadRecords().sorted { $0.conversation.createdAt > $1.conversation.createdAt }
+            let records = try store.loadRecords(mode: loadMode).sorted { $0.conversation.createdAt > $1.conversation.createdAt }
             conversations = records.map(\.conversation)
             agentHistories = Dictionary(uniqueKeysWithValues: records.map { ($0.conversation.id, $0.agentHistory) })
         } catch {

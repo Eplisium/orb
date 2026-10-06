@@ -19,6 +19,8 @@ protocol ConversationStore: AnyObject {
     /// current positions. Streaming checkpoints use this so a long chat with
     /// base64 attachments is not deleted and rewritten every 750ms.
     func saveMessages(_ messageIDs: Set<UUID>, of record: StoredConversation) throws
+    /// Loads only one mode's conversations (nil = all).
+    func loadRecords(mode: PlaygroundMode?) throws -> [StoredConversation]
 }
 
 extension ConversationStore {
@@ -26,6 +28,11 @@ extension ConversationStore {
     // always correct, just slower.
     func saveConversationMeta(_ record: StoredConversation) throws { try saveRecord(record) }
     func saveMessages(_ messageIDs: Set<UUID>, of record: StoredConversation) throws { try saveRecord(record) }
+    func loadRecords(mode: PlaygroundMode?) throws -> [StoredConversation] {
+        let all = try loadRecords()
+        guard let mode else { return all }
+        return all.filter { $0.conversation.mode == mode }
+    }
 }
 
 @MainActor
@@ -34,8 +41,10 @@ final class DatabaseConversationStore: ConversationStore {
 
     init(database: DatabaseManager = .shared) { self.database = database }
 
-    func loadRecords() throws -> [StoredConversation] {
-        database.loadConversations().map { item in
+    func loadRecords() throws -> [StoredConversation] { try loadRecords(mode: nil) }
+
+    func loadRecords(mode: PlaygroundMode?) throws -> [StoredConversation] {
+        database.loadConversations(mode: mode).map { item in
             var conversation = item.conversation
             conversation.messages = database.loadMessages(for: conversation.id)
             let history = (try? JSONDecoder().decode([AgentAPIMessage].self, from: Data(item.agentHistoryJSON.utf8))) ?? []

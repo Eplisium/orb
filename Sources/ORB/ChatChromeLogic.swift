@@ -63,6 +63,49 @@ enum ConversationListModel {
     }
 }
 
+/// Memoizes `ConversationListModel.sections`. The sidebar body re-evaluates
+/// on every streamed publish (the conversation array changes), and a search
+/// query scans every message's text; recompute only when something the
+/// sections depend on changed.
+@MainActor
+final class ConversationSectionsCache {
+    struct Key: Equatable {
+        struct Item: Equatable {
+            let id: UUID, title: String, modelId: String, createdAt: Date
+            let messageCount: Int, lastMessageLength: Int
+        }
+        let items: [Item]
+        let query: String
+        let pinned: Set<UUID>
+        let pinOrder: [UUID]
+        let day: Date
+    }
+
+    private(set) var computeCount = 0
+    private var key: Key?
+    private var value: [ConversationListModel.Section] = []
+
+    func sections(
+        _ conversations: [ChatConversation], query: String, pinned: Set<UUID>, pinOrder: [UUID],
+        now: Date = .now, calendar: Calendar = .current
+    ) -> [ConversationListModel.Section] {
+        let searching = !query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        let key = Key(
+            items: conversations.map {
+                .init(id: $0.id, title: $0.title, modelId: $0.modelId, createdAt: $0.createdAt,
+                      messageCount: searching ? $0.messages.count : 0,
+                      lastMessageLength: searching ? ($0.messages.last?.content.count ?? 0) : 0)
+            },
+            query: query, pinned: pinned, pinOrder: pinOrder, day: calendar.startOfDay(for: now)
+        )
+        if key == self.key { return value }
+        computeCount += 1
+        self.key = key
+        value = ConversationListModel.sections(conversations, query: query, pinned: pinned, pinOrder: pinOrder, now: now, calendar: calendar)
+        return value
+    }
+}
+
 /// Persisted, ordered set of pinned conversation IDs. Takes its defaults as a
 /// seam so tests never touch the real preferences.
 final class ConversationPinStore: ObservableObject {

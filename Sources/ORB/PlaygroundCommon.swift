@@ -430,7 +430,24 @@ struct ToolCallActivityGroup: View {
 
 // MARK: - Message View
 
-struct PlaygroundMessageView: View {
+struct PlaygroundMessageView: View, Equatable {
+    /// Rows compare by content, not closure identity: the parent re-creates
+    /// every row's action closures on each publish, which made every message
+    /// re-render for every streamed token. Closures read live state when
+    /// invoked, so only their presence affects what is drawn.
+    static func == (lhs: PlaygroundMessageView, rhs: PlaygroundMessageView) -> Bool {
+        lhs.message == rhs.message
+            && lhs.isStreaming == rhs.isStreaming
+            && lhs.isReasoning == rhs.isReasoning
+            && lhs.assistantName == rhs.assistantName
+            && lhs.accent == rhs.accent
+            && lhs.showToolCalls == rhs.showToolCalls
+            && (lhs.onDelete == nil) == (rhs.onDelete == nil)
+            && (lhs.onRegenerate == nil) == (rhs.onRegenerate == nil)
+            && (lhs.onEdit == nil) == (rhs.onEdit == nil)
+            && (lhs.onBranch == nil) == (rhs.onBranch == nil)
+    }
+
     let message: ChatMessage
     let isStreaming: Bool
     let assistantName: String

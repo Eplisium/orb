@@ -366,3 +366,59 @@ struct AttachmentBuildTests {
         await #expect(throws: (any Error).self) { try await ChatAttachmentBuilder.buildParts(for: [draft, missing]) }
     }
 }
+
+// MARK: - Item 7: render/perf hygiene
+
+@Suite("Wave1: perf")
+@MainActor
+struct PlaygroundPerfTests {
+    private func row(_ message: ChatMessage, streaming: Bool = false, onDelete: (() -> Void)? = {}) -> PlaygroundMessageView {
+        PlaygroundMessageView(message: message, isStreaming: streaming, assistantName: "A", accent: .blue, onDelete: onDelete)
+    }
+
+    @Test("message rows compare by content, ignoring fresh closure identity")
+    func rowEquality() {
+        let message = ChatMessage(role: "assistant", content: "hi")
+        #expect(row(message) == row(message))
+        var changed = message; changed.content = "hi!"
+        #expect(row(message) != row(changed))
+        #expect(row(message) != row(message, streaming: true))
+        #expect(row(message) != row(message, onDelete: nil))
+    }
+
+    @Test("sidebar sections recompute only when inputs change")
+    func sectionsMemoized() {
+        let cache = ConversationSectionsCache()
+        var conversation = ChatConversation(modelId: "m", mode: .chat)
+        _ = cache.sections([conversation], query: "", pinned: [], pinOrder: [])
+        conversation.messages.append(ChatMessage(role: "assistant", content: "token"))
+        _ = cache.sections([conversation], query: "", pinned: [], pinOrder: [])
+        #expect(cache.computeCount == 1, "streaming text does not affect sections without a query")
+        conversation.title = "New"
+        let sections = cache.sections([conversation], query: "", pinned: [], pinOrder: [])
+        #expect(cache.computeCount == 2)
+        #expect(sections.first?.items.first?.title == "New")
+        _ = cache.sections([conversation], query: "tok", pinned: [], pinOrder: [])
+        conversation.messages[0].content = "tokens"
+        _ = cache.sections([conversation], query: "tok", pinned: [], pinOrder: [])
+        #expect(cache.computeCount == 4, "with a query, message changes recompute")
+    }
+
+    @Test("a service loads only its own mode's conversations")
+    func loadByMode() throws {
+        let store = CountingConversationStore()
+        let chat = ChatConversation(modelId: "m", mode: .chat)
+        let agent = ChatConversation(modelId: "m", mode: .agent)
+        try store.saveRecord(.init(conversation: chat, agentHistory: []))
+        try store.saveRecord(.init(conversation: agent, agentHistory: []))
+        let service = ChatService(client: WaveScriptedClient([]), store: store, apiKeyProvider: { nil }, loadMode: .agent)
+        #expect(service.conversations.map(\.id) == [agent.id])
+
+        let database = DatabaseManager()
+        let dbStore = DatabaseConversationStore(database: database)
+        try dbStore.saveRecord(.init(conversation: chat, agentHistory: []))
+        try dbStore.saveRecord(.init(conversation: agent, agentHistory: []))
+        #expect(try dbStore.loadRecords(mode: .chat).map(\.conversation.id).contains(chat.id))
+        #expect(!(try dbStore.loadRecords(mode: .chat).map(\.conversation.id).contains(agent.id)))
+    }
+}
