@@ -311,3 +311,58 @@ struct WireHistoryTests {
         #expect(ChatService.wireHistory(messages).map(\.content) == ["a", "ok", "stopped"])
     }
 }
+
+// MARK: - Item 5: approvals carry the full arguments
+
+private actor SummaryBox {
+    var summaries: [String] = []
+    func add(_ value: String) { summaries.append(value) }
+}
+
+@Suite("Wave1: approval arguments")
+struct ApprovalArgumentsTests {
+    @Test("the approval request receives the complete arguments, not a 300-char prefix")
+    func fullArguments() async throws {
+        let box = SummaryBox()
+        let approvals = ApprovalCoordinator()
+        await approvals.setHandler { request in
+            await box.add(request.summary)
+            return .denied
+        }
+        let command = "echo " + String(repeating: "z", count: 1_000)
+        let arguments = "{\"command\":\"\(command)\"}"
+        let client = WaveScriptedClient([
+            .init(events: [
+                .toolCallFragment(choiceIndex: 0, toolIndex: 0, id: "c", type: "function", name: "run_command", arguments: arguments),
+                .finishReason(choiceIndex: 0, reason: "tool_calls"), .done
+            ]),
+            .init(events: [.contentDelta(choiceIndex: 0, text: "ok"), .done]),
+        ])
+        _ = try await NativeAgentRunner.run(
+            prompt: "go", modelId: "test/model", apiKey: "fixture", workspace: workspace,
+            fullComputerAccess: false, history: [], client: client,
+            toolExecutor: { _ in .init(content: "never", isError: true) },
+            policy: .projectBuild, approvals: approvals, onEvent: { _ in }
+        )
+        let summary = try #require(await box.summaries.first)
+        #expect(summary.count >= command.count)
+        #expect(ApprovalPresentation.make(toolName: "run_command", server: nil, summary: summary).primary == command)
+    }
+}
+
+// MARK: - Item 6: attachment parts build off-main and fail without side effects
+
+@Suite("Wave1: attachment build")
+struct AttachmentBuildTests {
+    @Test("buildParts encodes off the main actor and throws for unreadable files")
+    func buildParts() async throws {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("wave1-\(UUID().uuidString).txt")
+        try Data("hello".utf8).write(to: url)
+        defer { try? FileManager.default.removeItem(at: url) }
+        let draft = ChatAttachmentDraft(url: url, kind: .file(mimeType: "text/plain"), byteCount: 5)
+        let parts = try await ChatAttachmentBuilder.buildParts(for: [draft])
+        #expect(parts.count == 1)
+        let missing = ChatAttachmentDraft(url: url.appendingPathExtension("gone"), kind: .file(mimeType: "text/plain"), byteCount: 5)
+        await #expect(throws: (any Error).self) { try await ChatAttachmentBuilder.buildParts(for: [draft, missing]) }
+    }
+}

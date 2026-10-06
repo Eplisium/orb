@@ -327,15 +327,37 @@ struct ApprovalSheet: View {
             }
             Text("The agent wants to use \(request.toolName).")
                 .font(ORBFont.footnote).foregroundStyle(.secondary)
-            ScrollView {
-                Text(p.displaySummary)
-                    .orbFont(size: 12, design: .monospaced)
-                    .textSelection(.enabled)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(8)
+            if let primary = p.primary, let label = p.primaryLabel {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(label).font(ORBFont.caption.weight(.semibold)).foregroundStyle(.secondary)
+                    ScrollView {
+                        Text(primary)
+                            .orbFont(size: 12, design: .monospaced)
+                            .textSelection(.enabled)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(8)
+                    }
+                    .frame(maxHeight: 160)
+                    .background(.orbSurface(0.06), in: RoundedRectangle(cornerRadius: 8))
+                }
             }
-            .frame(maxHeight: 140)
-            .background(.orbSurface(0.06), in: RoundedRectangle(cornerRadius: 8))
+            DisclosureGroup(p.primary == nil ? "Arguments" : "All arguments") {
+                ScrollView {
+                    Text(p.displaySummary)
+                        .orbFont(size: 12, design: .monospaced)
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(8)
+                }
+                .frame(maxHeight: 220)
+                .background(.orbSurface(0.06), in: RoundedRectangle(cornerRadius: 8))
+            }
+            .font(ORBFont.caption)
+            if p.hiddenCharacters > 0 {
+                Label("\(p.hiddenCharacters) characters hidden — too long to display in full", systemImage: "eye.slash")
+                    .font(ORBFont.caption.weight(.semibold))
+                    .foregroundStyle(ORBTheme.warning)
+            }
             if waiting > 0 {
                 Text("\(waiting) more waiting").font(ORBFont.caption).foregroundStyle(.secondary)
             }
@@ -350,7 +372,7 @@ struct ApprovalSheet: View {
             }
         }
         .padding(20)
-        .frame(width: 440)
+        .frame(width: 520)
         .interactiveDismissDisabled()
         .accessibilityElement(children: .contain)
     }

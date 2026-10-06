@@ -150,9 +150,18 @@ enum ChatAttachmentBuilder {
         return (drafts, warnings)
     }
 
+    /// Reads and encodes drafts off the main actor. Attachments can be tens
+    /// of megabytes; reading and base64-encoding them on the main actor froze
+    /// the composer.
+    static func buildParts(for drafts: [ChatAttachmentDraft]) async throws -> [MessageContentPart] {
+        try await Task.detached(priority: .userInitiated) {
+            try parts(for: drafts)
+        }.value
+    }
+
     /// Encodes drafts into wire parts. Binary files are inlined as base64
     /// `data:` URLs, matching the OpenRouter content-part schemas.
-    static func parts(for drafts: [ChatAttachmentDraft]) throws -> [MessageContentPart] {
+    nonisolated static func parts(for drafts: [ChatAttachmentDraft]) throws -> [MessageContentPart] {
         try drafts.map { draft in
             let scoped = draft.url.startAccessingSecurityScopedResource()
             defer {

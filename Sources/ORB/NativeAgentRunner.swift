@@ -281,7 +281,9 @@ enum NativeAgentRunner {
                         approved = await approvals.requestApproval(
                             toolName: call.name,
                             server: MCPToolNaming.resolve(call.name)?.server,
-                            summary: String(call.arguments.prefix(300))
+                            // Full arguments: the user must see the exact command or
+                            // path being approved, never a truncated prefix.
+                            summary: call.arguments
                         )
                     }
                     if approved {

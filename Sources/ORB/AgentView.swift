@@ -24,6 +24,7 @@ struct AgentView: View {
     @AppStorage("playground.agentFullComputerAccess") private var fullComputerAccess = false
     @AppStorage("playground.agentWorkspace") private var workspace = FileManager.default.homeDirectoryForCurrentUser.path
     @State private var attachments: [URL] = []
+    @State private var isPreparingAttachments = false
     @State private var attachmentWarnings: [String] = []
     @State private var attachmentContextSummary: String?
     @State private var showSettings = false
@@ -841,7 +842,7 @@ struct AgentView: View {
 
     private var canSend: Bool {
         let hasText = !messageText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-        return hasText && KeychainManager.hasAPIKey && !chatService.isStreaming
+        return hasText && KeychainManager.hasAPIKey && !chatService.isStreaming && !isPreparingAttachments
     }
 
     private var composerPlaceholder: String {
@@ -937,27 +938,37 @@ struct AgentView: View {
             return
         }
 
-        var prompt = messageText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let sentText = messageText
+        let basePrompt = sentText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let sentAttachments = attachments
+        let modelId = currentModelId
+        let workspace = workspace
+        let fullComputerAccess = fullComputerAccess
+        let limits = attachmentLimits()
 
-        // Build a byte-bounded, explicitly untrusted attachment envelope.
-        if !attachments.isEmpty {
-            let result = attachmentBuildResult()
-            attachmentWarnings = result.warnings
-            guard !result.includedFiles.isEmpty else {
-                chatService.lastError = result.warnings.first ?? "None of the selected attachments could be read."
-                return
+        isPreparingAttachments = !sentAttachments.isEmpty
+        Task { @MainActor in
+            defer { isPreparingAttachments = false }
+            var prompt = basePrompt
+            // Build a byte-bounded, explicitly untrusted attachment envelope
+            // off the main actor. The draft is cleared only after it succeeds.
+            if !sentAttachments.isEmpty {
+                let result = await Task.detached(priority: .userInitiated) {
+                    AgentAttachmentBuilder.build(urls: sentAttachments, perFileByteLimit: limits.perFile, totalByteLimit: limits.total)
+                }.value
+                attachmentWarnings = result.warnings
+                guard !result.includedFiles.isEmpty else {
+                    chatService.lastError = (result.warnings.first ?? "None of the selected attachments could be read.") + " Your message was kept."
+                    return
+                }
+                prompt += result.promptSuffix
             }
-            prompt += result.promptSuffix
-        }
-
-        messageText = ""
-        attachments = []
-        attachmentContextSummary = nil
-
-        Task {
+            if messageText == sentText { messageText = "" }
+            attachments.removeAll { sentAttachments.contains($0) }
+            if attachments.isEmpty { attachmentContextSummary = nil }
             await chatService.sendAgentMessage(
                 prompt,
-                modelId: currentModelId,
+                modelId: modelId,
                 workspace: workspace,
                 fullComputerAccess: fullComputerAccess
             )
@@ -995,13 +1006,14 @@ struct AgentView: View {
         }
     }
 
-    private func attachmentBuildResult() -> AgentAttachmentBuildResult {
+    private func attachmentLimits() -> (perFile: Int, total: Int) {
         let contextLength = viewModel.api.models.first(where: { $0.id == currentModelId })?.contextLength ?? 32_000
-        return AgentAttachmentBuilder.build(
-            urls: attachments,
-            perFileByteLimit: 16_000,
-            totalByteLimit: min(80_000, max(12_000, contextLength))
-        )
+        return (16_000, min(80_000, max(12_000, contextLength)))
+    }
+
+    private func attachmentBuildResult() -> AgentAttachmentBuildResult {
+        let limits = attachmentLimits()
+        return AgentAttachmentBuilder.build(urls: attachments, perFileByteLimit: limits.perFile, totalByteLimit: limits.total)
     }
 
     private func refreshAttachmentDiagnostics() {

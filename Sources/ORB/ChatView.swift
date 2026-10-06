@@ -30,6 +30,7 @@ struct ChatView: View {
     @State private var followsLatest = true
     @State private var attachmentDrafts: [ChatAttachmentDraft] = []
     @State private var attachmentWarnings: [String] = []
+    @State private var isPreparingAttachments = false
     /// Latest sentinel maxY in the scroll coordinate space. Updated by
     /// onPreferenceChange; read by the scroll decision in onChange.
     @State private var bottomOffset: CGFloat = .infinity
@@ -764,7 +765,8 @@ struct ChatView: View {
 
     private var canSend: Bool {
         let hasText = !messageText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-        return (hasText || !attachmentDrafts.isEmpty) && KeychainManager.hasAPIKey && !chatService.isStreaming
+        return (hasText || !attachmentDrafts.isEmpty) && KeychainManager.hasAPIKey
+            && !chatService.isStreaming && !isPreparingAttachments
     }
 
     private var composerPlaceholder: String {
@@ -852,26 +854,37 @@ struct ChatView: View {
             return
         }
 
-        let prompt = messageText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let sentText = messageText
+        let prompt = sentText.trimmingCharacters(in: .whitespacesAndNewlines)
         let drafts = attachmentDrafts
-        messageText = ""
-        attachmentDrafts = []
-        attachmentWarnings = []
-
-        let wireParts: [MessageContentPart]?
-        do {
-            wireParts = drafts.isEmpty ? nil : try ChatAttachmentBuilder.parts(for: drafts)
-        } catch {
-            chatService.lastError = "Could not read attachments: \(error.localizedDescription)"
+        let modelId = currentModelId
+        let settings = requestSettings
+        guard drafts.isEmpty else {
+            // Build parts first (off-main); the draft is cleared only once the
+            // attachments were read, so a failed read never loses the text.
+            isPreparingAttachments = true
+            Task { @MainActor in
+                defer { isPreparingAttachments = false }
+                do {
+                    let wireParts = try await ChatAttachmentBuilder.buildParts(for: drafts)
+                    clearComposer(ifUnchanged: sentText, drafts: drafts)
+                    chatService.sendMessage(prompt, modelId: modelId, settings: settings, parts: wireParts)
+                } catch {
+                    chatService.lastError = "Could not read attachments: \(error.localizedDescription). Your message was kept."
+                }
+            }
             return
         }
+        clearComposer(ifUnchanged: sentText, drafts: drafts)
+        chatService.sendMessage(prompt, modelId: modelId, settings: settings, parts: nil)
+    }
 
-        chatService.sendMessage(
-            prompt,
-            modelId: currentModelId,
-            settings: requestSettings,
-            parts: wireParts
-        )
+    /// Clears what was sent, keeping anything typed while attachments loaded.
+    private func clearComposer(ifUnchanged sentText: String, drafts: [ChatAttachmentDraft]) {
+        if messageText == sentText { messageText = "" }
+        let sentIDs = Set(drafts.map(\.id))
+        attachmentDrafts.removeAll { sentIDs.contains($0.id) }
+        if attachmentDrafts.isEmpty { attachmentWarnings = [] }
     }
 
     private func handleDrop(_ urls: [URL]) -> Bool {
