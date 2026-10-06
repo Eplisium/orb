@@ -121,6 +121,11 @@ struct ImagesView: View {
     @StudioState("ImagesView.promptBeforeEnhance") private var promptBeforeEnhance: String? = nil
     @StudioState("ImagesView.pendingImages") private var pendingImages = 0
     @StudioState("ImagesView.configuredModelId") private var configuredModelId = ""
+    /// The in-flight generation run, so Cancel can stop it.
+    @StudioState("ImagesView.runTasks") private var runTasks: [UUID: Task<Void, Never>] = [:]
+    /// Partial-failure / cancellation summary of the last run.
+    @StudioState("ImagesView.runSummary") private var runSummary: String? = nil
+    @EnvironmentObject private var shell: ShellController
 
     private let accent = ORBTheme.accent
     /// Images per press, and the ceiling of unfinished images across overlapping runs.
@@ -162,7 +167,7 @@ struct ImagesView: View {
             do { endpoints = try await service.fetchImageModelEndpoints(modelID: selectedModelId) }
             catch { endpointError = error.localizedDescription }
         }
-        .task { await loadGallery() }
+        .task { CreationActions.pruneStaging(); Self.cleanEditReferences(keeping: referenceURLs) }
         .onChange(of: selectedProviderSlug) { _, _ in
             if imageCount > maximumCount { imageCount = maximumCount }
             aspectRatio = "auto"
@@ -271,12 +276,22 @@ struct ImagesView: View {
             if let errorMessage {
                 PlaygroundErrorBanner(message: errorMessage) { self.errorMessage = nil }
             }
+            if let runSummary {
+                PlaygroundErrorBanner(message: runSummary) { self.runSummary = nil }
+            }
 
             Spacer()
 
             StudioPrimaryButton(title: "Generate", busyTitle: "Generating…", isBusy: pendingImages > 0,
                                 isEnabled: canGenerate, accent: accent, action: generate)
                 .keyboardShortcut(.return, modifiers: .command)
+            if pendingImages > 0 {
+                Button(role: .cancel) { cancelRun() } label: {
+                    Label("Cancel", systemImage: "stop.circle")
+                }
+                .keyboardShortcut(.escape, modifiers: [])
+                .help("Stop waiting for the images still generating. Requests already sent may still be billed.")
+            }
 
             if totalCost > 0 {
                 Text("Reported spend (known charges): $\(totalCost, specifier: "%.4f")")
@@ -356,9 +371,22 @@ struct ImagesView: View {
 
     // MARK: Gallery
 
+    /// Session results whose saved creation still exists (Library deletions are reflected).
+    private var sessionResults: [GeneratedImage] {
+        let live = Set(saved.creations.map(\.id))
+        return results.filter { ImageGallery.isVisible(savedID: $0.savedID, liveIDs: live) }
+    }
+
+    /// Latest saved images not already shown as session cards (capped).
+    private var recentSaved: (items: [SavedCreation], hiddenCount: Int) {
+        ImageGallery.recentSaved(saved.creations, excluding: Set(results.compactMap(\.savedID)))
+    }
+
     private var galleryColumn: some View {
-        Group {
-            if results.isEmpty && pendingImages == 0 {
+        let session = sessionResults
+        let recent = recentSaved
+        return Group {
+            if session.isEmpty && recent.items.isEmpty && pendingImages == 0 {
                 emptyGallery
             } else {
                 ScrollView {
@@ -368,11 +396,26 @@ struct ImagesView: View {
                                 ImageGeneratingPlaceholder(accent: accent)
                             }
                         }
-                        ForEach(results) { result in
+                        ForEach(session) { result in
                             galleryCard(result)
                         }
                     }
-                    .padding(20)
+                    .padding(.horizontal, 20).padding(.top, 20)
+                    if !recent.items.isEmpty {
+                        HStack {
+                            Text("RECENTLY SAVED").font(.caption.bold()).foregroundStyle(.secondary)
+                            Spacer()
+                            Button(recent.hiddenCount > 0 ? "Show all \(recent.items.count + recent.hiddenCount) in Library"
+                                                          : "Show all in Library") { showLibrary() }
+                                .font(.caption)
+                        }
+                        .padding(.horizontal, 20).padding(.top, 8)
+                        LazyVGrid(columns: [GridItem(.adaptive(minimum: 160), spacing: 12)], spacing: 12) {
+                            ForEach(recent.items) { creation in savedCard(creation) }
+                        }
+                        .padding(.horizontal, 20)
+                    }
+                    Color.clear.frame(height: 20)
                 }
             }
         }
@@ -427,16 +470,55 @@ struct ImagesView: View {
                          accent: accent)
     }
 
+    /// Lightweight card for an older saved image: lazy downsampled thumbnail
+    /// from the stored file — no full decode, base64, or checksum pass.
+    private func savedCard(_ creation: SavedCreation) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            LibraryThumbnail(creation: creation, store: saved, maxPixel: 480)
+                .frame(maxWidth: .infinity).frame(height: 140)
+                .background(.orbSurface(0.06))
+                .clipShape(RoundedRectangle(cornerRadius: 8))
+                .creationDrag(creation, store: saved)
+            HStack(spacing: 6) {
+                Text(creation.prompt ?? creation.modelID).font(.caption).lineLimit(1)
+                Spacer()
+                CreationActionsMenu(creation: creation, store: saved)
+            }
+        }
+        .padding(8)
+        .background(.orbSurface(0.035), in: RoundedRectangle(cornerRadius: 12))
+        .contextMenu {
+            if let text = creation.prompt, !text.isEmpty { Button("Reuse Prompt") { prompt = text } }
+            Button("Edit") { editSaved(creation) }
+            CreationActionItems(creation: creation, store: saved)
+        }
+    }
+
+    private func showLibrary() {
+        StudioStore.shared.box("FilesView.showingCreations", initial: { false }).value = true
+        shell.send(.section(.files))
+    }
+
     private func galleryCard(_ result: GeneratedImage) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            AssistantImageRow(images: [result.attachment], accent: accent,
-                              onReusePrompt: { prompt = $0 })
+        let savedCreation = result.savedID.flatMap { id in saved.creations.first { $0.id == id } }
+        return VStack(alignment: .leading, spacing: 8) {
+            Group {
+                if let savedCreation {
+                    AssistantImageRow(images: [result.attachment], accent: accent,
+                                      onReusePrompt: { prompt = $0 })
+                        .creationDrag(savedCreation, store: saved)
+                } else {
+                    AssistantImageRow(images: [result.attachment], accent: accent,
+                                      onReusePrompt: { prompt = $0 })
+                }
+            }
             Text(result.modelId)
                 .font(.caption.monospacedDigit()).foregroundStyle(.tertiary)
                 .lineLimit(1)
             HStack {
                 if result.savedID != nil {
                     Label("Saved in ORB", systemImage: "checkmark.circle.fill").foregroundStyle(.green)
+                    if let savedCreation { CreationActionsMenu(creation: savedCreation, store: saved) }
                 } else {
                     Button("Retry save") { Task { await persist(result.id) } }
                     Text(result.saveError ?? "Not saved").foregroundStyle(.orange).lineLimit(2)
@@ -513,23 +595,29 @@ struct ImagesView: View {
         return try referenceURLs.map(MediaStudioImageFile.dataURL(for:))
     }
 
+    /// Cancels every image run in flight (overlapping runs included).
+    private func cancelRun() {
+        for task in runTasks.values { task.cancel() }
+    }
+
     private func generate() {
         guard canGenerate else {
             if !KeychainManager.hasAPIKey { errorMessage = "Add your OpenRouter API key in Settings → Accounts & Keys first." }
             return
         }
         errorMessage = nil
+        runSummary = nil
         let modelId = selectedModelId
         let promptText = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
         let total = imageCount
         // Providers cap `n` per request; split into concurrent requests so
         // any count works. Endpoints without `n` get one image per request.
-        let perRequest = max(1, maximumCount)
-        var chunks: [Int] = []
-        var remaining = total
-        while remaining > 0 { chunks.append(min(perRequest, remaining)); remaining -= chunks.last! }
+        let chunks = ImageGallery.chunks(total: total, perRequest: maximumCount)
         pendingImages += total
-        Task {
+        // Overlapping runs are tracked by ID so Cancel stops all of them.
+        let runID = UUID()
+        runTasks[runID] = Task {
+            defer { runTasks[runID] = nil }
             var base: ImageGenRequest
             do {
                 let takesReferences = service.models.first(where: { $0.id == modelId })?.architecture?.takesReferenceImages == true
@@ -554,6 +642,7 @@ struct ImagesView: View {
                 return
             }
             let template = base
+            var summary = ImageRunSummary(requested: total)
             await withTaskGroup(of: (Int, Result<(images: [ChatImageAttachment], usage: ImageGenUsage?), Error>).self) { group in
                 for size in chunks {
                     group.addTask { @MainActor in
@@ -563,38 +652,31 @@ struct ImagesView: View {
                         catch { return (size, .failure(error)) }
                     }
                 }
-                var delivered = 0
                 for await (size, outcome) in group {
                     pendingImages -= size
                     switch outcome {
                     case .success(let output):
                         totalCost += output.usage?.cost ?? 0
-                        delivered += output.images.count
+                        summary.delivered += output.images.count
                         for attachment in output.images {
                             let result = GeneratedImage(attachment: attachment, modelId: modelId)
                             results.insert(result, at: 0)
                             await persist(result.id)
                         }
                     case .failure(let error):
-                        if !(error is CancellationError) { errorMessage = error.localizedDescription }
+                        if error is CancellationError || Task.isCancelled {
+                            summary.cancelled += size
+                        } else {
+                            summary.recordFailure(error.localizedDescription, images: size)
+                        }
                     }
                 }
-                if delivered > 0 {
-                    StudioNotifier.shared.finished(section: SidebarSection.images.rawValue,
-                        title: "Images ready", body: "\(delivered) image\(delivered == 1 ? "" : "s") generated with \(shortModelName(modelId)).")
-                }
             }
-        }
-    }
-
-    private func loadGallery() async {
-        for creation in saved.creations where creation.kind == .image {
-            guard !results.contains(where: { $0.savedID == creation.id }) else { continue }
-            do {
-                let data = try await saved.data(for: creation)
-                let attachment = ChatImageAttachment(dataURL: "data:\(creation.mimeType);base64,\(data.base64EncodedString())", prompt: creation.prompt)
-                results.append(GeneratedImage(attachment: attachment, modelId: creation.modelID, savedID: creation.id))
-            } catch { errorMessage = "Could not load a saved image: \(error.localizedDescription)" }
+            runSummary = summary.text
+            if summary.delivered > 0 {
+                StudioNotifier.shared.finished(section: SidebarSection.images.rawValue,
+                    title: "Images ready", body: "\(summary.delivered) image\(summary.delivered == 1 ? "" : "s") generated with \(shortModelName(modelId)).")
+            }
         }
     }
 
@@ -617,28 +699,61 @@ struct ImagesView: View {
         }
     }
 
-    /// Loads an existing image as the reference for an image-to-image edit.
-    private func editImage(_ result: GeneratedImage) {
-        guard let data = result.attachment.inlineData else { errorMessage = "Image bytes are unavailable."; return }
-        // Prefer the model that made it; otherwise any model that accepts references.
-        if selectedImageModel?.architecture?.takesReferenceImages != true {
-            let original = service.models.first { $0.id == result.modelId && $0.architecture?.takesReferenceImages == true }
-            guard let target = original ?? service.models.first(where: { $0.architecture?.takesReferenceImages == true }) else {
-                errorMessage = "No available image model accepts reference images."
-                return
-            }
-            selectedModelId = target.id
+    /// Scratch folder for edit references (only ever holds copies).
+    static var editReferenceDirectory: URL {
+        FileManager.default.temporaryDirectory.appendingPathComponent("orb-edit-references", isDirectory: true)
+    }
+
+    /// Removes edit-reference copies no longer selected as references.
+    static func cleanEditReferences(keeping keep: [URL] = []) {
+        let fm = FileManager.default
+        let keepPaths = Set(keep.map { $0.standardizedFileURL.path })
+        guard let entries = try? fm.contentsOfDirectory(at: editReferenceDirectory, includingPropertiesForKeys: nil) else { return }
+        for entry in entries where !keepPaths.contains(entry.standardizedFileURL.path) {
+            try? fm.removeItem(at: entry)
         }
+    }
+
+    /// Picks a model that accepts references, preferring the original one.
+    private func selectReferenceCapableModel(preferring modelID: String) -> Bool {
+        guard selectedImageModel?.architecture?.takesReferenceImages != true else { return true }
+        let original = service.models.first { $0.id == modelID && $0.architecture?.takesReferenceImages == true }
+        guard let target = original ?? service.models.first(where: { $0.architecture?.takesReferenceImages == true }) else {
+            errorMessage = "No available image model accepts reference images."
+            return false
+        }
+        selectedModelId = target.id
+        return true
+    }
+
+    private func useAsReference(write: (URL) throws -> Void, name: String) {
         do {
-            let dir = FileManager.default.temporaryDirectory.appendingPathComponent("orb-edit-references", isDirectory: true)
+            let dir = Self.editReferenceDirectory
             try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-            let url = dir.appendingPathComponent("edit-\(result.id.uuidString.prefix(8)).\(result.attachment.fileExtension)")
-            try data.write(to: url, options: .atomic)
+            Self.cleanEditReferences()
+            let url = dir.appendingPathComponent(name)
+            try write(url)
             referenceURLs = [url]
             errorMessage = nil
         } catch {
             errorMessage = "Could not prepare the image for editing: \(error.localizedDescription)"
         }
+    }
+
+    /// Loads an existing image as the reference for an image-to-image edit.
+    private func editImage(_ result: GeneratedImage) {
+        guard let data = result.attachment.inlineData else { errorMessage = "Image bytes are unavailable."; return }
+        guard selectReferenceCapableModel(preferring: result.modelId) else { return }
+        useAsReference(write: { try data.write(to: $0, options: .atomic) },
+                       name: "edit-\(result.id.uuidString.prefix(8)).\(result.attachment.fileExtension)")
+    }
+
+    /// Uses a saved image (copied from its stored file) as an edit reference.
+    private func editSaved(_ creation: SavedCreation) {
+        guard selectReferenceCapableModel(preferring: creation.modelID) else { return }
+        useAsReference(write: { url in
+            try FileManager.default.copyItem(at: try saved.fileURL(for: creation), to: url)
+        }, name: "edit-\(creation.id.uuidString.prefix(8)).\(creationExtension(creation))")
     }
 
     private func exportImage(_ result: GeneratedImage) {

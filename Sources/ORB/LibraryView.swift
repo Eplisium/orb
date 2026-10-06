@@ -219,6 +219,7 @@ struct SavedCreationsLibraryView: View {
         .contentShape(Rectangle())
 
         return card
+            .creationDrag(c, store: store)
             .onTapGesture(count: 2) { open(c) }
             .onTapGesture { tap(c) }
             .contextMenu { itemMenu(c) }
@@ -247,6 +248,7 @@ struct SavedCreationsLibraryView: View {
         .background(on ? ORBTheme.accent.opacity(0.12) : Color.primary.opacity(0.04), in: RoundedRectangle(cornerRadius: 8))
         .contentShape(Rectangle())
         .onTapGesture { tap(c) }
+        .creationDrag(c, store: store)
         .contextMenu { itemMenu(c) }
         .accessibilityElement(children: .contain)
         .accessibilityAddTraits(on ? .isSelected : [])
@@ -255,6 +257,8 @@ struct SavedCreationsLibraryView: View {
     @ViewBuilder private func itemMenu(_ c: SavedCreation) -> some View {
         Button("Open") { open(c) }
         Button("Export…") { export(c) }
+        CreationActionItems(creation: c, store: store)
+        Divider()
         Button(selection.contains(c.id) ? "Deselect" : "Select") { selection.toggle(c.id) }
         Button("Delete…", role: .destructive) {
             pendingDelete = selection.contains(c.id) ? visible.filter { selection.contains($0.id) } : [c]
@@ -269,28 +273,25 @@ struct SavedCreationsLibraryView: View {
             errorMessage = "Raw PCM audio has no container or sample-rate metadata for safe playback. Export the .pcm bytes instead."
             return
         }
-        isOpening = true
-        Task {
-            defer { isOpening = false }
-            do {
-                // Space previews the whole selection; double-click previews one item.
-                let group = selection.contains(creation.id) && selection.count > 1
-                    ? visible.filter { selection.contains($0.id) && LibraryPreview.canQuickLook($0) }
-                    : [creation]
-                var loaded: [(creation: SavedCreation, data: Data)] = []
-                for item in group { loaded.append((item, try await store.data(for: item))) }
-                guard QuickLookPreview.shared.show(loaded) else { throw CocoaError(.fileWriteUnknown) }
-            } catch { errorMessage = error.localizedDescription }
-        }
+        do {
+            // Space previews the whole selection; double-click previews one item.
+            // Files are cloned from the library, never read into memory.
+            let group = selection.contains(creation.id) && selection.count > 1
+                ? visible.filter { selection.contains($0.id) && LibraryPreview.canQuickLook($0) }
+                : [creation]
+            let urls = try group.map { try CreationActions.stagedFileURL(for: $0, in: store) }
+            guard QuickLookPreview.shared.show(fileURLs: urls) else { throw CocoaError(.fileReadUnknown) }
+        } catch { errorMessage = error.localizedDescription }
     }
 
+    /// Copies the stored file to the chosen location (no in-memory read).
     private func export(_ creation: SavedCreation) {
-        Task {
-            do {
-                let data = try await store.data(for: creation)
-                try exportCreation(data, creation: creation)
-            } catch { errorMessage = error.localizedDescription }
-        }
+        let panel = NSSavePanel()
+        panel.title = "Export Saved Creation"
+        panel.nameFieldStringValue = LibraryExport.fileName(for: creation)
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        do { try store.export(creation, to: url) }
+        catch { errorMessage = error.localizedDescription }
     }
 
     private func delete(_ items: [SavedCreation]) {
@@ -333,30 +334,23 @@ struct SavedCreationsLibraryView: View {
         panel.canChooseDirectories = true
         panel.canCreateDirectories = true
         guard panel.runModal() == .OK, let folder = panel.url else { return }
-        Task {
-            // Read every asset first (the store verifies checksums), then write off-store.
-            var loaded: [UUID: Data] = [:]
-            var unreadable: [String] = []
-            for c in chosen {
-                do { loaded[c.id] = try await store.data(for: c) }
-                catch { unreadable.append(LibraryExport.fileName(for: c)) }
-            }
-            let plan = LibraryExport.plan(chosen.filter { loaded[$0.id] != nil })
-            let outcome = LibraryExport.write(plan, to: folder) { loaded[$0.id] ?? Data() }
-            let failed = unreadable + outcome.failed
-            let text = LibraryExport.resultText(written: outcome.written, failed: failed)
-            if failed.isEmpty { AppToasts.center.show(text, kind: .success) }
-            else { errorMessage = text }
-        }
+        // Copy stored files directly (validated paths; nothing read into memory).
+        let outcome = LibraryExport.copy(LibraryExport.plan(chosen), to: folder) { try store.fileURL(for: $0) }
+        let text = LibraryExport.resultText(written: outcome.written, failed: outcome.failed)
+        if outcome.failed.isEmpty { AppToasts.center.show(text, kind: .success) }
+        else { errorMessage = text }
     }
 }
 
 enum LibraryLayout: String { case grid, list }
 
-/// Thumbnails are decoded lazily and only for images; other kinds show their symbol.
+/// Thumbnails are decoded lazily and only for images; other kinds show their
+/// symbol. Decoding is a downsampled ImageIO thumbnail of the stored file,
+/// cached in memory — no full decode or checksum per cell.
 struct LibraryThumbnail: View {
     let creation: SavedCreation
     let store: SavedCreationsStore
+    var maxPixel: Int = 320
     @State private var image: NSImage?
 
     var body: some View {
@@ -373,9 +367,10 @@ struct LibraryThumbnail: View {
             .clipped()
             .accessibilityHidden(true)
             .task(id: creation.id) {
-                guard creation.kind == .image, image == nil,
-                      let data = try? await store.data(for: creation) else { return }
-                image = NSImage(data: data)
+                guard creation.kind == .image, image == nil else { return }
+                if let hit = CreationThumbnails.shared.cached(id: creation.id, maxPixel: maxPixel) { image = hit; return }
+                guard let url = try? store.fileURL(for: creation) else { return }
+                image = await CreationThumbnails.shared.thumbnail(id: creation.id, fileURL: url, maxPixel: maxPixel)
             }
     }
 }

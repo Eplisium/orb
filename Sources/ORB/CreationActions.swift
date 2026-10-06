@@ -11,9 +11,11 @@ import UniformTypeIdentifiers
 
 @MainActor
 enum CreationActions {
-    /// Friendly-named hard link (or copy across volumes) of the stored file,
-    /// so drags and shares don't surface a bare checksum filename. Lives in
-    /// Caches and is pruned after a day.
+    /// Friendly-named copy of the stored file, so drags, shares and Quick
+    /// Look don't surface a bare checksum filename — and can never modify the
+    /// content-addressed original. On APFS `copyItem` is a copy-on-write
+    /// clone, so this costs no extra space or time. Lives in Caches and is
+    /// pruned after a day.
     static var stagingDirectory: URL {
         FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("ORB/OutgoingCreations", isDirectory: true)
@@ -26,8 +28,7 @@ enum CreationActions {
         try fm.createDirectory(at: folder, withIntermediateDirectories: true)
         let target = folder.appendingPathComponent(LibraryExport.fileName(for: creation))
         if fm.fileExists(atPath: target.path) { return target }
-        do { try fm.linkItem(at: source, to: target) }
-        catch { try fm.copyItem(at: source, to: target) }
+        try fm.copyItem(at: source, to: target)
         return target
     }
 

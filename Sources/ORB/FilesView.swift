@@ -15,7 +15,8 @@ struct FilesView: View {
     @StudioState("FilesView.isFetchingPage") private var isFetchingPage = false
     @StudioState("FilesView.pageError") private var pageError: String? = nil
     @StudioState("FilesView.errorMessage") private var errorMessage: String? = nil
-    @State private var showingCreations = false
+    // Shared so "Show all in Library" from a studio can open the Library tab.
+    @StudioState("FilesView.showingCreations") private var showingCreations = false
     @StudioState("FilesView.isUploading") private var isUploading = false
     /// The file awaiting delete confirmation. The service layer refuses an
     /// unconfirmed delete, so the confirmation dialog is the only way the
