@@ -217,9 +217,34 @@ final class BrowserViewModel: ObservableObject {
         favoriteIds = Set(db.getAllFavorites())
     }
 
+    /// Last favorite/notes write failure, for tests and the toast.
+    @Published private(set) var lastStorageError: String?
+
     func toggleFavorite(_ model: ModelInfo) {
-        db.toggleFavorite(model.id)
+        toggleFavorite(id: model.id)
+    }
+
+    func toggleFavorite(id: String) {
+        let makeFavorite = !favoriteIds.contains(id)
+        do {
+            try db.setFavorite(id, makeFavorite)
+            lastStorageError = nil
+        } catch {
+            lastStorageError = error.localizedDescription
+            AppToasts.saveFailed("favorite", reason: error.localizedDescription)
+        }
         loadFavorites()
+    }
+
+    /// Persists notes for any model, favorite or not.
+    func saveNotes(_ notes: String, for modelId: String) {
+        do {
+            try db.saveNotes(modelId, notes: notes)
+            lastStorageError = nil
+        } catch {
+            lastStorageError = error.localizedDescription
+            AppToasts.saveFailed("notes", reason: error.localizedDescription)
+        }
     }
 
     func copyModelId(_ model: ModelInfo) {

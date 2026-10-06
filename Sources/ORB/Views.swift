@@ -241,6 +241,9 @@ struct ModelDetailView: View {
     @EnvironmentObject private var shell: ShellController
     @AppStorage(PriceUnit.defaultsKey) private var priceUnit: PriceUnit = .perMillion
     @State private var notes: String = ""
+    /// Last value written, so navigation doesn't rewrite unchanged notes
+    /// (and never creates empty rows for models nobody annotated).
+    @State private var savedNotes: String = ""
     @State private var notesDebounceTask: Task<Void, Never>?
     @State private var tab: ModelDetailTab = .overview
 
@@ -270,15 +273,17 @@ struct ModelDetailView: View {
         }
         .onAppear {
             notes = viewModel.db.getNotes(model.id)
+            savedNotes = notes
         }
         .onChange(of: model.id) { oldID, _ in
             notesDebounceTask?.cancel()
-            viewModel.db.setNotes(oldID, notes: notes)
+            flushNotes(oldID)
             notes = viewModel.db.getNotes(model.id)
+            savedNotes = notes
         }
         .onDisappear {
             notesDebounceTask?.cancel()
-            viewModel.db.setNotes(model.id, notes: notes)
+            flushNotes(model.id)
         }
     }
 
@@ -392,16 +397,12 @@ struct ModelDetailView: View {
 
     // MARK: Notes tab
 
-    @ViewBuilder
-    private var notesTab: some View {
-        if viewModel.favoriteIds.contains(model.id) {
-            notesSection
-        } else {
-            ORBEmptyState(title: "Notes are for favorites", systemImage: "note.text",
-                          message: "Favorite this model to keep private notes about it.",
-                          actionTitle: "Favorite", action: { viewModel.toggleFavorite(model) })
-                .frame(height: 220)
-        }
+    private var notesTab: some View { notesSection }
+
+    private func flushNotes(_ modelID: String) {
+        guard notes != savedNotes else { return }
+        viewModel.saveNotes(notes, for: modelID)
+        savedNotes = notes
     }
 
     // MARK: Description
@@ -614,28 +615,29 @@ struct ModelDetailView: View {
 
     // MARK: Notes
 
-    @ViewBuilder
     private var notesSection: some View {
-        if viewModel.favoriteIds.contains(model.id) {
-            VStack(alignment: .leading, spacing: 8) {
-                Text("Notes")
-                    .font(.headline)
-                TextEditor(text: $notes)
-                    .font(.body)
-                    .frame(minHeight: 80)
-                    .padding(6)
-                    .background(.quaternary.opacity(0.3))
-                    .clipShape(RoundedRectangle(cornerRadius: 8))
-                    .onChange(of: notes) { _, newValue in
-                        notesDebounceTask?.cancel()
-                        let modelID = model.id
-                        notesDebounceTask = Task {
-                            try? await Task.sleep(nanoseconds: 800_000_000)
-                            guard !Task.isCancelled else { return }
-                            viewModel.db.setNotes(modelID, notes: newValue)
-                        }
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Notes")
+                .font(.headline)
+            Text("Private to this Mac. Saved automatically.")
+                .font(ORBFont.caption).foregroundStyle(.secondary)
+            TextEditor(text: $notes)
+                .font(.body)
+                .frame(minHeight: 120)
+                .padding(6)
+                .background(.quaternary.opacity(0.3))
+                .clipShape(RoundedRectangle(cornerRadius: 8))
+                .accessibilityLabel("Notes for \(model.name)")
+                .onChange(of: notes) { _, newValue in
+                    notesDebounceTask?.cancel()
+                    let modelID = model.id
+                    notesDebounceTask = Task {
+                        try? await Task.sleep(nanoseconds: 800_000_000)
+                        guard !Task.isCancelled, modelID == model.id, newValue != savedNotes else { return }
+                        viewModel.saveNotes(newValue, for: modelID)
+                        savedNotes = newValue
                     }
-            }
+                }
         }
     }
 }

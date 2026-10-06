@@ -327,60 +327,137 @@ struct ComparisonColumn: Identifiable, Equatable {
     let name: String
     let inputPrice: String
     let outputPrice: String
+    let cachePrice: String
     let context: String
+    let maxOutput: String
     let inputModalities: String
     let outputModalities: String
     let latency: String
     let throughput: String
+    let intelligence: String
+    let knowledgeCutoff: String
+    let parameters: String
     let inputPriceValue: Double?
     let contextValue: Int?
+    let maxOutputValue: Int?
+    let intelligenceValue: Double?
 
     static let missing = "—"
 
-    static func make(model: ModelInfo, endpoints: [ModelEndpoint]?) -> ComparisonColumn {
-        func priceText(_ perMillion: Double?, free: Bool) -> String {
+    /// `endpoints == nil` means "not loaded yet / failed" — shown as "—".
+    static func make(model: ModelInfo, endpoints: [ModelEndpoint]?, unit: PriceUnit = .perMillion) -> ComparisonColumn {
+        func priceText(_ raw: String?, free: Bool) -> String {
             if free { return "Free" }
-            guard let perMillion else { return "Variable" }
-            return "\(BrowserFormat.price(perMillion)) / 1M"
+            return PriceDisplay.text(raw, unit: unit) ?? "Variable"
         }
-        let inValue = model.inputPricePer1MIncludingFree
         let free = model.isFree
-        let outValue = model.pricing?.completion.flatMap(Double.init).flatMap { $0 >= 0 ? $0 * 1_000_000 : nil }
+        let inValue = model.inputPricePer1MIncludingFree
         let latencies = (endpoints ?? []).compactMap(\.latencyLast30m)
         let throughputs = (endpoints ?? []).compactMap(\.throughputLast30m)
+        let maxOut = model.topProvider?.maxCompletionTokens
+        let intelligence = model.benchmarks?.artificialAnalysis?.intelligenceIndex
+        let cache = PriceDisplay.perToken(model.pricing?.inputCacheRead).flatMap { $0 > 0 ? $0 : nil }
         return ComparisonColumn(
             id: model.id,
             name: model.name,
-            inputPrice: priceText(inValue, free: free),
-            outputPrice: priceText(outValue, free: free),
+            inputPrice: priceText(model.pricing?.prompt, free: free),
+            outputPrice: priceText(model.pricing?.completion, free: free),
+            cachePrice: cache.map { PriceDisplay.text(perToken: $0, unit: unit) } ?? missing,
             context: model.contextLength.map(BrowserFormat.context) ?? "N/A",
+            maxOutput: maxOut.map(BrowserFormat.context) ?? missing,
             inputModalities: model.inputModalities.joined(separator: ", "),
             outputModalities: model.outputModalities.joined(separator: ", "),
             latency: latencies.min().map { "\($0) ms" } ?? missing,
             throughput: throughputs.max().map { "\($0) tok/s" } ?? missing,
+            intelligence: intelligence.map { String(format: "%.1f", $0) } ?? missing,
+            knowledgeCutoff: model.knowledgeCutoff.flatMap { $0.isEmpty ? nil : $0 } ?? missing,
+            parameters: (model.supportedParameters ?? []).sorted().joined(separator: ", ").nonEmpty ?? missing,
             inputPriceValue: free ? 0 : inValue,
-            contextValue: model.contextLength
+            contextValue: model.contextLength,
+            maxOutputValue: maxOut,
+            intelligenceValue: intelligence
         )
     }
 
     struct Highlights: Equatable {
         var cheapestInputID: String?
         var largestContextID: String?
+        var largestOutputID: String?
+        var smartestID: String?
     }
 
     /// A highlight needs at least two known values that differ; otherwise
     /// there is nothing to beat.
     static func highlights(_ columns: [ComparisonColumn]) -> Highlights {
-        let prices = columns.compactMap { c in c.inputPriceValue.map { (c.id, $0) } }
-        let contexts = columns.compactMap { c in c.contextValue.map { (c.id, $0) } }
+        func best<T: Comparable & Hashable>(_ values: [(String, T)], lowest: Bool) -> String? {
+            guard values.count >= 2, Set(values.map(\.1)).count > 1 else { return nil }
+            return (lowest ? values.min { $0.1 < $1.1 } : values.max { $0.1 < $1.1 })?.0
+        }
         var result = Highlights()
-        if prices.count >= 2, Set(prices.map(\.1)).count > 1 {
-            result.cheapestInputID = prices.min { $0.1 < $1.1 }?.0
-        }
-        if contexts.count >= 2, Set(contexts.map(\.1)).count > 1 {
-            result.largestContextID = contexts.max { $0.1 < $1.1 }?.0
-        }
+        result.cheapestInputID = best(columns.compactMap { c in c.inputPriceValue.map { (c.id, $0) } }, lowest: true)
+        result.largestContextID = best(columns.compactMap { c in c.contextValue.map { (c.id, $0) } }, lowest: false)
+        result.largestOutputID = best(columns.compactMap { c in c.maxOutputValue.map { (c.id, $0) } }, lowest: false)
+        result.smartestID = best(columns.compactMap { c in c.intelligenceValue.map { (c.id, $0) } }, lowest: false)
         return result
+    }
+
+    /// Row order shared by the panel and the exports.
+    static let rows: [(title: String, value: (ComparisonColumn) -> String)] = [
+        ("Model ID", { $0.id }),
+        ("Input price", { $0.inputPrice }),
+        ("Output price", { $0.outputPrice }),
+        ("Cache read", { $0.cachePrice }),
+        ("Context", { $0.context }),
+        ("Max output", { $0.maxOutput }),
+        ("Intelligence", { $0.intelligence }),
+        ("Knowledge cutoff", { $0.knowledgeCutoff }),
+        ("Inputs", { $0.inputModalities }),
+        ("Outputs", { $0.outputModalities }),
+        ("Latency", { $0.latency }),
+        ("Throughput", { $0.throughput }),
+        ("Parameters", { $0.parameters }),
+    ]
+
+    static func markdown(_ columns: [ComparisonColumn]) -> String {
+        func cell(_ s: String) -> String {
+            s.replacingOccurrences(of: "|", with: "\\|").replacingOccurrences(of: "\n", with: " ")
+        }
+        var lines = ["| | " + columns.map { cell($0.name) }.joined(separator: " | ") + " |"]
+        lines.append("|---|" + columns.map { _ in "---|" }.joined())
+        for row in rows {
+            lines.append("| \(row.title) | " + columns.map { cell(row.value($0)) }.joined(separator: " | ") + " |")
+        }
+        return lines.joined(separator: "\n") + "\n"
+    }
+
+    static func csv(_ columns: [ComparisonColumn]) -> String {
+        var lines = [([""] + columns.map(\.name)).map(ModelExport.csvField).joined(separator: ",")]
+        for row in rows {
+            lines.append(([row.title] + columns.map(row.value)).map(ModelExport.csvField).joined(separator: ","))
+        }
+        return lines.joined(separator: "\n") + "\n"
+    }
+}
+
+private extension String {
+    var nonEmpty: String? { isEmpty ? nil : self }
+}
+
+/// Loads every compared model's endpoints concurrently. Each result is
+/// independent: one failure never hides another model's data, and the
+/// shared `APIService.endpointsError` is never touched.
+enum CompareEndpointLoader {
+    typealias Loader = @Sendable (String) async -> Result<[ModelEndpoint], EndpointLoadError>
+
+    static func load(_ models: [(id: String, endpointsID: String)], loader: @escaping Loader) async -> [String: Result<[ModelEndpoint], EndpointLoadError>] {
+        await withTaskGroup(of: (String, Result<[ModelEndpoint], EndpointLoadError>).self) { group in
+            for model in models {
+                group.addTask { (model.id, await loader(model.endpointsID)) }
+            }
+            var out: [String: Result<[ModelEndpoint], EndpointLoadError>] = [:]
+            for await (id, result) in group { out[id] = result }
+            return out
+        }
     }
 }
 
