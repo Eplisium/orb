@@ -631,3 +631,29 @@ struct AgentSamplingTests {
         #expect(AgentSamplingPreferences(temperature: nil, reasoningEffort: "").settings.temperature == nil)
     }
 }
+
+// MARK: - Item 15: smaller fixes
+
+@Suite("Wave1: small fixes")
+@MainActor
+struct SmallFixesTests {
+    @Test("completion notice reflects failure, truncation, and silence on cancel")
+    func notices() {
+        #expect(ChatService.completionNotice(phase: .completed, mode: .chat, conversationTitle: "T")?.title == "Chat finished")
+        #expect(ChatService.completionNotice(phase: .failed("boom"), mode: .agent, conversationTitle: "T")?.title.hasSuffix("failed") == true)
+        #expect(ChatService.completionNotice(phase: .interrupted("cancelled"), mode: .chat, conversationTitle: "T") == nil)
+        #expect(ChatService.completionNotice(phase: .interrupted("length"), mode: .chat, conversationTitle: "T")?.body == "T: length")
+    }
+
+    @Test("Agent titles get an ellipsis when truncated, like Chat")
+    func agentTitle() async throws {
+        let service = ChatService(client: WaveScriptedClient([]), store: CountingConversationStore(), apiKeyProvider: { "fixture" })
+        let long = String(repeating: "word ", count: 20)
+        await service.sendAgentMessage(long, modelId: "test/model", workspace: workspace, fullComputerAccess: false)
+        try await waitUntilIdle(service)
+        let title = try #require(service.activeConversation?.title)
+        #expect(title.hasSuffix("…"))
+        #expect(title.count == 45)
+        #expect(ChatService.derivedTitle("short") == "short")
+    }
+}

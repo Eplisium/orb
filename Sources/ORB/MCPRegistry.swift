@@ -159,7 +159,8 @@ actor MCPRegistry {
         // Phase 2 — save all plaintext values, aborting on the first failure.
         for variable in variables.sorted() where config.secretEnv?[variable] == nil {
             let reference = MCPServerConfig.secretReference(serverName: name, variable: variable)
-            if let error = store.saveSecret(config.env[variable]!, forReference: reference) {
+            guard let value = config.env[variable] else { continue }  // Phase 1 verified presence.
+            if let error = store.saveSecret(value, forReference: reference) {
                 return (
                     configs,
                     MCPSecretMigrationOutcome(

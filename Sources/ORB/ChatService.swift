@@ -235,15 +235,6 @@ final class ChatService: ObservableObject {
         return removed.count
     }
 
-    func clearConversations() {
-        if runState.isActive { stopStreaming() }
-        let ids = conversations.map(\.id)
-        for id in ids { do { try store.removeConversation(id) } catch { lastError = error.localizedDescription } }
-        conversations.removeAll()
-        agentHistories.removeAll()
-        activeConversation = nil
-    }
-
     func deleteMessage(_ messageID: UUID, from conversation: ChatConversation) {
         guard !isRunning(conversationID: conversation.id) else {
             lastError = "Messages cannot be deleted while this conversation is running. Stop it first."
@@ -474,7 +465,7 @@ final class ChatService: ObservableObject {
             }
             conversations[conversationIndex].messages.append(userMessage)
             if conversations[conversationIndex].messages.count == 1 {
-                conversations[conversationIndex].title = String(text.prefix(44)) + (text.count > 44 ? "…" : "")
+                conversations[conversationIndex].title = Self.derivedTitle(text)
             }
         }
         let assistant: ChatMessage
@@ -798,10 +789,39 @@ final class ChatService: ObservableObject {
         streamingContent = ""
         activityLabel = ""
         streamTask = nil
-        StudioNotifier.shared.finished(
-            section: context.mode.rawValue,
-            title: "\(context.mode.rawValue) finished",
-            body: conversations.first(where: { $0.id == context.conversationID })?.title ?? "Your run is complete.")
+        if let notice = Self.completionNotice(
+            phase: runState.phase, mode: context.mode,
+            conversationTitle: conversations.first(where: { $0.id == context.conversationID })?.title
+        ) {
+            StudioNotifier.shared.finished(section: context.mode.rawValue, title: notice.title, body: notice.body)
+        }
+    }
+
+    /// First-message title, capped at 44 characters with an ellipsis.
+    static func derivedTitle(_ text: String) -> String {
+        let flat = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: "\n", with: " ")
+        return flat.count > 44 ? String(flat.prefix(44)) + "…" : flat
+    }
+
+    /// What the background notification says for a terminal phase. A user
+    /// cancel posts nothing; failures and truncation say so instead of
+    /// claiming the run "finished".
+    static func completionNotice(
+        phase: PlaygroundRunPhase, mode: PlaygroundMode, conversationTitle: String?
+    ) -> (title: String, body: String)? {
+        let name = conversationTitle ?? "Your run"
+        switch phase {
+        case .completed:
+            return ("\(mode.rawValue) finished", conversationTitle ?? "Your run is complete.")
+        case .failed(let message):
+            return ("\(mode.rawValue) failed", "\(name): \(message)")
+        case .interrupted(let reason):
+            if reason == "cancelled" { return nil }
+            return ("\(mode.rawValue) stopped early", reason.map { "\(name): \($0)" } ?? name)
+        case .idle, .connecting, .streaming, .executingTool, .stopping:
+            return nil
+        }
     }
 
     private func installApprovalHandler() {
@@ -878,7 +898,7 @@ final class ChatService: ObservableObject {
         guard let conversationID = activeConversation?.id,
               let index = conversations.firstIndex(where: { $0.id == conversationID }) else { return }
         conversations[index].messages.append(ChatMessage(role: "user", content: text))
-        if conversations[index].messages.count == 1 { conversations[index].title = String(text.prefix(44)) }
+        if conversations[index].messages.count == 1 { conversations[index].title = Self.derivedTitle(text) }
         let assistant = ChatMessage(role: "assistant", content: "", status: .streaming)
         conversations[index].messages.append(assistant)
         synchronizeActive(conversationID)
