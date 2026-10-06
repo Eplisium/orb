@@ -1,0 +1,99 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# Integration and rendering tests stay skipped in CI: never set
+# RUN_OPENROUTER_INTEGRATION, ORB_STREAM_SNAPSHOT_DIR, or ORB_REASONING_SNAPSHOT.
+
+jobs:
+  build-and-test:
+    name: Build, test, package
+    runs-on: macos-15
+    timeout-minutes: 45
+    env:
+      LOG_DIR: ${{ github.workspace }}/ci-logs
+
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # build_app.sh derives CFBundleVersion from the commit count
+
+      - name: Select latest stable Xcode
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: latest-stable
+
+      - name: Toolchain versions
+        run: |
+          mkdir -p "$LOG_DIR"
+          xcodebuild -version
+          swift --version
+
+      - name: Cache SwiftPM build
+        uses: actions/cache@v4
+        with:
+          path: .build
+          key: spm-${{ runner.os }}-${{ hashFiles('Package.swift', 'Package.resolved', 'Sources/**/*.swift', 'Tests/**/*.swift') }}
+          restore-keys: |
+            spm-${{ runner.os }}-
+
+      - name: Build (app + tests)
+        run: |
+          set -o pipefail
+          swift build --build-tests 2>&1 | tee "$LOG_DIR/build.log"
+
+      - name: Count compiler warnings
+        run: |
+          total=$(bash scripts/count_warnings.sh "$LOG_DIR/build.log")
+          sources=$(bash scripts/count_warnings.sh "$LOG_DIR/build.log" --sources-only)
+          echo "Unique warnings: $total total, $sources in Sources/"
+          {
+            echo "### Compiler warnings"
+            echo ""
+            echo "| Scope | Unique warnings |"
+            echo "|---|---:|"
+            echo "| All targets | $total |"
+            echo "| Sources/ only | $sources |"
+          } >> "$GITHUB_STEP_SUMMARY"
+          bash scripts/count_warnings.sh "$LOG_DIR/build.log" --summary > "$LOG_DIR/warnings-summary.txt"
+
+      - name: Test
+        run: |
+          set -o pipefail
+          swift test --skip-build 2>&1 | tee "$LOG_DIR/test.log"
+
+      - name: Package ad-hoc app
+        run: |
+          set -o pipefail
+          bash build_app.sh --adhoc --output "$RUNNER_TEMP/package" 2>&1 | tee "$LOG_DIR/package.log"
+          ditto -c -k --keepParent "$RUNNER_TEMP/package/ORB.app" "$RUNNER_TEMP/package/ORB.zip"
+
+      - name: Upload app (ad-hoc signed)
+        uses: actions/upload-artifact@v4
+        with:
+          name: ORB-adhoc-${{ github.sha }}
+          path: ${{ runner.temp }}/package/ORB.zip
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-logs-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ci-logs/
+          if-no-files-found: warn
+          retention-days: 14
