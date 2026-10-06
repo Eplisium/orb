@@ -3,6 +3,11 @@ import Foundation
 /// ORB's function-calling loop. Every model turn uses the same streaming client
 /// as direct Chat, and tool fragments are assembled by choice/tool index.
 enum NativeAgentRunner {
+    /// Wall-clock arrival time of the stream event currently being delivered
+    /// to `onEvent`, sampled off the main actor (see `StreamArrivalRelay`).
+    /// Nil for events the loop synthesizes itself; use `Date()` then.
+    @TaskLocal static var eventArrival: Date?
+
     typealias ToolExecutor = @Sendable (AssembledAgentToolCall) async throws -> NativeAgentToolResult
 
     static func run(
@@ -50,6 +55,10 @@ enum NativeAgentRunner {
             .filter { effectivePolicy.allowsDefinition(name: $0.function.name) }
         let nativeNames = Set(definitions.map(\.function.name))
         definitions += mcpDefinitions.filter { !nativeNames.contains($0.function.name) }
+
+        let emit: @Sendable (NativeAgentEvent, Date) async -> Void = { event, arrival in
+            await NativeAgentRunner.$eventArrival.withValue(arrival) { await onEvent(event) }
+        }
 
         let executor: ToolExecutor = toolExecutor ?? { call in
             try Task.checkCancellation()
@@ -99,24 +108,27 @@ enum NativeAgentRunner {
             var finishReason: String?
             var turnUsage: ChatUsage?
             var fragments: [Int: ToolBuilder] = [:]
+            var lastArrival = Date()
 
             turnAttempt: while true {
             do {
-            let stream = try await client.stream(request)
-            for try await event in stream {
+            let stream = try await StreamArrivalRelay.stream(client, request)
+            for try await timed in stream {
                 try Task.checkCancellation()
+                let event = timed.event
+                lastArrival = timed.arrivedAt
                 switch event {
                 case .contentDelta(let choice, let delta) where choice == 0:
                     text += delta
-                    await onEvent(.textDelta(delta))
+                    await emit(.textDelta(delta), timed.arrivedAt)
                 case .reasoningDelta(let choice, let delta) where choice == 0:
                     reasoning += delta
-                    await onEvent(.reasoningDelta(delta))
+                    await emit(.reasoningDelta(delta), timed.arrivedAt)
                 case .reasoningDetails(let choice, let details) where choice == 0:
                     turnReasoningDetails += details
                     // Pitfall 28: the agent path surfaces exactly what the
                     // chat path surfaces.
-                    await onEvent(.reasoningDetails(details))
+                    await emit(.reasoningDetails(details), timed.arrivedAt)
                 case .toolCallFragment(let choice, let index, let id, let type, let name, let arguments) where choice == 0:
                     var builder = fragments[index] ?? ToolBuilder(index: index)
                     if let id, builder.id.isEmpty { builder.id = id }
@@ -125,7 +137,7 @@ enum NativeAgentRunner {
                     if let arguments { builder.arguments += arguments }
                     fragments[index] = builder
                     if let call = builder.preview {
-                        await onEvent(.toolCallUpdated(call))
+                        await emit(.toolCallUpdated(call), timed.arrivedAt)
                     }
                 case .usage(let usage): turnUsage = usage
                 case .finishReason(let choice, let reason) where choice == 0: finishReason = reason
@@ -160,7 +172,7 @@ enum NativeAgentRunner {
 
             aggregateUsage = sum(aggregateUsage, turnUsage)
             if let aggregateUsage { await onEvent(.usage(turn: turn, cumulative: aggregateUsage)) }
-            await onEvent(.turnFinished(reason: finishReason))
+            await emit(.turnFinished(reason: finishReason), lastArrival)
 
             if finishReason == "length",
                fragments.values.contains(where: { !$0.isEmptyPhantom }) {
@@ -319,14 +331,14 @@ enum NativeAgentRunner {
         var finalText = ""
         var finalUsage: ChatUsage?
         var finalFinishReason: String?
-        for try await event in try await client.stream(finalRequest) {
+        for try await timed in try await StreamArrivalRelay.stream(client, finalRequest) {
             try Task.checkCancellation()
-            switch event {
+            switch timed.event {
             case .contentDelta(let choice, let delta) where choice == 0:
                 finalText += delta
-                await onEvent(.textDelta(delta))
+                await emit(.textDelta(delta), timed.arrivedAt)
             case .reasoningDelta(let choice, let delta) where choice == 0:
-                await onEvent(.reasoningDelta(delta))
+                await emit(.reasoningDelta(delta), timed.arrivedAt)
             case .usage(let usage): finalUsage = usage
             case .finishReason(let choice, let reason) where choice == 0: finalFinishReason = reason
             case .apiError(let error): throw NativeAgentError.api(error.message)

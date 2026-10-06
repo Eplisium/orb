@@ -277,7 +277,10 @@ struct OpenRouterClientTests {
         let transport = FixtureHTTPTransport([
             .init(
                 response: response(status: 200),
-                chunks: [.success(finish)] + Array(repeating: .success(keepalive), count: 100),
+                // ~1s of keepalives: if they extended the grace, the stream
+                // would run the full second. A wide margin below that keeps
+                // the assertion meaningful under full-suite load.
+                chunks: [.success(finish)] + Array(repeating: .success(keepalive), count: 500),
                 chunkDelay: .milliseconds(2)
             )
         ])
@@ -291,8 +294,8 @@ struct OpenRouterClientTests {
         let stream = try await client.stream(request())
         for try await _ in stream {}
 
-        #expect(started.duration(to: .now) < .milliseconds(100))
-        for _ in 0..<50 where await !transport.cancellationObserved {
+        #expect(started.duration(to: .now) < .milliseconds(500))
+        for _ in 0..<500 where await !transport.cancellationObserved {
             try await Task.sleep(for: .milliseconds(2))
         }
         #expect(await transport.cancellationObserved)
