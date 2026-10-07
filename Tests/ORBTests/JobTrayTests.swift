@@ -42,7 +42,12 @@ struct JobTrayPresentationTests {
         #expect(JobPresentation.make(job(.stoppedLocally)).actions == [.resume])
         #expect(JobPresentation.make(job(.polling)).actions == [.stop])
         #expect(JobPresentation.make(job(.idle)).actions == [.resume])
-        #expect(JobPresentation.make(job(.completed)).actions == [.open])
+        // A finished job is only "open"-able once its output is saved in ORB;
+        // otherwise the tray must offer Download (the bytes are remote-only).
+        #expect(JobPresentation.make(job(.completed)).actions == [.download])
+        var savedJob = job(.completed)
+        savedJob.savedCreationID = UUID()
+        #expect(JobPresentation.make(savedJob).actions == [.open])
         #expect(JobPresentation.make(job(.failed)).actions == [.dismiss])
         #expect(JobPresentation.make(job(.stoppedLocally, remote: nil)).actions == [.dismiss], "nothing to poll without a remote ID")
     }

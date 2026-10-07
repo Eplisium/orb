@@ -59,6 +59,10 @@ final class TestRunner: ObservableObject {
     @Published var batchCeilingUSD: Double?
     @Published var batchUnreportedRuns = 0
     @Published var batchNotice: String?
+    /// Total stored results; `results` may hold only the newest page.
+    @Published var totalResultCount = 0
+    /// True once the user asked for every stored result.
+    @Published var showsAllResults = false
 
     typealias AgentRun = (String, String, String, URL, String, @escaping @MainActor (String) -> Void) async throws -> NativeAgentRunResult
     private let client: any OpenRouterClientProtocol
@@ -100,56 +104,85 @@ final class TestRunner: ObservableObject {
         let icon: String
     }
 
-    func loadSavedResults() { results = DatabaseManager.shared.loadTestResults() }
-    func clearResults() { results.removeAll() }
+    /// Loads the newest page of results (or all, after "Load all").
+    func loadSavedResults() {
+        let db = DatabaseManager.shared
+        results = showsAllResults ? db.loadAllTestResults() : db.loadTestResults()
+        totalResultCount = max(db.countTestResults(), results.count)
+    }
+
+    func loadAllResults() {
+        showsAllResults = true
+        loadSavedResults()
+    }
+
+    func clearResults() {
+        results.removeAll()
+        totalResultCount = 0
+    }
 
     /// Synchronous ownership prevents duplicate starts across UI Tasks.
     func start(scenario: TestScenario, modelIDs: [String], models: [ModelInfo], userInput: String? = nil,
                ceilingUSD: Double? = nil) {
+        start(plan: [(scenario, modelIDs)], models: models, userInput: userInput, ceilingUSD: ceilingUSD)
+    }
+
+    /// Runs several (scenario, models) batches back to back — used by
+    /// "Rerun failed/unverified". Each batch obeys the model cap; the spend
+    /// ceiling and unknown-cost stop apply across the whole plan.
+    func start(plan rawPlan: [(scenario: TestScenario, modelIDs: [String])], models: [ModelInfo],
+               userInput: String? = nil, ceilingUSD: Double? = nil) {
         guard !isRunning else { return }
-        let ids = TestBatchSelection.eligibleIDs(modelIDs, catalog: models)
-        guard !ids.isEmpty else { batchNotice = "No eligible text-output models selected."; return }
-        guard ids.count <= TestBatchSelection.maximumModels else {
+        let plan = rawPlan.map { ($0.scenario, TestBatchSelection.eligibleIDs($0.modelIDs, catalog: models)) }
+            .filter { !$0.1.isEmpty }
+        guard !plan.isEmpty else { batchNotice = "No eligible text-output models selected."; return }
+        guard plan.allSatisfy({ $0.1.count <= TestBatchSelection.maximumModels }) else {
             batchNotice = "Select at most \(TestBatchSelection.maximumModels) models."; return
         }
         if let ceilingUSD, (!ceilingUSD.isFinite || ceilingUSD <= 0) {
             batchNotice = "Enter a positive spend ceiling."; return
         }
-        batchNotice = ids.count == modelIDs.count ? nil : "Duplicate or unsupported models were omitted."
+        let requested = rawPlan.reduce(0) { $0 + $1.modelIDs.count }
+        let total = plan.reduce(0) { $0 + $1.1.count }
+        batchNotice = total == requested ? nil : "Duplicate or unsupported models were omitted."
         isRunning = true
         cancellationRequested = false
-        runningScenarioId = scenario.id
+        runningScenarioId = plan[0].0.id
         batchCompleted = 0
-        batchTotal = ids.count
+        batchTotal = total
         batchSpent = 0
         batchUnreportedRuns = 0
         batchCeilingUSD = ceilingUSD
-        let prompt = TestPromptComposer.compose(base: scenario.userPrompt, userInput: userInput)
         activeTask = Task { [weak self] in
             guard let self else { return }
             var spent = 0.0
-            for id in ids {
-                if Task.isCancelled || self.cancellationRequested { break }
-                if let ceilingUSD, spent >= ceilingUSD {
-                    self.batchNotice = "Spend ceiling reached; remaining models skipped. One request may exceed the ceiling."
-                    break
-                }
-                self.runningModelId = id
-                self.activityLabel = "Starting \(id)…"
-                self.activityLog.removeAll()
-                let result = await self.execute(scenario: scenario, modelID: id, models: models, prompt: prompt)
-                self.results.insert(result, at: 0)
-                self.saveResult(result)
-                self.batchCompleted += 1
-                if Task.isCancelled || self.cancellationRequested { break }
-                if ceilingUSD != nil {
-                    guard let cost = self.reportedCostForLastRun else {
-                        self.batchUnreportedRuns += 1
-                        self.batchNotice = "Provider did not report cost; remaining models skipped."
-                        break
+            planLoop: for (scenario, ids) in plan {
+                self.runningScenarioId = scenario.id
+                let prompt = TestPromptComposer.compose(base: scenario.userPrompt, userInput: userInput)
+                for id in ids {
+                    if Task.isCancelled || self.cancellationRequested { break planLoop }
+                    if let ceilingUSD, spent >= ceilingUSD {
+                        self.batchNotice = "Spend ceiling reached; remaining models skipped. One request may exceed the ceiling."
+                        break planLoop
                     }
-                    spent += cost
-                    self.batchSpent = spent
+                    self.runningModelId = id
+                    self.activityLabel = "Starting \(id)…"
+                    self.activityLog.removeAll()
+                    let result = await self.execute(scenario: scenario, modelID: id, models: models, prompt: prompt)
+                    self.results.insert(result, at: 0)
+                    self.totalResultCount += 1
+                    self.saveResult(result)
+                    self.batchCompleted += 1
+                    if Task.isCancelled || self.cancellationRequested { break planLoop }
+                    if ceilingUSD != nil {
+                        guard let cost = self.reportedCostForLastRun else {
+                            self.batchUnreportedRuns += 1
+                            self.batchNotice = "Provider did not report cost; remaining models skipped."
+                            break planLoop
+                        }
+                        spent += cost
+                        self.batchSpent = spent
+                    }
                 }
             }
             self.runningModelId = nil

@@ -167,6 +167,25 @@ enum LibraryExport {
         }
         return (written, failed)
     }
+
+    /// File-copy variant: each entry's stored file is copied (never read into
+    /// memory). Same never-overwrite numbering as `write`.
+    static func copy(_ plan: [Entry], to folder: URL, source: (SavedCreation) throws -> URL) -> (written: Int, failed: [String]) {
+        var taken = Set((try? FileManager.default.contentsOfDirectory(atPath: folder.path)) ?? [])
+        var written = 0
+        var failed: [String] = []
+        for entry in plan {
+            let name = unique(entry.fileName, taken: &taken)
+            do {
+                try FileManager.default.copyItem(at: source(entry.creation), to: folder.appendingPathComponent(name))
+                written += 1
+            } catch {
+                failed.append(name)
+                taken.remove(name)
+            }
+        }
+        return (written, failed)
+    }
 }
 
 enum LibraryPreview {

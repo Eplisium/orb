@@ -8,6 +8,8 @@ final class QuickLookPreview: NSObject, QLPreviewPanelDataSource, QLPreviewPanel
     static let shared = QuickLookPreview()
 
     private var urls: [URL] = []
+    /// False when showing caller-owned files that must not be deleted.
+    private var ownsFiles = true
 
     static var directory: URL {
         FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
@@ -39,7 +41,24 @@ final class QuickLookPreview: NSObject, QLPreviewPanelDataSource, QLPreviewPanel
         return true
     }
 
+    /// Shows files that already exist on disk (e.g. staged creation links).
+    /// They are not deleted on close — the staging area is pruned separately.
+    @discardableResult
+    func show(fileURLs: [URL]) -> Bool {
+        guard !fileURLs.isEmpty, let panel = QLPreviewPanel.shared() else { return false }
+        cleanUp()
+        urls = fileURLs
+        ownsFiles = false
+        panel.dataSource = self
+        panel.delegate = self
+        panel.reloadData()
+        panel.currentPreviewItemIndex = 0
+        panel.makeKeyAndOrderFront(nil)
+        return true
+    }
+
     func cleanUp() {
+        guard ownsFiles else { urls = []; ownsFiles = true; return }
         for url in urls { try? FileManager.default.removeItem(at: url) }
         urls = []
     }

@@ -79,10 +79,23 @@ struct JobRecord: Equatable, Identifiable, Sendable {
     var recoverableError: String?
     var createdAt: Date
     var updatedAt: Date
+    /// The prompt that started the job, so a resumed job keeps its context.
+    /// Persisted in the additive `jobs.prompt` column.
+    var prompt: String? = nil
+    /// The saved creation produced from this finished job. Set exactly once;
+    /// a completed job without one still needs its result downloaded.
+    var savedCreationID: UUID? = nil
 
     /// Resumable jobs have a remote ID to poll and are not terminal.
     var isResumable: Bool {
         remoteID != nil && !pollingState.isTerminal
+    }
+
+    /// A finished job whose output has not been saved in ORB yet. The bytes
+    /// only exist at the provider, so the tray must offer a Download action
+    /// (this survives restarts, unlike any in-memory download).
+    var needsDownload: Bool {
+        remoteID != nil && pollingState == .completed && savedCreationID == nil
     }
 }
 
@@ -116,18 +129,20 @@ final class JobController {
         messageID: UUID? = nil,
         remoteStatus: String?,
         error: String? = nil,
-        cost: Double? = nil
+        cost: Double? = nil,
+        prompt: String? = nil
     ) -> JobRecord? {
         if database.findJobRecord(remoteID: remoteID) != nil {
             update(remoteID: remoteID) { record in
                 record.submissionState = .submitted
+                if let prompt, record.prompt == nil { record.prompt = prompt }
                 record.lastRemoteStatus = remoteStatus ?? record.lastRemoteStatus
                 if let error { record.recoverableError = error }
                 if let cost { record.usageCost = cost }
                 let mapped = JobPollingState(remoteStatus: remoteStatus)
                 if mapped.isTerminal { record.pollingState = mapped }
             }
-            return database.findJobRecord(remoteID: remoteID)
+            return self.record(remoteID: remoteID)
         }
         let now = Date()
         let record = JobRecord(
@@ -143,7 +158,8 @@ final class JobController {
             usageCost: cost,
             recoverableError: error,
             createdAt: now,
-            updatedAt: now
+            updatedAt: now,
+            prompt: prompt
         )
         persist(record)
         return record
@@ -211,30 +227,64 @@ final class JobController {
         }
     }
 
+    /// Polling gave up after repeated failures: the remote job may still be
+    /// running, so the record becomes resumable (`.stoppedLocally`) with a
+    /// recoverable explanation instead of claiming it is still Running.
+    func recordPollFailure(remoteID: String, error: String) {
+        update(remoteID: remoteID) { record in
+            record.pollingState = .stoppedLocally
+            record.recoverableError = error
+        }
+    }
+
+    /// Links a finished job to the saved creation made from its output. Set
+    /// at most once (the first link wins), and allowed on terminal records —
+    /// it never changes the polling state.
+    func recordSavedCreation(remoteID: String, creationID: UUID) {
+        guard var record = record(remoteID: remoteID), record.savedCreationID == nil else { return }
+        record.savedCreationID = creationID
+        record.updatedAt = Date()
+        persist(record)
+    }
+
+    /// Clears a link whose creation no longer exists (deleted from Library),
+    /// so the result can be downloaded again while the provider still has it.
+    func clearSavedCreation(remoteID: String) {
+        guard var record = record(remoteID: remoteID), record.savedCreationID != nil else { return }
+        record.savedCreationID = nil
+        record.updatedAt = Date()
+        persist(record)
+    }
+
     // MARK: Queries
 
     func record(id: UUID) -> JobRecord? {
-        database.findJobRecord(id: id)
+        database.withMediaFields(database.findJobRecord(id: id))
     }
 
     func record(remoteID: String) -> JobRecord? {
-        database.findJobRecord(remoteID: remoteID)
+        database.withMediaFields(database.findJobRecord(remoteID: remoteID))
     }
 
     /// Resumable listing: jobs with a remote ID and a last known status that
     /// have not reached a terminal state.
     func resumableJobs() -> [JobRecord] {
-        database.loadJobRecords().filter(\.isResumable)
+        allJobs().filter(\.isResumable)
+    }
+
+    /// Finished jobs whose output was never saved in ORB.
+    func downloadableJobs() -> [JobRecord] {
+        allJobs().filter(\.needsDownload)
     }
 
     func allJobs() -> [JobRecord] {
-        database.loadJobRecords()
+        database.withMediaFields(database.loadJobRecords())
     }
 
     // MARK: Persistence
 
     private func update(remoteID: String, mutate: (inout JobRecord) -> Void) {
-        guard var record = database.findJobRecord(remoteID: remoteID) else { return }
+        guard var record = record(remoteID: remoteID) else { return }
         // Terminal states are monotonic: a completed/failed/cancelled/expired
         // job never regresses to an earlier state.
         guard !record.pollingState.isTerminal else { return }
@@ -246,6 +296,7 @@ final class JobController {
     private func persist(_ record: JobRecord) {
         do {
             try database.saveJobRecordChecked(record)
+            try database.saveJobMediaFieldsChecked(record)
             lastPersistenceError = nil
         } catch {
             // Storage-first: a failed write is surfaced, never fatal.

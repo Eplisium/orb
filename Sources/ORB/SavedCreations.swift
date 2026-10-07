@@ -97,21 +97,31 @@ final class SavedCreationsStore: ObservableObject {
         return try await operation.value
     }
 
+    /// Saves a file already on disk (a streamed download) without loading it
+    /// into memory. The source file is moved into the library on success and
+    /// left in place on failure so the caller can retry or export it.
+    func save(fileAt source: URL, mimeType: String, kind: SavedCreation.Kind, modelID: String, prompt: String?) async throws -> SavedCreation {
+        try await serialized { [self] in
+            if let loadError { throw loadError }
+            let asset = try await assetStore.store(fileAt: source, mimeType: mimeType)
+            return try indexNewCreation(asset: asset, mimeType: mimeType, kind: kind, modelID: modelID, prompt: prompt)
+        }
+    }
+
     private func performSave(_ data: Data, mimeType: String, kind: SavedCreation.Kind, modelID: String, prompt: String?) async throws -> SavedCreation {
         if let loadError { throw loadError }
         let asset = try await assetStore.store(data, mimeType: mimeType)
+        return try indexNewCreation(asset: asset, mimeType: mimeType, kind: kind, modelID: modelID, prompt: prompt)
+    }
+
+    private func indexNewCreation(asset: AssetRecord, mimeType: String, kind: SavedCreation.Kind, modelID: String, prompt: String?) throws -> SavedCreation {
         // AssetStore may return an existing record for these bytes, including its original path.
         guard Self.isValidAssetPath(asset.relativePath, checksum: asset.checksum) else {
             throw SavedCreationsError.unavailable("asset metadata has an untrusted path")
         }
-        // Dedupe can return an older file: never index corrupt or replaced bytes.
-        let base = assetStore.baseDirectory.standardizedFileURL.resolvingSymlinksInPath()
-        let file = assetStore.baseDirectory.appendingPathComponent(asset.relativePath)
-            .standardizedFileURL.resolvingSymlinksInPath()
-        guard file.path.hasPrefix(base.path + "/") else {
-            throw AssetStoreError.invalidPath(asset.relativePath)
-        }
-        _ = try await assetStore.data(for: asset)
+        // Containment + symlink check (AssetStore already verified the checksum
+        // of new and deduped files by streaming them).
+        _ = try validatedFileURL(path: asset.relativePath, checksum: asset.checksum)
         let item = SavedCreation(id: UUID(), kind: kind, modelID: modelID, prompt: prompt,
                                  mimeType: mimeType, createdAt: Date(), assetPath: asset.relativePath,
                                  checksum: asset.checksum)
@@ -174,15 +184,39 @@ final class SavedCreationsStore: ObservableObject {
         creations = updated
     }
 
-    func data(for creation: SavedCreation) async throws -> Data {
-        let path = creation.assetPath
-        guard Self.isValidAssetPath(path, checksum: creation.checksum) else {
+    /// On-disk location of a creation's bytes for export (copyItem), drag-out,
+    /// Reveal in Finder, Share, Quick Look, and thumbnails — without reading
+    /// or hashing the file. Applies the same path validation as `data(for:)`:
+    /// content-addressed path shape, containment, and no symlinks anywhere.
+    func fileURL(for creation: SavedCreation) throws -> URL {
+        try validatedFileURL(path: creation.assetPath, checksum: creation.checksum)
+    }
+
+    /// Copies a creation's file to a user-chosen destination (no in-memory
+    /// read). Replaces an existing file at `destination`.
+    func export(_ creation: SavedCreation, to destination: URL) throws {
+        let source = try fileURL(for: creation)
+        let fm = FileManager.default
+        if fm.fileExists(atPath: destination.path) { try fm.removeItem(at: destination) }
+        try fm.copyItem(at: source, to: destination)
+    }
+
+    private func validatedFileURL(path: String, checksum: String) throws -> URL {
+        guard Self.isValidAssetPath(path, checksum: checksum) else {
             throw AssetStoreError.invalidPath(path)
         }
-        // AssetStore rejects lexical traversal; additionally reject symlinks out of the library.
+        // AssetStore rejects lexical traversal and any symlinked component.
+        let url = try assetStore.fileURL(forRelativePath: path)
+        // Defence in depth: the canonical location must stay inside the library.
         let base = assetStore.baseDirectory.standardizedFileURL.resolvingSymlinksInPath()
-        let file = assetStore.baseDirectory.appendingPathComponent(path).standardizedFileURL.resolvingSymlinksInPath()
+        let file = url.standardizedFileURL.resolvingSymlinksInPath()
         guard file.path.hasPrefix(base.path + "/") else { throw AssetStoreError.invalidPath(path) }
+        return url
+    }
+
+    func data(for creation: SavedCreation) async throws -> Data {
+        let path = creation.assetPath
+        _ = try validatedFileURL(path: path, checksum: creation.checksum)
         // Verify against the creation's persisted checksum, not only the database's current record.
         let record = AssetRecord(id: creation.id, relativePath: path, remoteReference: nil,
                                  mimeType: creation.mimeType, sizeBytes: 0, checksum: creation.checksum,

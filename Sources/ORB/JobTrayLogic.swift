@@ -7,7 +7,7 @@ import SwiftUI
 // submission must never be retried automatically (it can bill twice).
 
 struct JobPresentation: Equatable {
-    enum Action: Equatable { case resume, stop, open, dismiss }
+    enum Action: Equatable { case resume, stop, open, download, dismiss }
 
     let label: String
     let detail: String
@@ -45,7 +45,13 @@ struct JobPresentation: Equatable {
                 detail: "ORB stopped checking, but the job is probably still running at the provider and may still bill. Resume to pick it up." + error,
                 symbol: "pause.circle", status: .interrupted, actions: job.isResumable ? [.resume] : [.dismiss], costText: cost)
         case .completed:
-            return JobPresentation(label: "Done", detail: "Ready to open.", symbol: "checkmark.circle.fill",
+            if job.needsDownload {
+                // The provider finished but ORB has not saved the result yet
+                // (e.g. the app quit mid-download). Bytes live only remotely.
+                return JobPresentation(label: "Done — not saved", detail: "Finished at the provider but not saved in ORB yet. Download to keep it.",
+                                       symbol: "arrow.down.circle", status: .complete, actions: [.download], costText: cost)
+            }
+            return JobPresentation(label: "Done", detail: "Saved in ORB.", symbol: "checkmark.circle.fill",
                                    status: .complete, actions: [.open], costText: cost)
         case .failed:
             return JobPresentation(label: "Failed", detail: "The provider reported a failure." + error,
@@ -108,6 +114,9 @@ struct JobTrayButton: View {
     let reload: () -> [JobRecord]
     let onResume: (JobRecord) -> Void
     let onStop: (JobRecord) -> Void
+    var onDownload: (JobRecord) -> Void = { _ in }
+    var onOpen: (JobRecord) -> Void = { _ in }
+    var isDownloading: (JobRecord) -> Bool = { _ in false }
 
     var body: some View {
         Button { jobs = reload(); open.toggle() } label: {
@@ -149,9 +158,16 @@ struct JobTrayButton: View {
             HStack {
                 ForEach(p.actions, id: \.self) { action in
                     switch action {
-                    case .resume: Button("Resume") { onResume(job) }
-                    case .stop: Button("Stop checking") { onStop(job) }
-                    case .open, .dismiss: EmptyView()
+                    case .resume: Button("Resume") { onResume(job); jobs = reload() }
+                    case .stop: Button("Stop checking") { onStop(job); jobs = reload() }
+                    case .download:
+                        if isDownloading(job) {
+                            ProgressView().controlSize(.small)
+                        } else {
+                            Button("Download & save") { onDownload(job) }
+                        }
+                    case .open: Button("Show in Library") { open = false; onOpen(job) }
+                    case .dismiss: EmptyView()
                     }
                 }
             }.controlSize(.small)
