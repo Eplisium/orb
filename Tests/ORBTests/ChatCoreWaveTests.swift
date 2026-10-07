@@ -698,7 +698,6 @@ struct ORBControlTests {
         for access in [true, false] {
             let on = ToolPolicy.agentSession(fullComputerAccess: access, mcpServers: [], opMode: true)
             #expect(on.allowsExecution(name: "orb_overview"))
-            #expect(!on.requiresApproval(name: "orb_overview") || true)
         }
         let webOnly = ToolPolicy.agentSession(fullComputerAccess: false, mcpServers: [], opMode: true)
         #expect(!webOnly.allowsExecution(name: "run_command"), "OP Mode must not widen Mac access")
