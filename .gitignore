@@ -4,9 +4,29 @@
 xcuserdata/
 DerivedData/
 .swiftpm/
-.openrouter-api-key
 ORB.app/
+*.app/
+ci-logs/
 .windop/
 .windop-backups/
-codesign/
+
+# Agent/tooling workspaces — never commit
 .hermes/
+.hermes-*
+
+# Secrets and signing material — defense in depth; never commit
+.openrouter-api-key
+codesign/
+*.p12
+*.pem
+*.key
+*.cer
+*.mobileprovision
+.env
+.env.*
+
+# Local databases (the app's real DB lives in Application Support)
+*.sqlite
+*.sqlite3
+*.sqlite3-*
+*.sqlite-*
