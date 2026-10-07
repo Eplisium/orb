@@ -82,6 +82,13 @@ extension ModelInfo {
         guard let raw = pricing?.prompt, let value = Double(raw), value >= 0 else { return nil }
         return value * 1_000_000
     }
+
+    /// Output price in USD per 1M tokens including a genuine zero.
+    var outputPricePer1MIncludingFree: Double? {
+        if isFree { return 0 }
+        guard let raw = pricing?.completion, let value = Double(raw), value >= 0 else { return nil }
+        return value * 1_000_000
+    }
 }
 
 // MARK: Filter state
@@ -90,44 +97,71 @@ struct BrowserFilterState: Equatable, Codable, Sendable {
     var capabilities: Set<ModelCapability>
     /// Maximum input price, USD per 1M tokens. Free models always pass.
     var maxInputPrice: Double?
+    /// Maximum output price, USD per 1M tokens. Free models always pass.
+    var maxOutputPrice: Double?
     var minContext: Int?
     var providers: Set<String>
+    /// `supported_parameters` every result must list (AND).
+    var requiredParameters: Set<String>
+    var hideExpired: Bool
+    var hideAliases: Bool
 
     init(
         capabilities: Set<ModelCapability> = [],
         maxInputPrice: Double? = nil,
         minContext: Int? = nil,
-        providers: Set<String> = []
+        providers: Set<String> = [],
+        maxOutputPrice: Double? = nil,
+        requiredParameters: Set<String> = [],
+        hideExpired: Bool = false,
+        hideAliases: Bool = false
     ) {
         self.capabilities = capabilities
         self.maxInputPrice = maxInputPrice
+        self.maxOutputPrice = maxOutputPrice
         self.minContext = minContext
         self.providers = providers
+        self.requiredParameters = requiredParameters
+        self.hideExpired = hideExpired
+        self.hideAliases = hideAliases
     }
 
-    private enum CodingKeys: String, CodingKey { case capabilities, maxInputPrice, minContext, providers }
+    private enum CodingKeys: String, CodingKey {
+        case capabilities, maxInputPrice, maxOutputPrice, minContext, providers
+        case requiredParameters, hideExpired, hideAliases
+    }
 
     /// Tolerant: unknown capability names (from a newer/older build) are
-    /// dropped rather than failing the whole restore.
+    /// dropped and missing keys (prefs saved by older builds) default,
+    /// rather than failing the whole restore.
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         let names = try c.decodeIfPresent([String].self, forKey: .capabilities) ?? []
         capabilities = Set(names.compactMap(ModelCapability.init(rawValue:)))
         maxInputPrice = try c.decodeIfPresent(Double.self, forKey: .maxInputPrice)
+        maxOutputPrice = try c.decodeIfPresent(Double.self, forKey: .maxOutputPrice)
         minContext = try c.decodeIfPresent(Int.self, forKey: .minContext)
         providers = Set(try c.decodeIfPresent([String].self, forKey: .providers) ?? [])
+        requiredParameters = Set(try c.decodeIfPresent([String].self, forKey: .requiredParameters) ?? [])
+        hideExpired = try c.decodeIfPresent(Bool.self, forKey: .hideExpired) ?? false
+        hideAliases = try c.decodeIfPresent(Bool.self, forKey: .hideAliases) ?? false
     }
 
     func encode(to encoder: Encoder) throws {
         var c = encoder.container(keyedBy: CodingKeys.self)
         try c.encode(capabilities.map(\.rawValue).sorted(), forKey: .capabilities)
         try c.encodeIfPresent(maxInputPrice, forKey: .maxInputPrice)
+        try c.encodeIfPresent(maxOutputPrice, forKey: .maxOutputPrice)
         try c.encodeIfPresent(minContext, forKey: .minContext)
         try c.encode(providers.sorted(), forKey: .providers)
+        if !requiredParameters.isEmpty { try c.encode(requiredParameters.sorted(), forKey: .requiredParameters) }
+        if hideExpired { try c.encode(true, forKey: .hideExpired) }
+        if hideAliases { try c.encode(true, forKey: .hideAliases) }
     }
 
     var isActive: Bool {
-        !capabilities.isEmpty || maxInputPrice != nil || minContext != nil || !providers.isEmpty
+        !capabilities.isEmpty || maxInputPrice != nil || maxOutputPrice != nil || minContext != nil
+            || !providers.isEmpty || !requiredParameters.isEmpty || hideExpired || hideAliases
     }
 
     /// Capabilities AND together, providers OR together, facets AND together.
@@ -137,9 +171,18 @@ struct BrowserFilterState: Equatable, Codable, Sendable {
         if let maxInputPrice {
             guard let price = model.inputPricePer1MIncludingFree, price <= maxInputPrice else { return false }
         }
+        if let maxOutputPrice {
+            guard let price = model.outputPricePer1MIncludingFree, price <= maxOutputPrice else { return false }
+        }
         if let minContext {
             guard let context = model.contextLength, context >= minContext else { return false }
         }
+        if !requiredParameters.isEmpty {
+            let params = Set(model.supportedParameters ?? [])
+            guard requiredParameters.isSubset(of: params) else { return false }
+        }
+        if hideExpired, model.hasExpired { return false }
+        if hideAliases, model.isAlias { return false }
         return true
     }
 
@@ -148,8 +191,12 @@ struct BrowserFilterState: Equatable, Codable, Sendable {
     enum ChipKind: Equatable, Hashable {
         case capability(ModelCapability)
         case maxPrice
+        case maxOutputPrice
         case minContext
         case provider(String)
+        case parameter(String)
+        case hideExpired
+        case hideAliases
     }
 
     struct Chip: Identifiable, Equatable {
@@ -159,13 +206,18 @@ struct BrowserFilterState: Equatable, Codable, Sendable {
             switch kind {
             case .capability(let c): return "cap.\(c.rawValue)"
             case .maxPrice: return "price"
+            case .maxOutputPrice: return "outprice"
             case .minContext: return "context"
             case .provider(let p): return "provider.\(p)"
+            case .parameter(let p): return "param.\(p)"
+            case .hideExpired: return "expired"
+            case .hideAliases: return "aliases"
             }
         }
     }
 
-    /// Stable order: capabilities (declaration order), price, context, providers (A–Z).
+    /// Stable order: capabilities (declaration order), price, context,
+    /// parameters (A–Z), providers (A–Z), hide toggles.
     var chips: [Chip] {
         var result: [Chip] = []
         for capability in ModelCapability.allCases where capabilities.contains(capability) {
@@ -174,12 +226,20 @@ struct BrowserFilterState: Equatable, Codable, Sendable {
         if let maxInputPrice {
             result.append(Chip(kind: .maxPrice, title: "≤ \(BrowserFormat.price(maxInputPrice)) / 1M in"))
         }
+        if let maxOutputPrice {
+            result.append(Chip(kind: .maxOutputPrice, title: "≤ \(BrowserFormat.price(maxOutputPrice)) / 1M out"))
+        }
         if let minContext {
             result.append(Chip(kind: .minContext, title: "≥ \(BrowserFormat.context(minContext)) ctx"))
+        }
+        for parameter in requiredParameters.sorted() {
+            result.append(Chip(kind: .parameter(parameter), title: parameter))
         }
         for provider in providers.sorted() {
             result.append(Chip(kind: .provider(provider), title: provider))
         }
+        if hideExpired { result.append(Chip(kind: .hideExpired, title: "Hide expired")) }
+        if hideAliases { result.append(Chip(kind: .hideAliases, title: "Hide aliases")) }
         return result
     }
 
@@ -187,16 +247,28 @@ struct BrowserFilterState: Equatable, Codable, Sendable {
         switch chip.kind {
         case .capability(let c): capabilities.remove(c)
         case .maxPrice: maxInputPrice = nil
+        case .maxOutputPrice: maxOutputPrice = nil
         case .minContext: minContext = nil
         case .provider(let p): providers.remove(p)
+        case .parameter(let p): requiredParameters.remove(p)
+        case .hideExpired: hideExpired = false
+        case .hideAliases: hideAliases = false
         }
     }
 
     mutating func clear() { self = BrowserFilterState() }
 
+    /// Request parameters worth filtering on, in popover order.
+    static let filterableParameters: [String] = [
+        "structured_outputs", "response_format", "tools", "tool_choice", "seed",
+        "logprobs", "top_logprobs", "web_search_options", "reasoning", "include_reasoning",
+        "stop", "temperature", "top_k", "min_p", "repetition_penalty", "logit_bias", "verbosity", "prediction",
+    ]
+
     // MARK: Popover presets
 
     static let priceSteps: [Double] = [0.5, 1, 2, 5, 10, 25]
+    static let outputPriceSteps: [Double] = [1, 2, 5, 10, 25, 75]
     static let contextSteps: [Int] = [8_000, 32_000, 128_000, 200_000, 1_000_000]
 }
 
@@ -207,6 +279,8 @@ struct BrowserPrefs: Codable, Equatable {
     var sortField: String
     var ascending: Bool
     var pinFavorites: Bool
+    /// Compare selection, pick order kept. Optional so older prefs decode.
+    var compareIDs: [String]? = nil
 }
 
 enum BrowserPrefsStore {
@@ -253,60 +327,144 @@ struct ComparisonColumn: Identifiable, Equatable {
     let name: String
     let inputPrice: String
     let outputPrice: String
+    let cachePrice: String
+    /// Override tiers / extra prices ("Above 272K prompt tokens: …"), or "—".
+    let pricingTiers: String
     let context: String
+    let maxOutput: String
     let inputModalities: String
     let outputModalities: String
     let latency: String
     let throughput: String
+    let intelligence: String
+    let knowledgeCutoff: String
+    let parameters: String
     let inputPriceValue: Double?
     let contextValue: Int?
+    let maxOutputValue: Int?
+    let intelligenceValue: Double?
 
     static let missing = "—"
 
-    static func make(model: ModelInfo, endpoints: [ModelEndpoint]?) -> ComparisonColumn {
-        func priceText(_ perMillion: Double?, free: Bool) -> String {
+    /// `endpoints == nil` means "not loaded yet / failed" — shown as "—".
+    static func make(model: ModelInfo, endpoints: [ModelEndpoint]?, unit: PriceUnit = .perMillion) -> ComparisonColumn {
+        func priceText(_ raw: String?, free: Bool) -> String {
             if free { return "Free" }
-            guard let perMillion else { return "Variable" }
-            return "\(BrowserFormat.price(perMillion)) / 1M"
+            return PriceDisplay.text(raw, unit: unit) ?? "Variable"
         }
-        let inValue = model.inputPricePer1MIncludingFree
         let free = model.isFree
-        let outValue = model.pricing?.completion.flatMap(Double.init).flatMap { $0 >= 0 ? $0 * 1_000_000 : nil }
+        let inValue = model.inputPricePer1MIncludingFree
         let latencies = (endpoints ?? []).compactMap(\.latencyLast30m)
         let throughputs = (endpoints ?? []).compactMap(\.throughputLast30m)
+        let maxOut = model.topProvider?.maxCompletionTokens
+        let intelligence = model.benchmarks?.artificialAnalysis?.intelligenceIndex
+        let cache = PriceDisplay.perToken(model.pricing?.inputCacheRead).flatMap { $0 > 0 ? $0 : nil }
         return ComparisonColumn(
             id: model.id,
             name: model.name,
-            inputPrice: priceText(inValue, free: free),
-            outputPrice: priceText(outValue, free: free),
+            inputPrice: priceText(model.pricing?.prompt, free: free),
+            outputPrice: priceText(model.pricing?.completion, free: free),
+            cachePrice: cache.map { PriceDisplay.text(perToken: $0, unit: unit) } ?? missing,
+            pricingTiers: model.pricing.map { p in
+                (p.tierLines(unit: unit) + p.extraLines(unit: unit).filter { $0.title != "Cache read" })
+                    .map { "\($0.title): \($0.value)" }.joined(separator: "\n")
+            }.flatMap(\.nonEmpty) ?? missing,
             context: model.contextLength.map(BrowserFormat.context) ?? "N/A",
+            maxOutput: maxOut.map(BrowserFormat.context) ?? missing,
             inputModalities: model.inputModalities.joined(separator: ", "),
             outputModalities: model.outputModalities.joined(separator: ", "),
             latency: latencies.min().map { "\($0) ms" } ?? missing,
             throughput: throughputs.max().map { "\($0) tok/s" } ?? missing,
+            intelligence: intelligence.map { String(format: "%.1f", $0) } ?? missing,
+            knowledgeCutoff: model.knowledgeCutoff.flatMap { $0.isEmpty ? nil : $0 } ?? missing,
+            parameters: (model.supportedParameters ?? []).sorted().joined(separator: ", ").nonEmpty ?? missing,
             inputPriceValue: free ? 0 : inValue,
-            contextValue: model.contextLength
+            contextValue: model.contextLength,
+            maxOutputValue: maxOut,
+            intelligenceValue: intelligence
         )
     }
 
     struct Highlights: Equatable {
         var cheapestInputID: String?
         var largestContextID: String?
+        var largestOutputID: String?
+        var smartestID: String?
     }
 
     /// A highlight needs at least two known values that differ; otherwise
     /// there is nothing to beat.
     static func highlights(_ columns: [ComparisonColumn]) -> Highlights {
-        let prices = columns.compactMap { c in c.inputPriceValue.map { (c.id, $0) } }
-        let contexts = columns.compactMap { c in c.contextValue.map { (c.id, $0) } }
+        func best<T: Comparable & Hashable>(_ values: [(String, T)], lowest: Bool) -> String? {
+            guard values.count >= 2, Set(values.map(\.1)).count > 1 else { return nil }
+            return (lowest ? values.min { $0.1 < $1.1 } : values.max { $0.1 < $1.1 })?.0
+        }
         var result = Highlights()
-        if prices.count >= 2, Set(prices.map(\.1)).count > 1 {
-            result.cheapestInputID = prices.min { $0.1 < $1.1 }?.0
-        }
-        if contexts.count >= 2, Set(contexts.map(\.1)).count > 1 {
-            result.largestContextID = contexts.max { $0.1 < $1.1 }?.0
-        }
+        result.cheapestInputID = best(columns.compactMap { c in c.inputPriceValue.map { (c.id, $0) } }, lowest: true)
+        result.largestContextID = best(columns.compactMap { c in c.contextValue.map { (c.id, $0) } }, lowest: false)
+        result.largestOutputID = best(columns.compactMap { c in c.maxOutputValue.map { (c.id, $0) } }, lowest: false)
+        result.smartestID = best(columns.compactMap { c in c.intelligenceValue.map { (c.id, $0) } }, lowest: false)
         return result
+    }
+
+    /// Row order shared by the panel and the exports.
+    static let rows: [(title: String, value: (ComparisonColumn) -> String)] = [
+        ("Model ID", { $0.id }),
+        ("Input price", { $0.inputPrice }),
+        ("Output price", { $0.outputPrice }),
+        ("Cache read", { $0.cachePrice }),
+        ("Other pricing", { $0.pricingTiers }),
+        ("Context", { $0.context }),
+        ("Max output", { $0.maxOutput }),
+        ("Intelligence", { $0.intelligence }),
+        ("Knowledge cutoff", { $0.knowledgeCutoff }),
+        ("Inputs", { $0.inputModalities }),
+        ("Outputs", { $0.outputModalities }),
+        ("Latency", { $0.latency }),
+        ("Throughput", { $0.throughput }),
+        ("Parameters", { $0.parameters }),
+    ]
+
+    static func markdown(_ columns: [ComparisonColumn]) -> String {
+        func cell(_ s: String) -> String {
+            s.replacingOccurrences(of: "|", with: "\\|").replacingOccurrences(of: "\n", with: " ")
+        }
+        var lines = ["| | " + columns.map { cell($0.name) }.joined(separator: " | ") + " |"]
+        lines.append("|---|" + columns.map { _ in "---|" }.joined())
+        for row in rows {
+            lines.append("| \(row.title) | " + columns.map { cell(row.value($0)) }.joined(separator: " | ") + " |")
+        }
+        return lines.joined(separator: "\n") + "\n"
+    }
+
+    static func csv(_ columns: [ComparisonColumn]) -> String {
+        var lines = [([""] + columns.map(\.name)).map(ModelExport.csvField).joined(separator: ",")]
+        for row in rows {
+            lines.append(([row.title] + columns.map(row.value)).map(ModelExport.csvField).joined(separator: ","))
+        }
+        return lines.joined(separator: "\n") + "\n"
+    }
+}
+
+private extension String {
+    var nonEmpty: String? { isEmpty ? nil : self }
+}
+
+/// Loads every compared model's endpoints concurrently. Each result is
+/// independent: one failure never hides another model's data, and the
+/// shared `APIService.endpointsError` is never touched.
+enum CompareEndpointLoader {
+    typealias Loader = @Sendable (String) async -> Result<[ModelEndpoint], EndpointLoadError>
+
+    static func load(_ models: [(id: String, endpointsID: String)], loader: @escaping Loader) async -> [String: Result<[ModelEndpoint], EndpointLoadError>] {
+        await withTaskGroup(of: (String, Result<[ModelEndpoint], EndpointLoadError>).self) { group in
+            for model in models {
+                group.addTask { (model.id, await loader(model.endpointsID)) }
+            }
+            var out: [String: Result<[ModelEndpoint], EndpointLoadError>] = [:]
+            for await (id, result) in group { out[id] = result }
+            return out
+        }
     }
 }
 
@@ -346,7 +504,8 @@ enum BrowserListState: Equatable {
 
 struct NoResultsSuggestion: Identifiable, Equatable {
     enum Kind: Equatable {
-        case clearSearch, removeMaxPrice, removeMinContext, clearProviders
+        case clearSearch, removeMaxPrice, removeMaxOutputPrice, removeMinContext, clearProviders
+        case clearParameters, showExpired, showAliases
         case removeCapability(ModelCapability)
         case clearAll
     }
@@ -356,7 +515,11 @@ struct NoResultsSuggestion: Identifiable, Equatable {
         switch kind {
         case .clearSearch: return "search"
         case .removeMaxPrice: return "price"
+        case .removeMaxOutputPrice: return "outprice"
         case .removeMinContext: return "context"
+        case .clearParameters: return "params"
+        case .showExpired: return "expired"
+        case .showAliases: return "aliases"
         case .clearProviders: return "providers"
         case .removeCapability(let c): return "cap.\(c.rawValue)"
         case .clearAll: return "all"
@@ -371,8 +534,14 @@ enum NoResultsSuggestions {
         if filters.maxInputPrice != nil {
             list.append(.init(kind: .removeMaxPrice, title: "Remove the price limit"))
         }
+        if filters.maxOutputPrice != nil {
+            list.append(.init(kind: .removeMaxOutputPrice, title: "Remove the output price limit"))
+        }
         if filters.minContext != nil {
             list.append(.init(kind: .removeMinContext, title: "Remove the context minimum"))
+        }
+        if !filters.requiredParameters.isEmpty {
+            list.append(.init(kind: .clearParameters, title: "Stop requiring parameters"))
         }
         if !filters.providers.isEmpty {
             list.append(.init(kind: .clearProviders, title: "Allow any provider"))
@@ -380,6 +549,8 @@ enum NoResultsSuggestions {
         for capability in ModelCapability.allCases where filters.capabilities.contains(capability) {
             list.append(.init(kind: .removeCapability(capability), title: "Stop requiring \(capability.title)"))
         }
+        if filters.hideExpired { list.append(.init(kind: .showExpired, title: "Show expired models")) }
+        if filters.hideAliases { list.append(.init(kind: .showAliases, title: "Show aliases")) }
         if !search.isEmpty {
             list.append(.init(kind: .clearSearch, title: "Clear the search"))
         }
@@ -399,7 +570,7 @@ struct ModelRowFacts: Equatable {
     let price: String
     let capabilities: [Badge]
 
-    static func make(_ model: ModelInfo) -> ModelRowFacts {
+    static func make(_ model: ModelInfo, unit: PriceUnit = .perMillion) -> ModelRowFacts {
         let provider = model.provider.trimmingCharacters(in: CharacterSet(charactersIn: "~"))
         let letter = provider.first.map { String($0).uppercased() } ?? "?"
         let line = model.description?
@@ -410,9 +581,11 @@ struct ModelRowFacts: Equatable {
         let price: String
         if model.isFree {
             price = "Free"
-        } else if let input = model.promptCostPer1M {
-            let output = model.completionCostPer1M.map(BrowserFormat.price) ?? ComparisonColumn.missing
-            price = "\(BrowserFormat.price(input)) in · \(output) out"
+        } else if let input = PriceDisplay.perToken(model.pricing?.prompt), input > 0 {
+            let output = PriceDisplay.perToken(model.pricing?.completion)
+                .map { PriceDisplay.amount(perToken: $0, unit: unit) } ?? ComparisonColumn.missing
+            let suffix = unit == .perMillion ? "" : " /1K"
+            price = "\(PriceDisplay.amount(perToken: input, unit: unit)) in · \(output) out\(suffix)"
         } else {
             price = "Variable price"
         }

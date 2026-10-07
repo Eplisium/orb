@@ -164,7 +164,7 @@ struct BrowserViewModelFilterTests {
         return vm
     }
 
-    @Test("Filters stack with search, legacy modality filter and provider filter")
+    @Test("Filters stack with search and provider filter")
     func stacking() {
         let vm = makeVM(models: [
             browserModel(id: "openai/a", name: "Alpha", params: ["tools"]),
@@ -213,17 +213,14 @@ struct BrowserViewModelFilterTests {
         let vm = makeVM(models: [browserModel(id: "a/x")])
         vm.filters.capabilities = [.tools]
         vm.searchText = "zzz"
-        vm.modalityFilter = .tools
-        vm.providerFilter = "a"
+        vm.filters.providers = ["a"]
         vm.clearAllFilters()
         #expect(!vm.filters.isActive)
         #expect(vm.searchText.isEmpty)
-        #expect(vm.modalityFilter == .all)
-        #expect(vm.providerFilter == "All Providers")
         #expect(!vm.hasActiveRefinements)
     }
 
-    @Test("Has-active-refinements covers search, facets and legacy filters")
+    @Test("Has-active-refinements covers search and facets")
     func refinements() {
         let vm = makeVM()
         #expect(!vm.hasActiveRefinements)

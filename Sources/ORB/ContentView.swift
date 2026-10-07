@@ -1,4 +1,5 @@
 import SwiftUI
+import Combine
 
 // MARK: - ViewModel
 
@@ -7,8 +8,9 @@ final class BrowserViewModel: ObservableObject {
     let api: APIService
     let db: DatabaseManager
 
-    /// `defaults` enables persistence of filters and sort. nil (the default,
-    /// and what tests use) keeps everything in memory.
+    /// `defaults` enables persistence of filters, sort and the compare
+    /// selection. nil (the default, and what tests use) keeps everything in
+    /// memory.
     init(api: APIService? = nil, db: DatabaseManager = DatabaseManager.shared, defaults: UserDefaults? = nil) {
         self.api = api ?? APIService()
         self.db = db
@@ -18,30 +20,49 @@ final class BrowserViewModel: ObservableObject {
             sortField = SortField(rawValue: prefs.sortField) ?? .created
             sortOrder = prefs.ascending ? .ascending : .descending
             pinFavorites = prefs.pinFavorites
+            compareIDs = Array((prefs.compareIDs ?? []).prefix(TestBatchSelection.maximumModels))
+        }
+        restoringPrefs = false
+        catalogChanged(self.api.models)
+        // `$models` emits synchronously on willSet with the new value, so the
+        // index/version are current before anyone reads `filteredModels`.
+        catalogSubscription = self.api.$models.dropFirst().sink { [weak self] models in
+            MainActor.assumeIsolated { self?.catalogChanged(models) }
         }
     }
 
     private let defaults: UserDefaults?
+    private var restoringPrefs = true
+    private var catalogSubscription: AnyCancellable?
 
     private func persistPrefs() {
-        guard let defaults else { return }
+        guard let defaults, !restoringPrefs else { return }
         BrowserPrefsStore.save(
-            BrowserPrefs(filters: filters, sortField: sortField.rawValue, ascending: sortOrder == .ascending, pinFavorites: pinFavorites),
+            BrowserPrefs(
+                filters: filters, sortField: sortField.rawValue, ascending: sortOrder == .ascending,
+                pinFavorites: pinFavorites, compareIDs: compareIDs
+            ),
             to: defaults
         )
     }
 
-    @Published var searchText = ""
+    /// The query actually applied. The search field edits `searchDraft`,
+    /// which is debounced into this; setting it directly applies at once.
+    @Published var searchText = "" {
+        didSet { if searchDraft != searchText { searchDraft = searchText } }
+    }
+    /// Live text in the search field.
+    @Published var searchDraft = "" {
+        didSet { scheduleSearchCommit() }
+    }
     @Published var sortField: SortField = .created { didSet { persistPrefs() } }
     @Published var sortOrder: SortOrder = .descending { didSet { persistPrefs() } }
     @Published var filters = BrowserFilterState() { didSet { persistPrefs() } }
     @Published var pinFavorites = true { didSet { persistPrefs() } }
 
     // Compare selection (Phase 4). Pick order is kept.
-    @Published private(set) var compareIDs: [String] = []
+    @Published private(set) var compareIDs: [String] = [] { didSet { persistPrefs() } }
     @Published private(set) var compareLimitNotice: String?
-    @Published var modalityFilter: ModalityFilter = .all
-    @Published var providerFilter: String = "All Providers"
     @Published var selectedModel: ModelInfo?
     @Published var showFavoritesOnly = false
     @Published var showNewThisWeek = false
@@ -61,109 +82,81 @@ final class BrowserViewModel: ObservableObject {
     private var selectedModelId: String?
     private var endpointTask: Task<Void, Never>?
 
-    var providerOptions: [String] {
-        var set = Set<String>()
-        for model in api.models {
-            set.insert(model.provider)
+    // MARK: Search debounce
+
+    static let searchDebounce: Duration = .milliseconds(150)
+    private var searchTask: Task<Void, Never>?
+
+    private func scheduleSearchCommit() {
+        searchTask?.cancel()
+        guard searchDraft != searchText else { return }
+        // Clearing applies immediately; typing waits for a pause.
+        if searchDraft.isEmpty { searchText = ""; return }
+        searchTask = Task { [weak self] in
+            try? await Task.sleep(for: Self.searchDebounce)
+            guard !Task.isCancelled, let self else { return }
+            self.searchText = self.searchDraft
         }
-        return ["All Providers"] + set.sorted()
     }
 
+    // MARK: Catalog-derived caches
+
+    private var catalogVersion = 0
+    private var searchIndex = ModelSearchIndex([])
+    private(set) var providerOptions: [String] = ["All Providers"]
+    private var cachedResult: (version: Int, query: BrowserQuery, models: [ModelInfo])?
+
+    private func catalogChanged(_ models: [ModelInfo]) {
+        catalogVersion &+= 1
+        searchIndex = ModelSearchIndex(models)
+        providerOptions = ["All Providers"] + Set(models.map(\.provider)).sorted()
+        cachedResult = nil
+    }
+
+    private var currentQuery: BrowserQuery {
+        BrowserQuery(
+            showFavoritesOnly: showFavoritesOnly, showNewThisWeek: showNewThisWeek,
+            favoriteIds: favoriteIds, filters: filters, searchText: searchText,
+            sortField: sortField, sortOrder: sortOrder, pinFavorites: pinFavorites
+        )
+    }
+
+    /// Memoised: recomputed only when the catalog or a query input changes,
+    /// so the several reads per render cost one comparison each.
     var filteredModels: [ModelInfo] {
-        var result = api.models
-
-        if showFavoritesOnly {
-            result = result.filter { favoriteIds.contains($0.id) }
+        let query = currentQuery
+        if let cached = cachedResult, cached.version == catalogVersion, cached.query == query {
+            return cached.models
         }
-
-        if showNewThisWeek {
-            result = result.filter { isNewThisWeek($0) }
-        }
-
-        if providerFilter != "All Providers" {
-            result = result.filter { $0.provider == providerFilter }
-        }
-
-        switch modalityFilter {
-        case .all: break
-        case .textOnly: result = result.filter { $0.inputModalities == ["text"] }
-        case .multimodal: result = result.filter { $0.supportsImages }
-        case .imageOut: result = result.filter { $0.supportsImageOutput }
-        case .videoIn: result = result.filter { $0.supportsVideoInput }
-        case .audio: result = result.filter { $0.supportsAudioInput || $0.supportsAudioOutput }
-        case .files: result = result.filter { $0.supportsFileInput }
-        case .tools: result = result.filter { $0.supportsTools }
-        case .reasoning: result = result.filter { $0.supportsReasoning }
-        case .embeddings: result = result.filter { $0.isEmbeddingModel }
-        case .freeOnly: result = result.filter { $0.isFree }
-        }
-
-        if filters.isActive {
-            result = result.filter(filters.matches)
-        }
-
-        if !searchText.isEmpty {
-            let q = searchText.lowercased()
-            result = result.filter {
-                $0.id.lowercased().contains(q) ||
-                $0.name.lowercased().contains(q) ||
-                $0.provider.lowercased().contains(q) ||
-                ($0.description?.lowercased().contains(q) ?? false)
-            }
-        }
-
-        result.sort { a, b in
-            let cmp: ComparisonResult
-            switch sortField {
-            case .name:
-                cmp = a.name.localizedCaseInsensitiveCompare(b.name)
-            case .contextLength:
-                let la = a.contextLength ?? 0
-                let lb = b.contextLength ?? 0
-                cmp = la == lb ? .orderedSame : (la < lb ? .orderedAscending : .orderedDescending)
-            case .promptCost:
-                let ca = a.promptCostPer1M ?? -1
-                let cb = b.promptCostPer1M ?? -1
-                cmp = ca == cb ? .orderedSame : (ca < cb ? .orderedAscending : .orderedDescending)
-            case .completionCost:
-                let ca = a.completionCostPer1M ?? -1
-                let cb = b.completionCostPer1M ?? -1
-                cmp = ca == cb ? .orderedSame : (ca < cb ? .orderedAscending : .orderedDescending)
-            case .created:
-                let da = a.created ?? 0
-                let db2 = b.created ?? 0
-                cmp = da == db2 ? .orderedSame : (da < db2 ? .orderedAscending : .orderedDescending)
-            case .provider:
-                cmp = a.provider.localizedCaseInsensitiveCompare(b.provider)
-            case .designElo:
-                let ea = a.bestDesignElo ?? -1
-                let eb = b.bestDesignElo ?? -1
-                cmp = ea == eb ? .orderedSame : (ea < eb ? .orderedAscending : .orderedDescending)
-            }
-            return sortOrder == .ascending ? (cmp == .orderedAscending) : (cmp == .orderedDescending)
-        }
-
-        if pinFavorites, !favoriteIds.isEmpty {
-            // Stable partition: favourites first, chosen order kept inside each half.
-            result = result.filter { favoriteIds.contains($0.id) } + result.filter { !favoriteIds.contains($0.id) }
-        }
-
+        let result = query.run(api.models, index: searchIndex, isNew: isNewThisWeek)
+        cachedResult = (catalogVersion, query, result)
         return result
     }
 
     var hasActiveRefinements: Bool {
-        !searchText.isEmpty || filters.isActive || modalityFilter != .all || providerFilter != "All Providers"
+        !searchText.isEmpty || filters.isActive
     }
 
     func clearAllFilters() {
         searchText = ""
         filters.clear()
-        modalityFilter = .all
-        providerFilter = "All Providers"
     }
 
     func toggleSortDirection() {
         sortOrder = (sortOrder == .ascending) ? .descending : .ascending
+    }
+
+    /// Picks a sort field with its natural direction (e.g. Intelligence high
+    /// first, Expiring Soon earliest first).
+    func setSort(_ field: SortField) {
+        sortField = field
+        sortOrder = field.prefersDescending ? .descending : .ascending
+    }
+
+    // MARK: Export
+
+    func exportFilteredModels(as format: ModelExportFormat) -> String {
+        ModelExport.render(filteredModels, format: format, unit: PriceUnit.load())
     }
 
     // MARK: Compare
@@ -189,6 +182,20 @@ final class BrowserViewModel: ObservableObject {
         return true
     }
 
+    func removeFromCompare(_ id: String) {
+        compareIDs.removeAll { $0 == id }
+        compareLimitNotice = nil
+    }
+
+    /// Replaces the selection (deep links), de-duplicated and capped.
+    func setCompare(_ ids: [String]) {
+        var seen = Set<String>()
+        let unique = ids.filter { seen.insert($0).inserted }
+        compareIDs = Array(unique.prefix(TestBatchSelection.maximumModels))
+        compareLimitNotice = unique.count > compareIDs.count
+            ? "You can compare up to \(TestBatchSelection.maximumModels) models." : nil
+    }
+
     func clearCompare() {
         compareIDs = []
         compareLimitNotice = nil
@@ -210,9 +217,34 @@ final class BrowserViewModel: ObservableObject {
         favoriteIds = Set(db.getAllFavorites())
     }
 
+    /// Last favorite/notes write failure, for tests and the toast.
+    @Published private(set) var lastStorageError: String?
+
     func toggleFavorite(_ model: ModelInfo) {
-        db.toggleFavorite(model.id)
+        toggleFavorite(id: model.id)
+    }
+
+    func toggleFavorite(id: String) {
+        let makeFavorite = !favoriteIds.contains(id)
+        do {
+            try db.setFavorite(id, makeFavorite)
+            lastStorageError = nil
+        } catch {
+            lastStorageError = error.localizedDescription
+            AppToasts.saveFailed("favorite", reason: error.localizedDescription)
+        }
         loadFavorites()
+    }
+
+    /// Persists notes for any model, favorite or not.
+    func saveNotes(_ notes: String, for modelId: String) {
+        do {
+            try db.saveNotes(modelId, notes: notes)
+            lastStorageError = nil
+        } catch {
+            lastStorageError = error.localizedDescription
+            AppToasts.saveFailed("notes", reason: error.localizedDescription)
+        }
     }
 
     func copyModelId(_ model: ModelInfo) {
@@ -266,15 +298,37 @@ final class BrowserViewModel: ObservableObject {
         isLoadingEndpoints = true
         endpointTask = Task { [weak self] in
             guard let api = self?.api else { return }
-            let eps = await api.fetchEndpoints(for: model.id)
+            let eps = await api.fetchEndpoints(for: model)
             guard let self, !Task.isCancelled, self.selectedModelId == model.id else { return }
             self.endpoints = eps
             self.isLoadingEndpoints = false
         }
     }
 
+    /// Id from a deep link that arrived before the catalog loaded.
+    private(set) var pendingSelectionID: String?
+
+    /// Selects by id. Before the catalog loads the id is remembered and
+    /// applied after the next refresh; returns false only for an id that a
+    /// loaded catalog doesn't contain.
+    @discardableResult
+    func select(id: String) -> Bool {
+        if let model = api.models.first(where: { $0.id == id }) {
+            pendingSelectionID = nil
+            selectModel(model)
+            return true
+        }
+        guard api.models.isEmpty else { return false }
+        pendingSelectionID = id
+        return true
+    }
+
     func refresh() async {
         await api.fetchModels()
+        if let pending = pendingSelectionID {
+            pendingSelectionID = nil
+            select(id: pending)
+        }
         loadFavorites()
         newThisWeekCount = api.models.filter { isNewThisWeek($0) }.count
         // Refetch the selected model's endpoints explicitly; routing through
@@ -455,6 +509,16 @@ struct ContentView: View {
                 focusManager.searchFocused = false
             }
         }
+        .onChange(of: vm.selectedModel?.id, initial: true) { _, id in
+            shell.focusedModelID = selectedSection.isBrowser ? id : nil
+            shell.focusedModelIsFavorite = id.map(vm.favoriteIds.contains) ?? false
+        }
+        .onChange(of: vm.favoriteIds) { _, ids in
+            shell.focusedModelIsFavorite = shell.focusedModelID.map(ids.contains) ?? false
+        }
+        .onChange(of: selectedSection) { _, section in
+            shell.focusedModelID = section.isBrowser ? vm.selectedModel?.id : nil
+        }
         .onChange(of: shell.pending) { _, request in
             guard let request else { return }
             shell.pending = nil
@@ -590,8 +654,8 @@ struct ContentView: View {
             select(.allModels)
             vm.searchText = ""
             vm.clearAllFilters()
-            if let model = vm.api.models.first(where: { $0.id == id }) {
-                vm.selectModel(model)
+            if !vm.select(id: id) {
+                AppToasts.center.show("No model with id \(id)", kind: .warning, duration: 3)
             }
         case .compareModels(let ids):
             let eligible = CompareHandoff.batchIDs(from: ids, catalog: vm.api.models)
@@ -609,6 +673,23 @@ struct ContentView: View {
             if let conversation = service.conversations.first(where: { $0.id == id }) {
                 service.selectConversation(conversation)
             }
+        case .toggleFavorite(let id):
+            vm.toggleFavorite(id: id)
+        case .toggleCompare(let id):
+            vm.toggleCompare(id)
+        case .copyModelID(let id):
+            AppToasts.copy(id, what: "Model ID")
+        case .openOnOpenRouter(let id):
+            if let url = ModelInfo.openRouterURL(for: id) { NSWorkspace.shared.open(url) }
+        case .openCompare:
+            if !selectedSection.isBrowser { select(.allModels) }
+            activeSheet = .compare
+        case .openCompareWith(let ids):
+            vm.setCompare(ids)
+            if !selectedSection.isBrowser { select(.allModels) }
+            activeSheet = .compare
+        case .exportModels(let format):
+            ModelExportPanel.present(text: vm.exportFilteredModels(as: format), format: format)
         }
     }
 
@@ -741,10 +822,10 @@ struct ContentView: View {
         HStack {
             Image(systemName: "magnifyingglass")
                 .foregroundStyle(.secondary)
-            TextField("Search models...", text: $vm.searchText)
+            TextField("Search models...", text: $vm.searchDraft)
                 .textFieldStyle(.plain)
                 .focused($searchFocused)
-            if !vm.searchText.isEmpty {
+            if !vm.searchDraft.isEmpty {
                 Button { vm.searchText = "" } label: {
                     Image(systemName: "xmark.circle.fill")
                         .foregroundStyle(.secondary)
@@ -798,6 +879,19 @@ struct ContentView: View {
             Text("\(vm.filteredModels.count) models")
                 .font(ORBFont.footnote.weight(.medium))
                 .foregroundStyle(.secondary)
+            Menu {
+                ForEach(ModelExportFormat.allCases) { format in
+                    Button("Export as \(format.title)…") { perform(.exportModels(format)) }
+                }
+            } label: {
+                Image(systemName: "square.and.arrow.up").font(.caption)
+            }
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
+            .fixedSize()
+            .disabled(vm.filteredModels.isEmpty)
+            .help("Export the models shown as CSV or JSON")
+            .accessibilityLabel("Export model list")
             Spacer()
             if vm.api.isLoading {
                 ProgressView()
@@ -855,15 +949,36 @@ struct ContentView: View {
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         case .list:
+            let favorites = vm.favoriteIds
+            let comparing = Set(vm.compareIDs)
+            let anyComparing = !comparing.isEmpty
+            let copied = vm.copiedModelId
             List(vm.filteredModels, selection: $vm.selectedModel) { model in
-                ModelRowView(model: model, viewModel: vm)
-                    .tag(model)
+                ModelRowView(
+                    model: model,
+                    isFavorite: favorites.contains(model.id),
+                    isComparing: comparing.contains(model.id),
+                    anyComparing: anyComparing,
+                    isCopied: copied == model.id,
+                    actions: rowActions
+                )
+                .tag(model)
             }
             .listStyle(.inset)
             .onChange(of: vm.selectedModel) { _, newValue in
                 vm.selectModel(newValue)
             }
         }
+    }
+
+    private var rowActions: ModelRowActions {
+        ModelRowActions(
+            toggleFavorite: { [vm] in vm.toggleFavorite($0) },
+            toggleCompare: { [vm] in vm.toggleCompare($0.id) },
+            copyID: { [vm] in vm.copyModelId($0) },
+            chat: { [shell] in shell.send(.chatWithModel($0.id)) },
+            agent: { [shell] in shell.send(.agentWithModel($0.id)) }
+        )
     }
 
     // MARK: Detail

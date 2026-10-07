@@ -53,9 +53,10 @@ struct SettingsView: View {
         }
         .frame(minWidth: 500, minHeight: 400)
         .task {
-            if KeychainManager.hasAPIKey {
-                await refreshAccount()
-            }
+            await refreshAccount()
+        }
+        .onChange(of: account.hasManagementKey) { _, has in
+            if has { Task { await refreshAccount() } }
         }
         .confirmationDialog(
             "Remove the OpenRouter API key?",
@@ -99,6 +100,8 @@ struct SettingsView: View {
         case .general:
             VStack(alignment: .leading, spacing: 24) {
                 AppearanceSettingsSection()
+                Divider()
+                PriceUnitSettingsSection()
                 Divider()
                 NotificationSettingsSection()
                 Divider()
@@ -423,8 +426,8 @@ struct SettingsView: View {
                 }
             }
 
-            if !KeychainManager.hasAPIKey {
-                noKeyBanner
+            if !panelAvailable(.credits) {
+                noKeyBanner(.credits)
             } else if let error = account.creditsError {
                 ErrorBanner(message: error)
             } else if let credits = account.credits {
@@ -489,8 +492,8 @@ struct SettingsView: View {
                 }
             }
 
-            if !KeychainManager.hasAPIKey {
-                noKeyBanner
+            if !panelAvailable(.activity) {
+                noKeyBanner(.activity)
             } else if let error = account.activityError {
                 ErrorBanner(message: error)
             } else if account.activity.isEmpty && !account.isLoadingActivity {
@@ -555,11 +558,15 @@ struct SettingsView: View {
 
     // MARK: - Helpers
 
-    private var noKeyBanner: some View {
+    private func panelAvailable(_ panel: AccountPanel) -> Bool {
+        panel.isAvailable(hasInferenceKey: KeychainManager.hasAPIKey, hasManagementKey: account.hasManagementKey)
+    }
+
+    private func noKeyBanner(_ panel: AccountPanel) -> some View {
         HStack(spacing: 8) {
             Image(systemName: "key.fill")
                 .foregroundStyle(.orange)
-            Text("Configure your API key in the API Key tab to see account data.")
+            Text(panel.missingKeyMessage)
                 .font(.callout)
                 .foregroundStyle(.secondary)
         }
@@ -576,9 +583,12 @@ struct SettingsView: View {
     }
 
     private func refreshAccount() async {
-        await account.fetchCredits()
-        await account.fetchActivity()
-        await directory.fetchKeyInfo()
+        let panels = AccountPanel.panelsToRefresh(
+            hasInferenceKey: KeychainManager.hasAPIKey, hasManagementKey: account.hasManagementKey
+        )
+        if panels.contains(.credits) { await account.fetchCredits() }
+        if panels.contains(.activity) { await account.fetchActivity() }
+        if panels.contains(.keyInfo) { await directory.fetchKeyInfo() }
     }
 
     // MARK: - Key Info (`GET /key`)
@@ -598,8 +608,8 @@ struct SettingsView: View {
                 .help("Refresh key info")
             }
 
-            if !KeychainManager.hasAPIKey {
-                noKeyBanner
+            if !panelAvailable(.keyInfo) {
+                noKeyBanner(.keyInfo)
             } else if let error = directory.lastError, directory.keyInfo == nil {
                 ErrorBanner(message: error)
             } else if let info = directory.keyInfo {

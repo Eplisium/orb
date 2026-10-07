@@ -289,6 +289,8 @@ final class OnboardingController: ObservableObject {
         let trimmed = pastedInferenceKey.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
         guard !reviewMode else { flow.pasteFailed(Self.reviewModeMessage); return }
+        // Validate the format before anything touches the Keychain.
+        if let problem = KeyFieldValidation.check(trimmed).message { flow.pasteFailed(problem); return }
         if let error = credentials.saveSecret(trimmed, forReference: CredentialRole.inference.keychainAccount) {
             flow.pasteFailed(error)
         } else {
@@ -301,6 +303,7 @@ final class OnboardingController: ObservableObject {
         let trimmed = managementDraft.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
         guard !reviewMode else { managementError = Self.reviewModeMessage; return }
+        if let problem = KeyFieldValidation.check(trimmed).message { managementError = problem; return }
         if let error = credentials.saveSecret(trimmed, forReference: CredentialRole.management.keychainAccount) {
             managementError = error
         } else {
@@ -507,9 +510,11 @@ struct OnboardingView: View {
                         .onSubmit { controller.savePastedInferenceKey() }
                         .accessibilityLabel("Inference API key")
                     Button("Save Key") { controller.savePastedInferenceKey() }
-                        .disabled(controller.pastedInferenceKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                        .disabled(KeyFieldValidation.check(controller.pastedInferenceKey) != .valid)
                 }
-                if let error = controller.flow.pasteError {
+                if let hint = KeyFieldValidation.check(controller.pastedInferenceKey).message {
+                    Text(hint).font(ORBFont.caption).foregroundStyle(.secondary)
+                } else if let error = controller.flow.pasteError {
                     Text(error).font(ORBFont.caption).foregroundStyle(ORBTheme.danger)
                 }
             }
@@ -559,9 +564,11 @@ struct OnboardingView: View {
                         .onSubmit { controller.saveManagementKey() }
                         .accessibilityLabel("Management API key")
                     Button("Save Key") { controller.saveManagementKey() }
-                        .disabled(controller.managementDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                        .disabled(KeyFieldValidation.check(controller.managementDraft) != .valid)
                 }
-                if let error = controller.managementError {
+                if let hint = KeyFieldValidation.check(controller.managementDraft).message {
+                    Text(hint).font(ORBFont.caption).foregroundStyle(.secondary)
+                } else if let error = controller.managementError {
                     Text(error).font(ORBFont.caption).foregroundStyle(ORBTheme.danger)
                 }
             }

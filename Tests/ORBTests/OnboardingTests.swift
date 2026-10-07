@@ -347,7 +347,7 @@ struct OnboardingControllerTests {
         }
         #expect(message.contains("Timed out"))
         #expect(!controller.flow.hasInferenceKey)
-        controller.pastedInferenceKey = "  sk-or-v1-paste  "
+        controller.pastedInferenceKey = "  sk-or-v1-paste0123456789abcdef0123456789  "
         controller.savePastedInferenceKey()
         #expect(controller.flow.hasInferenceKey)
     }
@@ -369,9 +369,9 @@ struct OnboardingControllerTests {
     func pasteInference() {
         let store = InMemoryCredentialStore()
         let controller = make(credentials: store)
-        controller.pastedInferenceKey = "  sk-or-v1-xyz \n"
+        controller.pastedInferenceKey = "  sk-or-v1-0123456789abcdef0123456789abcdef \n"
         controller.savePastedInferenceKey()
-        #expect(store.allSecrets == [CredentialRole.inference.keychainAccount: "sk-or-v1-xyz"])
+        #expect(store.allSecrets == [CredentialRole.inference.keychainAccount: "sk-or-v1-0123456789abcdef0123456789abcdef"])
         #expect(controller.pastedInferenceKey.isEmpty)
         #expect(controller.flow.hasInferenceKey)
     }
@@ -385,7 +385,7 @@ struct OnboardingControllerTests {
         #expect(empty.flow.pasteError == nil)
 
         let failing = make(credentials: FailingCredentialStore())
-        failing.pastedInferenceKey = "sk-or-v1-xyz"
+        failing.pastedInferenceKey = "sk-or-v1-0123456789abcdef0123456789abcdef"
         failing.savePastedInferenceKey()
         #expect(!failing.flow.hasInferenceKey)
         #expect(failing.flow.pasteError == "disk full")
@@ -395,9 +395,9 @@ struct OnboardingControllerTests {
     func managementKeyRole() {
         let store = InMemoryCredentialStore()
         let controller = make(credentials: store)
-        controller.managementDraft = " sk-or-mgmt-1 "
+        controller.managementDraft = " sk-or-v1-mgmt0123456789abcdef0123456789ab "
         controller.saveManagementKey()
-        #expect(store.allSecrets == [CredentialRole.management.keychainAccount: "sk-or-mgmt-1"])
+        #expect(store.allSecrets == [CredentialRole.management.keychainAccount: "sk-or-v1-mgmt0123456789abcdef0123456789ab"])
         #expect(controller.managementDraft.isEmpty)
         #expect(controller.flow.hasManagementKey)
         #expect(!controller.flow.hasInferenceKey)
@@ -498,5 +498,35 @@ struct CreditsChipTintTests {
         let s = chip(0, key: false)
         #expect(!s.isLow)
         #expect(s.title == "Account")
+    }
+}
+
+@MainActor
+@Suite("Wave 1 onboarding: key validation before save")
+struct OnboardingKeyValidationTests {
+    private func make(_ store: CredentialSecretStore) -> OnboardingController {
+        OnboardingController(
+            credentials: store, outcomeStore: InMemoryOnboardingStore(),
+            makeSignIn: { FakeSignIn(.hang) }, reviewMode: false, openURL: { _ in }
+        )
+    }
+
+    @Test("Malformed pasted keys are rejected without touching the store")
+    func rejectsMalformed() {
+        let store = CountingCredentialStore()
+        let controller = make(store)
+        let baseline = store.callCount
+        for bad in ["hello", "sk-or-short", "sk-ant-0123456789abcdef0123456789abcdef"] {
+            controller.pastedInferenceKey = bad
+            controller.savePastedInferenceKey()
+            #expect(controller.flow.pasteError != nil)
+            #expect(!controller.flow.hasInferenceKey)
+            #expect(controller.pastedInferenceKey == bad, "draft kept for correction")
+            controller.managementDraft = bad
+            controller.saveManagementKey()
+            #expect(!controller.flow.hasManagementKey)
+        }
+        #expect(store.callCount == baseline)
+        #expect(store.allSecrets.isEmpty)
     }
 }

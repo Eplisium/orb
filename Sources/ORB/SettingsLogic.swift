@@ -243,6 +243,38 @@ enum SaveStatus: Equatable {
     var afterDisplayTime: SaveStatus { self == .saved ? .idle : self }
 }
 
+// MARK: Account panel gating
+
+/// Which credential each Settings account panel needs. Credits and activity
+/// are management-key endpoints; `GET /key` describes the inference key.
+enum AccountPanel: CaseIterable {
+    case credits, activity, keyInfo
+
+    var requiredRole: CredentialRole {
+        switch self {
+        case .credits, .activity: return .management
+        case .keyInfo: return .inference
+        }
+    }
+
+    func isAvailable(hasInferenceKey: Bool, hasManagementKey: Bool) -> Bool {
+        requiredRole == .management ? hasManagementKey : hasInferenceKey
+    }
+
+    /// Shown in place of the panel when its key is missing.
+    var missingKeyMessage: String {
+        switch requiredRole {
+        case .management: return "Add a management key in Settings → Accounts to see credits and activity."
+        case .inference: return "Add an API key in Settings → Accounts to see details about it."
+        }
+    }
+
+    /// Panels to load on appear for the keys that exist.
+    static func panelsToRefresh(hasInferenceKey: Bool, hasManagementKey: Bool) -> [AccountPanel] {
+        allCases.filter { $0.isAvailable(hasInferenceKey: hasInferenceKey, hasManagementKey: hasManagementKey) }
+    }
+}
+
 // MARK: Inline validation
 
 enum FieldCheck: Equatable {
@@ -274,6 +306,24 @@ enum RangeValidation {
 }
 
 // MARK: Views
+
+/// General → Prices: one display unit for every price in the model browser.
+struct PriceUnitSettingsSection: View {
+    @AppStorage(PriceUnit.defaultsKey) private var unit: PriceUnit = .perMillion
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Label("Prices", systemImage: "dollarsign.circle").font(.title3.weight(.semibold))
+            Picker("Show token prices", selection: $unit) {
+                ForEach(PriceUnit.allCases) { Text($0.title).tag($0) }
+            }
+            .pickerStyle(.segmented)
+            .frame(maxWidth: 320)
+            Text("Applies to the model list, details, Compare and exports. Filters stay in $ per 1M tokens.")
+                .font(.caption).foregroundStyle(.secondary)
+        }
+    }
+}
 
 /// General → Appearance. Changes apply live to every window.
 struct AppearanceSettingsSection: View {

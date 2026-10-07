@@ -113,7 +113,7 @@ struct PaletteIndex {
             PaletteItem(
                 id: "sec.\(section.rawValue)", group: .sections, title: section.title, subtitle: nil,
                 symbol: section.icon,
-                shortcut: ShellShortcuts.digit(for: section).map { "⌘\($0)" },
+                shortcut: ShellShortcuts.shortcutDisplay(for: section),
                 action: .section(section)
             )
         }

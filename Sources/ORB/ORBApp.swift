@@ -22,10 +22,14 @@ struct ORBApp: App {
                     minHeight: ORBShell.minimumWindowSize.height
                 )
                 .background(WindowChromeConfigurator(hideTitleBar: ORBShell.useHiddenTitleBar))
+                .onOpenURL { shell.open($0) }
         }
         .windowToolbarStyle(.unified)
+        .handlesExternalEvents(matching: [DeepLink.scheme])
         .commands {
+            SidebarCommands()
             ShellCommands(shell: shell, focusManager: focusManager)
+            ModelCommands(shell: shell)
         }
 
         Settings {
@@ -46,28 +50,32 @@ struct ShellCommands: Commands {
         }
         CommandGroup(replacing: .newItem) {
             Button("New Chat") { shell.send(.newChat) }
-                .keyboardShortcut("n", modifiers: .command)
+                .shortcut(.newChat)
             Button("New Agent Session") { shell.send(.newAgent) }
-                .keyboardShortcut("n", modifiers: [.command, .shift])
+                .shortcut(.newAgent)
         }
         CommandGroup(after: .textEditing) {
             Button("Find Models") { focusManager.searchFocused = true }
-                .keyboardShortcut("f", modifiers: .command)
+                .shortcut(.find)
         }
         CommandMenu("Go") {
             Button("Command Palette…") { shell.send(.showPalette) }
-                .keyboardShortcut("k", modifiers: .command)
+                .shortcut(.palette)
             Button("Refresh Models") { shell.send(.refreshModels) }
-                .keyboardShortcut("r", modifiers: .command)
+                .shortcut(.refresh)
             Divider()
             ForEach(Array(ShellShortcuts.numberedSections.enumerated()), id: \.offset) { offset, section in
                 Button(section.title) { shell.send(.section(section)) }
                     .keyboardShortcut(KeyEquivalent(Character("\(offset + 1)")), modifiers: .command)
             }
+            ForEach(ShellShortcuts.extraSectionCommands, id: \.1) { section, command in
+                Button(section.title) { shell.send(.section(section)) }
+                    .shortcut(command)
+            }
         }
         CommandGroup(after: .help) {
             Button("Keyboard Shortcuts") { shell.send(.showShortcuts) }
-                .keyboardShortcut("/", modifiers: .command)
+                .shortcut(.shortcuts)
         }
     }
 }

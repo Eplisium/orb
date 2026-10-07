@@ -60,16 +60,12 @@ enum ShellShortcuts {
         let title: String
     }
 
-    static let cheatSheet: [Entry] = [
-        Entry(keys: "⌘K", title: "Command palette"),
-        Entry(keys: "⌘1…9", title: "Jump to section (sidebar order)"),
-        Entry(keys: "⌘N", title: "New chat"),
-        Entry(keys: "⇧⌘N", title: "New agent session"),
-        Entry(keys: "⌘R", title: "Refresh models"),
-        Entry(keys: "⌘F", title: "Find models"),
-        Entry(keys: "⌘/", title: "Keyboard shortcuts"),
-        Entry(keys: "⌘,", title: "Settings"),
-    ]
+    /// Generated from `ShortcutCommand` so it always matches the menus.
+    static var cheatSheet: [Entry] {
+        var entries = [Entry(keys: "⌘1…9", title: "Jump to section (sidebar order)")]
+        entries += ShortcutCommand.allCases.map { Entry(keys: $0.combo.display, title: $0.title) }
+        return entries
+    }
 }
 
 /// Everything the menu, toolbar and palette can ask the shell to do.
@@ -87,6 +83,14 @@ enum ShellAction: Equatable, Hashable {
     case chatWithModel(String)
     case agentWithModel(String)
     case openConversation(UUID, PlaygroundMode)
+    // Model menu / deep links.
+    case toggleFavorite(String)
+    case toggleCompare(String)
+    case copyModelID(String)
+    case openOnOpenRouter(String)
+    case openCompare
+    case openCompareWith([String])
+    case exportModels(ModelExportFormat)
 
     /// The section the action navigates to, if any.
     var targetSection: SidebarSection? {
@@ -99,7 +103,9 @@ enum ShellAction: Equatable, Hashable {
         case .chatWithModel: return .chat
         case .agentWithModel: return .agent
         case .openConversation(_, let mode): return mode == .chat ? .chat : .agent
-        case .refreshModels, .toggleSidebar, .openSettings, .showShortcuts, .showPalette: return nil
+        case .openCompare, .openCompareWith: return .allModels
+        case .refreshModels, .toggleSidebar, .openSettings, .showShortcuts, .showPalette,
+             .toggleFavorite, .toggleCompare, .copyModelID, .openOnOpenRouter, .exportModels: return nil
         }
     }
 }
@@ -113,7 +119,19 @@ struct ShellRequest: Equatable {
 @MainActor
 final class ShellController: ObservableObject {
     @Published var pending: ShellRequest?
+    /// The browser's selected model, mirrored for the Model menu.
+    @Published var focusedModelID: String?
+    @Published var focusedModelIsFavorite = false
     func send(_ action: ShellAction) { pending = ShellRequest(action: action) }
+
+    /// Routes an `orb://` URL; returns false (and does nothing) when the
+    /// link isn't understood.
+    @discardableResult
+    func open(_ url: URL) -> Bool {
+        guard let link = DeepLink.parse(url) else { return false }
+        send(link.shellAction)
+        return true
+    }
 }
 
 enum ShellRestore {

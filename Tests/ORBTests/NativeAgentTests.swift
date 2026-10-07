@@ -456,38 +456,39 @@ struct BrowserViewModelTests {
         #expect(vm.filteredModels[0].id == "anthropic/claude")
     }
 
-    @Test("modality filter: text only")
+    @Test("search narrows to a text-only model")
     @MainActor
     func textOnlyFilter() {
         let vm = makeViewModel(models: [
             model(id: "a/text", supportsImages: false),
             model(id: "b/vision", supportsImages: true),
         ])
-        vm.modalityFilter = .textOnly
+        vm.filters.capabilities = []
+        vm.searchText = "text"
         #expect(vm.filteredModels.count == 1)
         #expect(vm.filteredModels[0].id == "a/text")
     }
 
-    @Test("modality filter: multimodal")
+    @Test("image-input capability filter")
     @MainActor
     func multimodalFilter() {
         let vm = makeViewModel(models: [
             model(id: "a/text", supportsImages: false),
             model(id: "b/vision", supportsImages: true),
         ])
-        vm.modalityFilter = .multimodal
+        vm.filters.capabilities = [.imageInput]
         #expect(vm.filteredModels.count == 1)
         #expect(vm.filteredModels[0].id == "b/vision")
     }
 
-    @Test("modality filter: tools")
+    @Test("tools capability filter")
     @MainActor
     func toolsFilter() {
         let vm = makeViewModel(models: [
             model(id: "a/tools", supportsTools: true),
             model(id: "b/notools", supportsTools: false),
         ])
-        vm.modalityFilter = .tools
+        vm.filters.capabilities = [.tools]
         #expect(vm.filteredModels.count == 1)
         #expect(vm.filteredModels[0].id == "a/tools")
     }
@@ -537,12 +538,12 @@ struct BrowserViewModelTests {
             model(id: "openai/gpt-4o"),
             model(id: "anthropic/claude"),
         ])
-        vm.providerFilter = "openai"
+        vm.filters.providers = ["openai"]
         #expect(vm.filteredModels.count == 1)
         #expect(vm.filteredModels[0].id == "openai/gpt-4o")
     }
 
-    @Test("combined search and modality filter")
+    @Test("combined search and capability filter")
     @MainActor
     func combinedFilters() {
         let vm = makeViewModel(models: [
@@ -551,7 +552,7 @@ struct BrowserViewModelTests {
             model(id: "anthropic/claude", name: "Claude", supportsTools: true),
         ])
         vm.searchText = "gpt"
-        vm.modalityFilter = .tools
+        vm.filters.capabilities = [.tools]
         #expect(vm.filteredModels.count == 1)
         #expect(vm.filteredModels[0].id == "openai/gpt-4o")
     }

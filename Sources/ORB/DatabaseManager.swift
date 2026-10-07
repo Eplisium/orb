@@ -70,7 +70,7 @@ struct DatabaseLaunchFailure: Equatable {
 
 final class DatabaseManager {
     static let shared = DatabaseManager()
-    private var db: OpaquePointer?
+    private(set) var db: OpaquePointer?
     private let dbPath: String
     private let deletesDatabaseOnDeinit: Bool
     /// Set when the on-disk database could not be opened or migrated; ORB then
@@ -148,6 +148,7 @@ final class DatabaseManager {
             }
             return
         }
+        applyBusyTimeout()
         exec("PRAGMA journal_mode=WAL;")
         exec("PRAGMA foreign_keys=ON;")
     }

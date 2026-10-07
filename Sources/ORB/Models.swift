@@ -25,9 +25,14 @@ struct ModelInfo: Codable, Identifiable, Hashable {
     let benchmarks: Benchmarks?
     let perRequestLimits: PerRequestLimits?
     let defaultParameters: JSONValue?
+    /// Set on `~vendor/...-latest` style aliases: the concrete model they
+    /// currently route to. Alias `/endpoints` returns nothing — fetch the
+    /// target's endpoints instead.
+    var aliasTarget: AliasTarget? = nil
 
     enum CodingKeys: String, CodingKey {
         case id, name, created, description, architecture, pricing, reasoning, benchmarks
+        case aliasTarget = "alias_target"
         case canonicalSlug = "canonical_slug"
         case huggingFaceId = "hugging_face_id"
         case contextLength = "context_length"
@@ -54,7 +59,25 @@ struct ModelInfo: Codable, Identifiable, Hashable {
 
     /// Providers with `~` prefix are unofficial mirrors on OpenRouter.
     var isUnofficial: Bool {
-        provider.hasPrefix("~")
+        provider.hasPrefix("~") && aliasTarget == nil
+    }
+
+    /// `~vendor/...-latest` aliases that route to another model.
+    var isAlias: Bool { aliasTarget != nil }
+
+    /// The id whose `/endpoints` actually lists providers.
+    var endpointsModelID: String {
+        if let slug = aliasTarget?.slug, !slug.isEmpty { return slug }
+        return id
+    }
+
+    /// Public model page; nil when the id can't form a safe URL.
+    var openRouterURL: URL? { ModelInfo.openRouterURL(for: id) }
+
+    static func openRouterURL(for id: String) -> URL? {
+        guard !id.isEmpty, !id.contains(".."), id.rangeOfCharacter(from: CharacterSet(charactersIn: "?# ")) == nil else { return nil }
+        guard let path = id.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) else { return nil }
+        return URL(string: "https://openrouter.ai/\(path)")
     }
 
     var promptCostPer1M: Double? {
@@ -147,14 +170,49 @@ struct ModelInfo: Codable, Identifiable, Hashable {
         benchmarks?.designArena?.map { $0.elo ?? 0 }.max()
     }
 
-    var hasExpired: Bool {
-        guard let d = expirationDate else { return false }
-        return ModelInfo.isoFormatter.date(from: d).map { $0 < Date() } ?? false
+    var hasExpired: Bool { hasExpired(now: Date()) }
+
+    /// The catalog sends a plain `YYYY-MM-DD` (full timestamps also accepted).
+    /// A model expires at the end of that UTC day.
+    var expirationInstant: Date? {
+        guard let raw = expirationDate?.trimmingCharacters(in: .whitespaces), !raw.isEmpty else { return nil }
+        if let day = ModelInfo.fullDateFormatter.date(from: String(raw.prefix(10))), raw.count == 10 {
+            return day.addingTimeInterval(86_400)
+        }
+        return ModelInfo.isoFormatter.date(from: raw) ?? ModelInfo.fullDateFormatter.date(from: String(raw.prefix(10)))
+    }
+
+    func hasExpired(now: Date) -> Bool {
+        guard let end = expirationInstant else { return false }
+        return end <= now
+    }
+
+    /// Whole days until expiry (0 = expires today), nil if none/expired.
+    func daysUntilExpiration(now: Date = Date()) -> Int? {
+        guard let end = expirationInstant, end > now else { return nil }
+        return Int((end.timeIntervalSince(now) - 1) / 86_400)
+    }
+
+    /// "Expires in N days" when expiry is within 30 days.
+    func expirationWarning(now: Date = Date()) -> String? {
+        guard let days = daysUntilExpiration(now: now), days <= 30 else { return nil }
+        switch days {
+        case 0: return "Expires today"
+        case 1: return "Expires tomorrow"
+        default: return "Expires in \(days) days"
+        }
     }
 
     private static let isoFormatter: ISO8601DateFormatter = {
         let f = ISO8601DateFormatter()
         f.formatOptions = [.withInternetDateTime]
+        return f
+    }()
+
+    private static let fullDateFormatter: ISO8601DateFormatter = {
+        let f = ISO8601DateFormatter()
+        f.formatOptions = [.withFullDate]
+        f.timeZone = TimeZone(identifier: "UTC")
         return f
     }()
 
@@ -182,7 +240,8 @@ struct ModelInfo: Codable, Identifiable, Hashable {
     }
 
     var knowledgeCutoffFormatted: String {
-        knowledgeCutoff?.isEmpty == false ? knowledgeCutoff! : "N/A"
+        guard let cutoff = knowledgeCutoff, !cutoff.isEmpty else { return "N/A" }
+        return cutoff
     }
 }
 
@@ -201,14 +260,157 @@ struct Architecture: Codable, Hashable {
     }
 }
 
+/// Model/endpoint pricing. Values are USD strings exactly as the API sends
+/// them (per token unless noted). Decoding is tolerant: a field of an
+/// unexpected type is dropped instead of failing the whole catalog.
 struct Pricing: Codable, Hashable {
-    let prompt: String?
-    let completion: String?
-    let inputCacheRead: String?
+    var prompt: String?
+    var completion: String?
+    var inputCacheRead: String?
+    var inputCacheWrite: String? = nil
+    var inputCacheWrite1h: String? = nil
+    /// USD per web-search request.
+    var webSearch: String? = nil
+    var internalReasoning: String? = nil
+    var image: String? = nil
+    var imageOutput: String? = nil
+    var audio: String? = nil
+    var audioOutput: String? = nil
+    var inputAudioCache: String? = nil
+    /// USD per request.
+    var request: String? = nil
+    /// Endpoint discount fraction (0…1); usually 0.
+    var discount: Double? = nil
+    /// Tiered/time-window prices that replace the base when they apply.
+    var overrides: [PricingOverride]? = nil
+
+    init(
+        prompt: String?, completion: String?, inputCacheRead: String?,
+        inputCacheWrite: String? = nil, inputCacheWrite1h: String? = nil, webSearch: String? = nil,
+        internalReasoning: String? = nil, image: String? = nil, imageOutput: String? = nil,
+        audio: String? = nil, audioOutput: String? = nil, inputAudioCache: String? = nil,
+        request: String? = nil, discount: Double? = nil, overrides: [PricingOverride]? = nil
+    ) {
+        self.prompt = prompt; self.completion = completion; self.inputCacheRead = inputCacheRead
+        self.inputCacheWrite = inputCacheWrite; self.inputCacheWrite1h = inputCacheWrite1h
+        self.webSearch = webSearch; self.internalReasoning = internalReasoning
+        self.image = image; self.imageOutput = imageOutput; self.audio = audio
+        self.audioOutput = audioOutput; self.inputAudioCache = inputAudioCache
+        self.request = request; self.discount = discount; self.overrides = overrides
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case prompt, completion, image, audio, request, discount, overrides
+        case inputCacheRead = "input_cache_read"
+        case inputCacheWrite = "input_cache_write"
+        case inputCacheWrite1h = "input_cache_write_1h"
+        case webSearch = "web_search"
+        case internalReasoning = "internal_reasoning"
+        case imageOutput = "image_output"
+        case audioOutput = "audio_output"
+        case inputAudioCache = "input_audio_cache"
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        func str(_ k: CodingKeys) -> String? { LossyPrice.decode(c, k) }
+        prompt = str(.prompt); completion = str(.completion); inputCacheRead = str(.inputCacheRead)
+        inputCacheWrite = str(.inputCacheWrite); inputCacheWrite1h = str(.inputCacheWrite1h)
+        webSearch = str(.webSearch); internalReasoning = str(.internalReasoning)
+        image = str(.image); imageOutput = str(.imageOutput); audio = str(.audio)
+        audioOutput = str(.audioOutput); inputAudioCache = str(.inputAudioCache); request = str(.request)
+        discount = (try? c.decodeIfPresent(Double.self, forKey: .discount)) ?? str(.discount).flatMap(Double.init)
+        overrides = (try? c.decodeIfPresent(LossyArray<PricingOverride>.self, forKey: .overrides))?.elements
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encodeIfPresent(prompt, forKey: .prompt)
+        try c.encodeIfPresent(completion, forKey: .completion)
+        try c.encodeIfPresent(inputCacheRead, forKey: .inputCacheRead)
+        try c.encodeIfPresent(inputCacheWrite, forKey: .inputCacheWrite)
+        try c.encodeIfPresent(inputCacheWrite1h, forKey: .inputCacheWrite1h)
+        try c.encodeIfPresent(webSearch, forKey: .webSearch)
+        try c.encodeIfPresent(internalReasoning, forKey: .internalReasoning)
+        try c.encodeIfPresent(image, forKey: .image)
+        try c.encodeIfPresent(imageOutput, forKey: .imageOutput)
+        try c.encodeIfPresent(audio, forKey: .audio)
+        try c.encodeIfPresent(audioOutput, forKey: .audioOutput)
+        try c.encodeIfPresent(inputAudioCache, forKey: .inputAudioCache)
+        try c.encodeIfPresent(request, forKey: .request)
+        try c.encodeIfPresent(discount, forKey: .discount)
+        try c.encodeIfPresent(overrides, forKey: .overrides)
+    }
+}
+
+/// One `pricing.overrides[]` entry: applies above `min_prompt_tokens`
+/// and/or inside a UTC time window (`utc_start`/`utc_end` as HHMM,
+/// optional `utc_days`).
+struct PricingOverride: Codable, Hashable {
+    var minPromptTokens: Int? = nil
+    var utcStart: Int? = nil
+    var utcEnd: Int? = nil
+    var utcDays: [String]? = nil
+    var prompt: String? = nil
+    var completion: String? = nil
+    var inputCacheRead: String? = nil
+    var inputCacheWrite: String? = nil
 
     enum CodingKeys: String, CodingKey {
         case prompt, completion
+        case minPromptTokens = "min_prompt_tokens"
+        case utcStart = "utc_start"
+        case utcEnd = "utc_end"
+        case utcDays = "utc_days"
         case inputCacheRead = "input_cache_read"
+        case inputCacheWrite = "input_cache_write"
+    }
+
+    init(minPromptTokens: Int? = nil, utcStart: Int? = nil, utcEnd: Int? = nil, utcDays: [String]? = nil,
+         prompt: String? = nil, completion: String? = nil, inputCacheRead: String? = nil, inputCacheWrite: String? = nil) {
+        self.minPromptTokens = minPromptTokens; self.utcStart = utcStart; self.utcEnd = utcEnd; self.utcDays = utcDays
+        self.prompt = prompt; self.completion = completion; self.inputCacheRead = inputCacheRead; self.inputCacheWrite = inputCacheWrite
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        func int(_ k: CodingKeys) -> Int? {
+            (try? c.decodeIfPresent(Int.self, forKey: k)) ?? LossyPrice.decode(c, k).flatMap { Int($0) }
+        }
+        minPromptTokens = int(.minPromptTokens); utcStart = int(.utcStart); utcEnd = int(.utcEnd)
+        utcDays = try? c.decodeIfPresent([String].self, forKey: .utcDays)
+        prompt = LossyPrice.decode(c, .prompt); completion = LossyPrice.decode(c, .completion)
+        inputCacheRead = LossyPrice.decode(c, .inputCacheRead); inputCacheWrite = LossyPrice.decode(c, .inputCacheWrite)
+    }
+}
+
+/// `{name, slug}` of the model an alias currently points at.
+struct AliasTarget: Codable, Hashable {
+    let name: String?
+    let slug: String
+}
+
+/// Accepts a JSON string or number and returns its string form.
+enum LossyPrice {
+    static func decode<K: CodingKey>(_ c: KeyedDecodingContainer<K>, _ key: K) -> String? {
+        if let s = try? c.decodeIfPresent(String.self, forKey: key) { return s }
+        if let d = try? c.decodeIfPresent(Double.self, forKey: key) {
+            return d == d.rounded() && abs(d) < 1e15 ? String(Int(d)) : String(d)
+        }
+        return nil
+    }
+}
+
+/// Decodes an array, skipping elements that fail to decode.
+struct LossyArray<Element: Decodable>: Decodable {
+    let elements: [Element]
+    init(from decoder: Decoder) throws {
+        var c = try decoder.unkeyedContainer()
+        var out: [Element] = []
+        while !c.isAtEnd {
+            if let e = try? c.decode(Element.self) { out.append(e) } else { _ = try? c.decode(JSONValue.self) }
+        }
+        elements = out
     }
 }
 
@@ -296,7 +498,7 @@ struct EndpointDetail: Codable, Hashable {
 }
 
 struct ModelEndpoint: Codable, Hashable, Identifiable {
-    let name: String?
+    var name: String?
     let modelId: String?
     let providerName: String?
     let contextLength: Int?
@@ -310,8 +512,46 @@ struct ModelEndpoint: Codable, Hashable, Identifiable {
     let uptimeLast1d: Double?
     let supportsImplicitCaching: Bool?
     let status: Int?
+    /// Unique per endpoint (`deepinfra/fp4`, `deepinfra/turbo`) where the
+    /// provider name alone is not.
+    var tag: String? = nil
+    var supportedParameters: [String]? = nil
+    var maxPromptTokens: Int? = nil
+    /// Disambiguator assigned by `ModelEndpoint.uniquified` when two
+    /// endpoints would otherwise share an id. Never encoded.
+    var idSuffix: String? = nil
 
-    var id: String { providerName ?? name ?? UUID().uuidString }
+    /// Stable: tag, else provider + quantization, never random.
+    var baseID: String {
+        if let tag, !tag.isEmpty { return tag }
+        let parts = [providerName ?? name ?? "endpoint", quantization].compactMap { $0 }.filter { !$0.isEmpty }
+        return parts.joined(separator: "/")
+    }
+
+    var id: String { idSuffix.map { "\(baseID)#\($0)" } ?? baseID }
+
+    /// Gives every endpoint in `list` a distinct `id`, keeping order and
+    /// leaving already-unique ids untouched.
+    static func uniquified(_ list: [ModelEndpoint]) -> [ModelEndpoint] {
+        var seen: [String: Int] = [:]
+        return list.map { endpoint in
+            var e = endpoint
+            e.idSuffix = nil
+            let n = seen[e.baseID, default: 0]
+            seen[e.baseID] = n + 1
+            if n > 0 { e.idSuffix = String(n + 1) }
+            return e
+        }
+    }
+
+    /// Short label shown in provider tables: provider plus the tag's
+    /// variant when it adds information ("DeepInfra (turbo)").
+    var displayName: String {
+        let provider = providerName ?? name ?? "Unknown"
+        guard let tag, let slash = tag.firstIndex(of: "/") else { return provider }
+        let variant = tag[tag.index(after: slash)...]
+        return variant.isEmpty ? provider : "\(provider) (\(variant))"
+    }
 
     var promptCostPer1M: Double? {
         guard let s = pricing?.prompt, let d = Double(s), d > 0 else { return nil }
@@ -331,7 +571,9 @@ struct ModelEndpoint: Codable, Hashable, Identifiable {
     var isAvailable: Bool { (status ?? 1) == 0 }
 
     enum CodingKeys: String, CodingKey {
-        case name, pricing, quantization, status
+        case name, pricing, quantization, status, tag
+        case supportedParameters = "supported_parameters"
+        case maxPromptTokens = "max_prompt_tokens"
         case modelId = "model_id"
         case providerName = "provider_name"
         case contextLength = "context_length"
@@ -345,16 +587,8 @@ struct ModelEndpoint: Codable, Hashable, Identifiable {
     }
 }
 
-struct EndpointPricing: Codable, Hashable {
-    let prompt: String?
-    let completion: String?
-    let inputCacheRead: String?
-
-    enum CodingKeys: String, CodingKey {
-        case prompt, completion
-        case inputCacheRead = "input_cache_read"
-    }
-}
+/// Endpoints use the same pricing shape (plus `discount`).
+typealias EndpointPricing = Pricing
 
 // MARK: - Sort & Filter
 
@@ -366,28 +600,17 @@ enum SortField: String, CaseIterable, Identifiable {
     case created = "Date Added"
     case provider = "Provider"
     case designElo = "Design Elo"
+    case intelligence = "Intelligence Index"
+    case coding = "Coding Index"
+    case agentic = "Agentic Index"
+    case maxOutput = "Max Output"
+    case expiringSoon = "Expiring Soon"
 
     var id: String { rawValue }
 }
 
 enum SortOrder {
     case ascending, descending
-}
-
-enum ModalityFilter: String, CaseIterable, Identifiable {
-    case all = "All"
-    case textOnly = "Text Only"
-    case multimodal = "Multimodal"
-    case imageOut = "Image Out"
-    case videoIn = "Video In"
-    case audio = "Audio"
-    case files = "Files"
-    case tools = "Tools"
-    case reasoning = "Reasoning"
-    case embeddings = "Embeddings"
-    case freeOnly = "Free Only"
-
-    var id: String { rawValue }
 }
 
 // MARK: - Credits
