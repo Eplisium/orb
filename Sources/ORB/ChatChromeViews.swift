@@ -4,6 +4,9 @@ import SwiftUI
 
 struct ConversationSearchField: View {
     @Binding var text: String
+    /// Bumped by the Conversation ▸ Search Sessions command to take focus.
+    var focusRequest: Int = 0
+    @FocusState private var focused: Bool
 
     var body: some View {
         HStack(spacing: 6) {
@@ -11,6 +14,8 @@ struct ConversationSearchField: View {
             TextField("Search sessions", text: $text)
                 .textFieldStyle(.plain)
                 .font(ORBFont.footnote)
+                .focused($focused)
+                .onChange(of: focusRequest) { _, _ in focused = true }
             if !text.isEmpty {
                 Button { text = "" } label: { Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary) }
                     .buttonStyle(.plain)
@@ -40,9 +45,10 @@ struct ConversationSectionsList: View {
     var isSelecting = false
     var checked: Set<UUID> = []
     let onToggleCheck: (UUID) -> Void
+    @State private var sectionsCache = ConversationSectionsCache()
 
     var body: some View {
-        let sections = ConversationListModel.sections(conversations, query: query, pinned: pins.ids, pinOrder: pins.order)
+        let sections = sectionsCache.sections(conversations, query: query, pinned: pins.ids, pinOrder: pins.order)
         ScrollView {
             LazyVStack(spacing: 8, pinnedViews: [.sectionHeaders]) {
                 if conversations.isEmpty {
@@ -200,8 +206,9 @@ struct AgentRunStatusStrip: View {
                         .accessibilityLabel("\(s.failedToolCalls) tool calls failed")
                 }
                 Spacer()
+                // ⌘. lives in the Conversation menu (ConversationCommands).
                 Button("Cancel run", action: cancel).controlSize(.small)
-                    .keyboardShortcut(".", modifiers: .command)
+                    .help("Cancel run (⌘.)")
             }
             .padding(.horizontal, 18).padding(.vertical, 6)
             .background(ORBTheme.accentSubtle)
@@ -267,12 +274,13 @@ struct EditableTitle: View {
 /// Bottom-of-window toast with an Undo button; dismisses itself.
 struct UndoToastView: View {
     let message: String
+    var symbol: String = "trash"
     let undo: () -> Void
     let dismiss: () -> Void
 
     var body: some View {
         HStack(spacing: 12) {
-            Image(systemName: "trash").accessibilityHidden(true)
+            Image(systemName: symbol).accessibilityHidden(true)
             Text(message).font(ORBFont.footnote.weight(.medium))
             Button("Undo", action: undo).buttonStyle(.link).keyboardShortcut("z", modifiers: .command)
             Button { dismiss() } label: { Image(systemName: "xmark") }
@@ -327,15 +335,37 @@ struct ApprovalSheet: View {
             }
             Text("The agent wants to use \(request.toolName).")
                 .font(ORBFont.footnote).foregroundStyle(.secondary)
-            ScrollView {
-                Text(p.displaySummary)
-                    .orbFont(size: 12, design: .monospaced)
-                    .textSelection(.enabled)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(8)
+            if let primary = p.primary, let label = p.primaryLabel {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(label).font(ORBFont.caption.weight(.semibold)).foregroundStyle(.secondary)
+                    ScrollView {
+                        Text(primary)
+                            .orbFont(size: 12, design: .monospaced)
+                            .textSelection(.enabled)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(8)
+                    }
+                    .frame(maxHeight: 160)
+                    .background(.orbSurface(0.06), in: RoundedRectangle(cornerRadius: 8))
+                }
             }
-            .frame(maxHeight: 140)
-            .background(.orbSurface(0.06), in: RoundedRectangle(cornerRadius: 8))
+            DisclosureGroup(p.primary == nil ? "Arguments" : "All arguments") {
+                ScrollView {
+                    Text(p.displaySummary)
+                        .orbFont(size: 12, design: .monospaced)
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(8)
+                }
+                .frame(maxHeight: 220)
+                .background(.orbSurface(0.06), in: RoundedRectangle(cornerRadius: 8))
+            }
+            .font(ORBFont.caption)
+            if p.hiddenCharacters > 0 {
+                Label("\(p.hiddenCharacters) characters hidden — too long to display in full", systemImage: "eye.slash")
+                    .font(ORBFont.caption.weight(.semibold))
+                    .foregroundStyle(ORBTheme.warning)
+            }
             if waiting > 0 {
                 Text("\(waiting) more waiting").font(ORBFont.caption).foregroundStyle(.secondary)
             }
@@ -350,7 +380,7 @@ struct ApprovalSheet: View {
             }
         }
         .padding(20)
-        .frame(width: 440)
+        .frame(width: 520)
         .interactiveDismissDisabled()
         .accessibilityElement(children: .contain)
     }

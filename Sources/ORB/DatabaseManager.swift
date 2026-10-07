@@ -311,6 +311,8 @@ final class DatabaseManager {
             try addColumnIfMissing(table: "messages", column: "reasoning_started_at", definition: "REAL")
             try addColumnIfMissing(table: "messages", column: "reasoning_duration_seconds", definition: "REAL")
             try addColumnIfMissing(table: "messages", column: "transcript_json", definition: "TEXT")
+            // Wave 1: per-reply usage (tokens, cost, tok/s).
+            try addColumnIfMissing(table: "messages", column: "usage_json", definition: "TEXT")
             // W06: durable media jobs and assets. Additive migrations only —
             // existing tables are never altered or dropped and legacy rows
             // keep loading.
@@ -393,7 +395,7 @@ final class DatabaseManager {
             try execChecked("CREATE INDEX IF NOT EXISTS idx_usage_events_ts ON usage_events(timestamp);")
             // Media columns (jobs.prompt / jobs.saved_creation_id); additive, no version bump.
             try migrateMediaColumns()
-            try execChecked("PRAGMA user_version=6;")
+            try execChecked("PRAGMA user_version=7;")
         } catch {
             // A failed migration must never take the app down. Back up the
             // failing file, swap in a fresh in-memory database, and surface
@@ -663,10 +665,36 @@ final class DatabaseManager {
         }
     }
 
-    func loadConversations() -> [(conversation: ChatConversation, agentHistoryJSON: String)] {
-        let sql = "SELECT * FROM conversations ORDER BY created_at DESC;"
+    /// Incremental save: conversation row + the given message rows only, in
+    /// one transaction. Other message rows are left untouched.
+    func saveConversationMessagesChecked(
+        _ conv: ChatConversation, agentHistoryJSON: String,
+        messages: [(message: ChatMessage, sortOrder: Int)]
+    ) throws {
+        try execChecked("BEGIN IMMEDIATE;")
+        do {
+            try saveConversationChecked(conv, agentHistoryJSON: agentHistoryJSON)
+            for row in messages {
+                try saveMessageChecked(row.message, conversationId: conv.id, sortOrder: row.sortOrder)
+            }
+            try execChecked("COMMIT;")
+        } catch {
+            try? execChecked("ROLLBACK;")
+            throw error
+        }
+    }
+
+    /// All conversations, or only one mode's (each playground service loads
+    /// just its own sessions and their messages).
+    func loadConversations(mode: PlaygroundMode? = nil) -> [(conversation: ChatConversation, agentHistoryJSON: String)] {
+        let sql = mode == nil
+            ? "SELECT * FROM conversations ORDER BY created_at DESC;"
+            : "SELECT * FROM conversations WHERE mode = ? ORDER BY created_at DESC;"
         guard let stmt = prepare(sql) else { return [] }
         defer { sqlite3_finalize(stmt) }
+        if let mode {
+            sqlite3_bind_text(stmt, 1, mode.rawValue, -1, unsafeBitCast(-1, to: sqlite3_destructor_type.self))
+        }
         var results: [(ChatConversation, String)] = []
         while sqlite3_step(stmt) == SQLITE_ROW {
             let idStr = String(cString: sqlite3_column_text(stmt, 0))
@@ -711,8 +739,8 @@ final class DatabaseManager {
     func saveMessageChecked(_ message: ChatMessage, conversationId: UUID, sortOrder: Int) throws {
         let sql = """
         INSERT OR REPLACE INTO messages
-        (id, conversation_id, role, content, tool_calls_json, tool_call_id, tool_name, sort_order, created_at, status, finish_reason, error_message, parts_json, images_json, reasoning_details_json, reasoning, reasoning_started_at, reasoning_duration_seconds, transcript_json)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+        (id, conversation_id, role, content, tool_calls_json, tool_call_id, tool_name, sort_order, created_at, status, finish_reason, error_message, parts_json, images_json, reasoning_details_json, reasoning, reasoning_started_at, reasoning_duration_seconds, transcript_json, usage_json)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
         """
         guard let stmt = prepare(sql) else { throw DatabaseManagerError.operationFailed(currentError()) }
         defer { sqlite3_finalize(stmt) }
@@ -743,7 +771,8 @@ final class DatabaseManager {
         }
 
         sqlite3_bind_int(stmt, 8, Int32(sortOrder))
-        sqlite3_bind_double(stmt, 9, Date().timeIntervalSince1970)
+        // The message's own creation time — rewrites must not restamp it.
+        sqlite3_bind_double(stmt, 9, message.createdAt.timeIntervalSince1970)
         sqlite3_bind_text(stmt, 10, message.status.rawValue, -1, t)
         if let reason = message.finishReason { sqlite3_bind_text(stmt, 11, reason, -1, t) } else { sqlite3_bind_null(stmt, 11) }
         if let error = message.errorMessage { sqlite3_bind_text(stmt, 12, error, -1, t) } else { sqlite3_bind_null(stmt, 12) }
@@ -788,6 +817,12 @@ final class DatabaseManager {
             sqlite3_bind_text(stmt, 19, String(decoding: data, as: UTF8.self), -1, t)
         } else {
             sqlite3_bind_null(stmt, 19)
+        }
+        if let usage = message.usage {
+            let data = try JSONEncoder().encode(usage)
+            sqlite3_bind_text(stmt, 20, String(decoding: data, as: UTF8.self), -1, t)
+        } else {
+            sqlite3_bind_null(stmt, 20)
         }
         try requireDone(stmt)
     }
@@ -845,7 +880,10 @@ final class DatabaseManager {
                 reasoningDuration: reasoningDuration,
                 reasoningDetails: reasoningDetails,
                 transcript: columnTextOrNil(stmt, columnIndex(stmt, "transcript_json"))
-                    .flatMap { try? JSONDecoder().decode([MessageTranscriptSegment].self, from: Data($0.utf8)) }
+                    .flatMap { try? JSONDecoder().decode([MessageTranscriptSegment].self, from: Data($0.utf8)) },
+                createdAt: Date(timeIntervalSince1970: sqlite3_column_double(stmt, 8)),
+                usage: columnTextOrNil(stmt, columnIndex(stmt, "usage_json"))
+                    .flatMap { try? JSONDecoder().decode(MessageUsage.self, from: Data($0.utf8)) }
             )
             messages.append(msg)
         }
@@ -1090,44 +1128,7 @@ final class DatabaseManager {
     // MARK: - Export
 
     func exportConversationMarkdown(_ conv: ChatConversation) -> String {
-        var md = "# \(conv.title)\n\n"
-        md += "**Model:** \(conv.modelId)  \n"
-        md += "**Mode:** \(conv.mode.rawValue)  \n"
-        md += "**Date:** \(conv.createdAt.formatted())  \n"
-        if conv.totalTokens > 0 {
-            md += "**Tokens:** \(conv.totalTokens)  \n"
-        }
-        if conv.totalCost > 0 {
-            md += "**Cost:** $\(String(format: "%.4f", conv.totalCost))  \n"
-        }
-        md += "\n---\n\n"
-        for msg in conv.messages {
-            let label: String
-            switch msg.role {
-            case "user": label = "**You**"
-            case "assistant": label = "**Assistant**"
-            case "tool": label = "**Tool** (\(msg.toolName ?? "unknown"))"
-            case "system": label = "**System**"
-            default: label = "**\(msg.role)**"
-            }
-            md += "\(label):\n\n\(msg.content)\n"
-            if let parts = msg.parts, !parts.isEmpty {
-                md += "\n*Attachments: \(parts.count) file(s) — see app to view.*\n"
-            }
-            if let images = msg.images, !images.isEmpty {
-                for (index, image) in images.enumerated() {
-                    // Remote URLs embed directly; data URLs would bloat the
-                    // file, so reference them by position instead.
-                    if image.isRemoteURL {
-                        md += "\n![generated image \(index + 1)](\(image.dataURL))\n"
-                    } else {
-                        md += "\n*[generated image \(index + 1): embedded \(image.mimeType), see app to view]*\n"
-                    }
-                }
-            }
-            md += "\n---\n\n"
-        }
-        return md
+        ConversationExporter.markdown(conv)
     }
 
     deinit {

@@ -267,13 +267,31 @@ struct ApprovalPresentationTests {
         #expect([terminal, computer, mcp].allSatisfy { !$0.symbol.isEmpty && !$0.riskWord.isEmpty })
     }
 
-    @Test("Long summaries are truncated for display but never emptied")
+    @Test("Long arguments are shown in full; only pathological payloads are capped, and the cut is announced")
     func truncation() {
-        let long = String(repeating: "x", count: 5_000)
-        let p = ApprovalPresentation.make(toolName: "run_command", server: nil, summary: long)
-        #expect(p.displaySummary.count <= 600)
-        #expect(!p.displaySummary.isEmpty)
-        #expect(ApprovalPresentation.make(toolName: "run_command", server: nil, summary: "").displaySummary == "No arguments shown.")
+        let command = "echo " + String(repeating: "x", count: 5_000)
+        let json = "{\"command\":\"\(command)\",\"timeout\":30}"
+        let p = ApprovalPresentation.make(toolName: "run_command", server: nil, summary: json)
+        #expect(p.primary == command, "the full command, not a 300/600-char prefix")
+        #expect(p.primaryLabel == "Command")
+        #expect(p.displaySummary.contains("\"timeout\" : 30"))
+        #expect(p.hiddenCharacters == 0)
+        let huge = String(repeating: "y", count: ApprovalPresentation.displayLimit + 123)
+        let capped = ApprovalPresentation.make(toolName: "run_command", server: nil, summary: huge)
+        #expect(capped.hiddenCharacters == 123)
+        #expect(capped.displaySummary.count == ApprovalPresentation.displayLimit)
+        #expect(ApprovalPresentation.make(toolName: "run_command", server: nil, summary: "").displaySummary == "No arguments.")
+    }
+
+    @Test("Path and URL arguments are surfaced as the primary field")
+    func primaryFields() {
+        let path = ApprovalPresentation.make(toolName: "mcp__fs__write", server: "fs", summary: "{\"path\":\"/tmp/a b.txt\",\"content\":\"hi\"}")
+        #expect(path.primaryLabel == "Path")
+        #expect(path.primary == "/tmp/a b.txt")
+        let url = ApprovalPresentation.make(toolName: "open_url", server: nil, summary: "{\"url\":\"https://example.com/x?y=1\"}")
+        #expect(url.primary == "https://example.com/x?y=1")
+        let none = ApprovalPresentation.make(toolName: "capture_screen", server: nil, summary: "{}")
+        #expect(none.primary == nil)
     }
 
     @Test("Request queue shows one prompt at a time, in arrival order, and resolves by ID")

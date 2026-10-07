@@ -3,7 +3,7 @@ import Combine
 import Testing
 @testable import ORB
 
-private actor ScriptedOpenRouterClient: OpenRouterClientProtocol {
+private actor ScriptedOpenRouterClient: TimedOpenRouterStreaming {
     struct Script: Sendable {
         let events: [OpenRouterStreamEvent]
         var delay: Duration = .zero
@@ -15,6 +15,22 @@ private actor ScriptedOpenRouterClient: OpenRouterClientProtocol {
     init(_ scripts: [Script]) { self.scripts = scripts }
 
     func stream(_ request: OpenRouterRequest) async throws -> AsyncThrowingStream<OpenRouterStreamEvent, Error> {
+        let timed = try await timedStream(request)
+        return AsyncThrowingStream { continuation in
+            let task = Task {
+                do {
+                    for try await item in timed { continuation.yield(item.event) }
+                    continuation.finish()
+                } catch { continuation.finish(throwing: error) }
+            }
+            continuation.onTermination = { _ in task.cancel() }
+        }
+    }
+
+    /// Stamps each event when the script emits it — the fixture's stand-in for
+    /// "when the provider sent it" — so timing assertions do not depend on how
+    /// quickly a loaded test process schedules the consumer.
+    func timedStream(_ request: OpenRouterRequest) async throws -> AsyncThrowingStream<TimedStreamEvent<OpenRouterStreamEvent>, Error> {
         requests.append(request)
         let script = scripts.removeFirst()
         return AsyncThrowingStream { continuation in
@@ -22,7 +38,7 @@ private actor ScriptedOpenRouterClient: OpenRouterClientProtocol {
                 for event in script.events {
                     if script.delay != .zero { try await Task.sleep(for: script.delay) }
                     try Task.checkCancellation()
-                    continuation.yield(event)
+                    continuation.yield(.init(event: event, arrivedAt: Date()))
                 }
                 if let error = script.terminalError { continuation.finish(throwing: error) }
                 else { continuation.finish() }
@@ -830,8 +846,8 @@ struct ChatServiceTests {
         #expect(service.lastError?.contains("already") == true)
         service.stopStreaming()
         service.stopStreaming()
-        try await Task.sleep(for: .milliseconds(80))
-        #expect(!service.isStreaming)
+        // Bounded polling: a fixed sleep flaked when the suite loaded the main actor.
+        try await waitUntilIdle(service)
         #expect(service.activeConversation?.messages.filter { $0.role == "user" }.count == 1)
     }
 }

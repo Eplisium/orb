@@ -30,6 +30,7 @@ struct ORBApp: App {
             SidebarCommands()
             ShellCommands(shell: shell, focusManager: focusManager)
             ModelCommands(shell: shell)
+            ConversationCommands()
         }
 
         Settings {

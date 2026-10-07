@@ -16,14 +16,21 @@ struct AgentView: View {
     @State private var unread = UnreadTracker()
     @AppStorage("playground.requireCommandToSend") private var requireCommandToSend = false
     @State private var undoSnapshot: [StoredConversation]?
+    /// Last edit, for Undo and to carry its attachments into the resend.
+    @State private var pendingEdit: ChatService.ConversationEdit?
     @State private var dropTargeted = false
     @StateObject private var pins = ConversationPinStore(key: "orb.pinned.agent")
     @State private var selectedSessionIDs = Set<UUID>()
     @State private var selectedModelId = ""
     @AppStorage(PlaygroundModelDefaults.agentKey) private var defaultModelId = ""
     @AppStorage("playground.agentFullComputerAccess") private var fullComputerAccess = false
+    /// Sampling for Agent runs. Unset = provider default (nothing sent).
+    @AppStorage("playground.agentTemperatureSet") private var agentTemperatureSet = false
+    @AppStorage("playground.agentTemperature") private var agentTemperature = 0.7
+    @AppStorage("playground.agentReasoningEffort") private var agentReasoningEffort = ""
     @AppStorage("playground.agentWorkspace") private var workspace = FileManager.default.homeDirectoryForCurrentUser.path
     @State private var attachments: [URL] = []
+    @State private var isPreparingAttachments = false
     @State private var attachmentWarnings: [String] = []
     @State private var attachmentContextSummary: String?
     @State private var showSettings = false
@@ -41,6 +48,8 @@ struct AgentView: View {
     /// stacking scroll requests faster than ~30fps.
     @State private var lastScrollRequest: ContinuousClock.Instant?
     @FocusState private var inputFocused: Bool
+    @State private var searchFocusRequest = 0
+    @State private var pasteMonitor = ComposerPasteMonitor()
 
     private let accent = PlaygroundTheme.agentAccent
 
@@ -53,6 +62,15 @@ struct AgentView: View {
             mainArea
         }
         .background(playgroundBackground)
+        .focusedSceneValue(\.conversationActions, conversationActions)
+        .onAppear {
+            pasteMonitor.install(
+                isActive: { inputFocused && !chatService.isStreaming },
+                onAttach: { urls in attachPasted(urls) },
+                onError: { chatService.lastError = $0 }
+            )
+        }
+        .onDisappear { pasteMonitor.remove() }
         .task {
             chatService.activateConversation(for: .agent)
             selectedModelId = PlaygroundModelDefaults.initialSelection(
@@ -62,8 +80,12 @@ struct AgentView: View {
             viewModel.loadFavorites()
             inputFocused = true
         }
-        .onChange(of: selectedModelId) { _, _ in
+        .onChange(of: selectedModelId) { _, newValue in
             if !attachments.isEmpty { refreshAttachmentDiagnostics() }
+            // A picker change switches this session's model in place.
+            if let id = chatService.activeConversation?.id, !newValue.isEmpty {
+                chatService.switchModel(newValue, for: id)
+            }
         }
         .onChange(of: chatService.activeConversation?.id) { _, _ in resetFollowState() }
     }
@@ -101,6 +123,15 @@ struct AgentView: View {
                     message: UndoToast.message(deleted: snapshot.count),
                     undo: { chatService.restore(snapshot); undoSnapshot = nil },
                     dismiss: { undoSnapshot = nil }
+                )
+                .padding(.bottom, 80)
+                .transition(.move(edge: .bottom).combined(with: .opacity))
+            } else if let edit = pendingEdit {
+                UndoToastView(
+                    message: UndoToast.editMessage(removed: edit.removedCount),
+                    symbol: "pencil",
+                    undo: { undoEdit(edit) },
+                    dismiss: { pendingEdit = nil }
                 )
                 .padding(.bottom, 80)
                 .transition(.move(edge: .bottom).combined(with: .opacity))
@@ -142,7 +173,7 @@ struct AgentView: View {
                 }
             )
 
-            ConversationSearchField(text: $sessionQuery)
+            ConversationSearchField(text: $sessionQuery, focusRequest: searchFocusRequest)
             ConversationSectionsList(
                 conversations: chatService.conversations.filter { $0.mode == .agent },
                 query: $sessionQuery,
@@ -256,7 +287,7 @@ struct AgentView: View {
                     .foregroundStyle(ORBTheme.warning)
                     .padding(.horizontal, 9).padding(.vertical, 6)
                     .background(ORBTheme.warning.opacity(0.12), in: Capsule())
-                    .help("OP Mode is on: risky tools run without asking. Change it in Settings > Advanced.")
+                    .help("OP Mode is on: risky tools run without asking, and the agent can inspect and manage ORB itself (sessions, usage, settings, MCP). Change it in Settings > Advanced.")
             }
 
             ConversationMeterView(conversation: chatService.activeConversation)
@@ -384,6 +415,31 @@ struct AgentView: View {
             Divider()
 
             VStack(alignment: .leading, spacing: 7) {
+                Text("SAMPLING")
+                    .orbFont(size: 11, weight: .bold)
+                    .foregroundStyle(.secondary)
+                Toggle("Override temperature", isOn: $agentTemperatureSet)
+                    .font(.caption)
+                if agentTemperatureSet {
+                    HStack {
+                        Slider(value: $agentTemperature, in: 0...2, step: 0.05)
+                        Text(String(format: "%.2f", agentTemperature)).font(.caption).monospacedDigit()
+                    }
+                } else {
+                    Text("Model default — no temperature is sent.").font(.caption).foregroundStyle(.secondary)
+                }
+                Picker("Reasoning effort", selection: $agentReasoningEffort) {
+                    Text("Model default").tag("")
+                    ForEach(ReasoningSettings.Effort.allCases) { effort in
+                        Text(effort.label).tag(effort.rawValue)
+                    }
+                }
+                .font(.caption)
+            }
+
+            Divider()
+
+            VStack(alignment: .leading, spacing: 7) {
                 Text("SYSTEM PROMPT (OPTIONAL)")
                     .orbFont(size: 11, weight: .bold)
                     .foregroundStyle(.secondary)
@@ -469,12 +525,13 @@ struct AgentView: View {
                                         onRegenerate: regenerateAction(for: message, in: conversation, running: conversationIsRunning),
                                         onEdit: conversationIsRunning || message.role != "user"
                                             ? nil
-                                            : { if let text = chatService.truncateConversation(from: message.id, in: conversation.id) { messageText = text; inputFocused = true } },
+                                            : { beginEdit(message.id, in: conversation.id) },
                                         onBranch: conversationIsRunning
                                             ? nil
                                             : { if let branch = chatService.branchConversation(from: message.id, in: conversation.id) { selectedModelId = branch.modelId } },
                                         showToolCalls: true
                                     )
+                                    .equatable()
                                     .id(message.id)
                                 }
 
@@ -837,7 +894,7 @@ struct AgentView: View {
 
     private var canSend: Bool {
         let hasText = !messageText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-        return hasText && KeychainManager.hasAPIKey && !chatService.isStreaming
+        return hasText && KeychainManager.hasAPIKey && !chatService.isStreaming && !isPreparingAttachments
     }
 
     private var composerPlaceholder: String {
@@ -933,30 +990,59 @@ struct AgentView: View {
             return
         }
 
-        var prompt = messageText.trimmingCharacters(in: .whitespacesAndNewlines)
+        pendingEdit = nil
+        let sentText = messageText
+        let basePrompt = sentText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let sentAttachments = attachments
+        let modelId = currentModelId
+        let workspace = workspace
+        let fullComputerAccess = fullComputerAccess
+        let settings = agentSettings
+        let limits = attachmentLimits()
 
-        // Build a byte-bounded, explicitly untrusted attachment envelope.
-        if !attachments.isEmpty {
-            let result = attachmentBuildResult()
-            attachmentWarnings = result.warnings
-            guard !result.includedFiles.isEmpty else {
-                chatService.lastError = result.warnings.first ?? "None of the selected attachments could be read."
-                return
+        isPreparingAttachments = !sentAttachments.isEmpty
+        Task { @MainActor in
+            defer { isPreparingAttachments = false }
+            var prompt = basePrompt
+            // Build a byte-bounded, explicitly untrusted attachment envelope
+            // off the main actor. The draft is cleared only after it succeeds.
+            if !sentAttachments.isEmpty {
+                let result = await Task.detached(priority: .userInitiated) {
+                    AgentAttachmentBuilder.build(urls: sentAttachments, perFileByteLimit: limits.perFile, totalByteLimit: limits.total)
+                }.value
+                attachmentWarnings = result.warnings
+                guard !result.includedFiles.isEmpty else {
+                    chatService.lastError = (result.warnings.first ?? "None of the selected attachments could be read.") + " Your message was kept."
+                    return
+                }
+                prompt += result.promptSuffix
             }
-            prompt += result.promptSuffix
-        }
-
-        messageText = ""
-        attachments = []
-        attachmentContextSummary = nil
-
-        Task {
+            if messageText == sentText { messageText = "" }
+            attachments.removeAll { sentAttachments.contains($0) }
+            if attachments.isEmpty { attachmentContextSummary = nil }
             await chatService.sendAgentMessage(
                 prompt,
-                modelId: currentModelId,
+                modelId: modelId,
                 workspace: workspace,
-                fullComputerAccess: fullComputerAccess
+                fullComputerAccess: fullComputerAccess,
+                settings: settings
             )
+        }
+    }
+
+    /// Agent attachments are inlined as text, so pasted images are saved and
+    /// referenced by path in the prompt (the agent can open them with its
+    /// image tool); pasted text files attach normally.
+    private func attachPasted(_ urls: [URL]) {
+        let images = urls.filter { (UTType(filenameExtension: $0.pathExtension)?.conforms(to: .image)) == true }
+        let others = urls.filter { !images.contains($0) }
+        if !images.isEmpty {
+            let lines = images.map { "[Pasted image: \($0.path)]" }.joined(separator: "\n")
+            messageText += (messageText.isEmpty || messageText.hasSuffix("\n") ? "" : "\n") + lines
+        }
+        if !others.isEmpty {
+            attachments.append(contentsOf: others)
+            refreshAttachmentDiagnostics()
         }
     }
 
@@ -991,13 +1077,35 @@ struct AgentView: View {
         }
     }
 
-    private func attachmentBuildResult() -> AgentAttachmentBuildResult {
+    private func beginEdit(_ messageID: UUID, in conversationID: UUID) {
+        // Agent attachments are inlined into the prompt text, so the edited
+        // text already carries them.
+        guard let edit = chatService.beginEdit(from: messageID, in: conversationID) else { return }
+        pendingEdit = edit
+        messageText = edit.text
+        inputFocused = true
+    }
+
+    private func undoEdit(_ edit: ChatService.ConversationEdit) {
+        if chatService.undoEdit(edit), messageText == edit.text { messageText = "" }
+        pendingEdit = nil
+    }
+
+    private var agentSettings: GenerationSettings {
+        AgentSamplingPreferences(
+            temperature: agentTemperatureSet ? agentTemperature : nil,
+            reasoningEffort: agentReasoningEffort
+        ).settings
+    }
+
+    private func attachmentLimits() -> (perFile: Int, total: Int) {
         let contextLength = viewModel.api.models.first(where: { $0.id == currentModelId })?.contextLength ?? 32_000
-        return AgentAttachmentBuilder.build(
-            urls: attachments,
-            perFileByteLimit: 16_000,
-            totalByteLimit: min(80_000, max(12_000, contextLength))
-        )
+        return (16_000, min(80_000, max(12_000, contextLength)))
+    }
+
+    private func attachmentBuildResult() -> AgentAttachmentBuildResult {
+        let limits = attachmentLimits()
+        return AgentAttachmentBuilder.build(urls: attachments, perFileByteLimit: limits.perFile, totalByteLimit: limits.total)
     }
 
     private func refreshAttachmentDiagnostics() {
@@ -1019,40 +1127,28 @@ struct AgentView: View {
     /// Agent runs have side effects, so they are never silently replayed.
     private func regenerateAction(for message: ChatMessage, in conversation: ChatConversation, running: Bool) -> (() -> Void)? { nil }
 
+    /// Menu-bar actions for this playground (Conversation menu).
+    private var conversationActions: ConversationActions {
+        let conversation = chatService.activeConversation
+        let regenerate: (() -> Void)? = nil  // Agent runs have side effects; never replayed.
+        return ConversationActions(
+            stop: currentSessionRunning ? { chatService.stopStreaming() } : nil,
+            regenerate: regenerate,
+            copyLastReply: ConversationActionLogic.lastReply(in: conversation).map { text in
+                { ConversationActionLogic.copyToPasteboard(text) }
+            },
+            export: conversation.map { conv in { exportConversation(conv) } },
+            searchSessions: { searchFocusRequest += 1 }
+        )
+    }
+
     private func exportConversationJSON(_ conv: ChatConversation) {
-        let panel = NSSavePanel()
-        panel.title = "Export Conversation as JSON"
-        panel.nameFieldStringValue = "\(conv.title).json"
-        panel.allowedContentTypes = [.json]
-        guard panel.runModal() == .OK, let url = panel.url else { return }
-        let payload: [String: Any] = [
-            "title": conv.title, "model": conv.modelId, "mode": conv.mode.rawValue,
-            "systemPrompt": conv.systemPrompt,
-            "messages": conv.messages.map { ["role": $0.role, "content": $0.content] },
-        ]
-        do {
-            let data = try JSONSerialization.data(withJSONObject: payload, options: [.prettyPrinted, .sortedKeys])
-            try data.write(to: url, options: .atomic)
-        } catch {
-            chatService.lastError = "Could not export: \(error.localizedDescription)"
-        }
+        if let error = ConversationExporter.saveWithPanel(conv, as: .json) { chatService.lastError = error }
     }
 
     private func exportConversation(_ conv: ChatConversation) {
-        let markdown = DatabaseManager.shared.exportConversationMarkdown(conv)
-        let panel = NSSavePanel()
-        panel.title = "Export Conversation"
-        panel.nameFieldStringValue = "\(conv.title).md"
-        panel.allowedContentTypes = [UTType(filenameExtension: "md") ?? .plainText]
-        if panel.runModal() == .OK, let url = panel.url {
-            do {
-                try markdown.write(to: url, atomically: true, encoding: .utf8)
-            } catch {
-                chatService.lastError = "Could not export conversation: \(error.localizedDescription)"
-            }
-        }
+        if let error = ConversationExporter.saveWithPanel(conv, as: .markdown) { chatService.lastError = error }
     }
-
 
     /// Composite key covering every source of content growth during a run:
     /// message count, the streaming text, reasoning length, tool-call count

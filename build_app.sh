@@ -153,10 +153,6 @@ cat > "$APP_BUNDLE/Contents/Info.plist" << PLIST
 PLIST
 plutil -lint "$APP_BUNDLE/Contents/Info.plist" >/dev/null
 
-# --- orb:// URL scheme (deep links: orb://model/<id>, orb://chat?model=<id>, orb://compare?ids=a,b) ---
-plutil -insert CFBundleURLTypes -json \
-    '[{"CFBundleURLName":"com.eplisium.orb.deeplink","CFBundleURLSchemes":["orb"],"CFBundleTypeRole":"Viewer"}]' \
-    "$APP_BUNDLE/Contents/Info.plist"
 plutil -lint "$APP_BUNDLE/Contents/Info.plist" >/dev/null
 
 # --- App icon ---

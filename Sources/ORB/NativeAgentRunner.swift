@@ -3,6 +3,11 @@ import Foundation
 /// ORB's function-calling loop. Every model turn uses the same streaming client
 /// as direct Chat, and tool fragments are assembled by choice/tool index.
 enum NativeAgentRunner {
+    /// Wall-clock arrival time of the stream event currently being delivered
+    /// to `onEvent`, sampled off the main actor (see `StreamArrivalRelay`).
+    /// Nil for events the loop synthesizes itself; use `Date()` then.
+    @TaskLocal static var eventArrival: Date?
+
     typealias ToolExecutor = @Sendable (AssembledAgentToolCall) async throws -> NativeAgentToolResult
 
     static func run(
@@ -25,11 +30,25 @@ enum NativeAgentRunner {
         toolExecutor: ToolExecutor? = nil,
         policy: ToolPolicy? = nil,
         approvals: ApprovalCoordinator? = nil,
+        /// Sampling for every turn. Unset values are omitted so the
+        /// provider's defaults apply (never a hardcoded temperature).
+        settings: GenerationSettings = .agentDefault,
+        /// Runs ORB self-control tools (OP Mode). Nil = not available.
+        orbControl: (@Sendable (String, String) async -> NativeAgentToolResult)? = nil,
         onEvent: @escaping @Sendable (NativeAgentEvent) async -> Void
     ) async throws -> NativeAgentRunResult {
         let effectivePolicy = policy ?? ToolPolicy.legacy(fullComputerAccess: fullComputerAccess)
         let custom = systemPromptOverride?.trimmingCharacters(in: .whitespacesAndNewlines)
         var promptText = systemPrompt(workspace: workspace, fullComputerAccess: fullComputerAccess)
+        if effectivePolicy.capabilities.contains(.orbControl) {
+            promptText += """
+
+
+            ORB control (OP Mode): orb_* functions let you inspect and manage ORB itself — sessions, usage, settings, MCP servers. \
+            Read before you change, never delete or rewrite sessions the user did not ask about, and report exactly what you changed. \
+            Secrets and OP Mode itself are off limits.
+            """
+        }
         if let custom, !custom.isEmpty {
             promptText += "\n\n--- Additional user instructions ---\n\(custom)\n--- End additional user instructions ---"
         }
@@ -41,7 +60,7 @@ enum NativeAgentRunner {
         // full native list is generated once and filtered, so a Web Only
         // session neither exposes nor can invoke local or MCP tools, and a
         // policy change invalidates stale definitions immediately.
-        var definitions = NativeAgentTools.definitions(fullComputerAccess: true)
+        var definitions = (NativeAgentTools.definitions(fullComputerAccess: true) + ORBControlTools.definitions())
             .filter { effectivePolicy.allowsDefinition(name: $0.function.name) }
         // Fold in tools published by connected MCP servers. Native tools win on
         // a name collision because the MCP names are namespaced. Every MCP
@@ -50,6 +69,10 @@ enum NativeAgentRunner {
             .filter { effectivePolicy.allowsDefinition(name: $0.function.name) }
         let nativeNames = Set(definitions.map(\.function.name))
         definitions += mcpDefinitions.filter { !nativeNames.contains($0.function.name) }
+
+        let emit: @Sendable (NativeAgentEvent, Date) async -> Void = { event, arrival in
+            await NativeAgentRunner.$eventArrival.withValue(arrival) { await onEvent(event) }
+        }
 
         let executor: ToolExecutor = toolExecutor ?? { call in
             try Task.checkCancellation()
@@ -62,9 +85,19 @@ enum NativeAgentRunner {
                 try Task.checkCancellation()
                 return result
             }
+            if ORBControlTools.isORBTool(call.name) {
+                guard let orbControl else { return .init(content: "ORB control is not available in this session.", isError: true) }
+                let result = await orbControl(call.name, call.arguments)
+                try Task.checkCancellation()
+                return result
+            }
             let result = try await NativeAgentTools.execute(
                 name: call.name, argumentsJSON: call.arguments,
-                workspace: workspace, fullComputerAccess: fullComputerAccess,
+                // The policy already authorized this call (allowsExecution runs
+                // before the executor). Passing the raw toggle here made the
+                // Test Suite (projectBuild policy, toggle false) reject every
+                // tool, and Web Only reject web_search/remember/plan_tasks.
+                workspace: workspace, fullComputerAccess: true,
                 constrainPathsToWorkspace: effectivePolicy.constrainsFilesystem
             )
             try Task.checkCancellation()
@@ -86,7 +119,7 @@ enum NativeAgentRunner {
             var request = OpenRouterRequest(
                 apiKey: apiKey, model: modelId, messages: messages,
                 tools: definitions.isEmpty ? nil : definitions,
-                toolChoice: definitions.isEmpty ? nil : "auto", temperature: 0.3
+                toolChoice: definitions.isEmpty ? nil : "auto", settings: settings
             )
             var transientAttempts = 0
             var strippedAlready = false
@@ -99,24 +132,27 @@ enum NativeAgentRunner {
             var finishReason: String?
             var turnUsage: ChatUsage?
             var fragments: [Int: ToolBuilder] = [:]
+            var lastArrival = Date()
 
             turnAttempt: while true {
             do {
-            let stream = try await client.stream(request)
-            for try await event in stream {
+            let stream = try await StreamArrivalRelay.stream(client, request)
+            for try await timed in stream {
                 try Task.checkCancellation()
+                let event = timed.event
+                lastArrival = timed.arrivedAt
                 switch event {
                 case .contentDelta(let choice, let delta) where choice == 0:
                     text += delta
-                    await onEvent(.textDelta(delta))
+                    await emit(.textDelta(delta), timed.arrivedAt)
                 case .reasoningDelta(let choice, let delta) where choice == 0:
                     reasoning += delta
-                    await onEvent(.reasoningDelta(delta))
+                    await emit(.reasoningDelta(delta), timed.arrivedAt)
                 case .reasoningDetails(let choice, let details) where choice == 0:
                     turnReasoningDetails += details
                     // Pitfall 28: the agent path surfaces exactly what the
                     // chat path surfaces.
-                    await onEvent(.reasoningDetails(details))
+                    await emit(.reasoningDetails(details), timed.arrivedAt)
                 case .toolCallFragment(let choice, let index, let id, let type, let name, let arguments) where choice == 0:
                     var builder = fragments[index] ?? ToolBuilder(index: index)
                     if let id, builder.id.isEmpty { builder.id = id }
@@ -125,7 +161,7 @@ enum NativeAgentRunner {
                     if let arguments { builder.arguments += arguments }
                     fragments[index] = builder
                     if let call = builder.preview {
-                        await onEvent(.toolCallUpdated(call))
+                        await emit(.toolCallUpdated(call), timed.arrivedAt)
                     }
                 case .usage(let usage): turnUsage = usage
                 case .finishReason(let choice, let reason) where choice == 0: finishReason = reason
@@ -146,7 +182,7 @@ enum NativeAgentRunner {
                     messages = AgentTurnRecovery.strippingReasoning(messages)
                     request = OpenRouterRequest(
                         apiKey: request.apiKey, model: request.model, messages: messages,
-                        tools: request.tools, toolChoice: request.toolChoice, temperature: 0.3)
+                        tools: request.tools, toolChoice: request.toolChoice, settings: settings)
                 case .retry(let delay):
                     transientAttempts += 1
                     await onEvent(.retrying(AgentTurnRecovery.label(for: error, attempt: transientAttempts)))
@@ -160,7 +196,7 @@ enum NativeAgentRunner {
 
             aggregateUsage = sum(aggregateUsage, turnUsage)
             if let aggregateUsage { await onEvent(.usage(turn: turn, cumulative: aggregateUsage)) }
-            await onEvent(.turnFinished(reason: finishReason))
+            await emit(.turnFinished(reason: finishReason), lastArrival)
 
             if finishReason == "length",
                fragments.values.contains(where: { !$0.isEmptyPhantom }) {
@@ -269,7 +305,9 @@ enum NativeAgentRunner {
                         approved = await approvals.requestApproval(
                             toolName: call.name,
                             server: MCPToolNaming.resolve(call.name)?.server,
-                            summary: String(call.arguments.prefix(300))
+                            // Full arguments: the user must see the exact command or
+                            // path being approved, never a truncated prefix.
+                            summary: call.arguments
                         )
                     }
                     if approved {
@@ -314,19 +352,19 @@ enum NativeAgentRunner {
         ))
         let finalRequest = OpenRouterRequest(
             apiKey: apiKey, model: modelId, messages: messages,
-            tools: nil, toolChoice: nil, temperature: 0.3
+            tools: nil, toolChoice: nil, settings: settings
         )
         var finalText = ""
         var finalUsage: ChatUsage?
         var finalFinishReason: String?
-        for try await event in try await client.stream(finalRequest) {
+        for try await timed in try await StreamArrivalRelay.stream(client, finalRequest) {
             try Task.checkCancellation()
-            switch event {
+            switch timed.event {
             case .contentDelta(let choice, let delta) where choice == 0:
                 finalText += delta
-                await onEvent(.textDelta(delta))
+                await emit(.textDelta(delta), timed.arrivedAt)
             case .reasoningDelta(let choice, let delta) where choice == 0:
-                await onEvent(.reasoningDelta(delta))
+                await emit(.reasoningDelta(delta), timed.arrivedAt)
             case .usage(let usage): finalUsage = usage
             case .finishReason(let choice, let reason) where choice == 0: finalFinishReason = reason
             case .apiError(let error): throw NativeAgentError.api(error.message)

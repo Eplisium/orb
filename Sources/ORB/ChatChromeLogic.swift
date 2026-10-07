@@ -63,6 +63,49 @@ enum ConversationListModel {
     }
 }
 
+/// Memoizes `ConversationListModel.sections`. The sidebar body re-evaluates
+/// on every streamed publish (the conversation array changes), and a search
+/// query scans every message's text; recompute only when something the
+/// sections depend on changed.
+@MainActor
+final class ConversationSectionsCache {
+    struct Key: Equatable {
+        struct Item: Equatable {
+            let id: UUID, title: String, modelId: String, createdAt: Date
+            let messageCount: Int, lastMessageLength: Int
+        }
+        let items: [Item]
+        let query: String
+        let pinned: Set<UUID>
+        let pinOrder: [UUID]
+        let day: Date
+    }
+
+    private(set) var computeCount = 0
+    private var key: Key?
+    private var value: [ConversationListModel.Section] = []
+
+    func sections(
+        _ conversations: [ChatConversation], query: String, pinned: Set<UUID>, pinOrder: [UUID],
+        now: Date = .now, calendar: Calendar = .current
+    ) -> [ConversationListModel.Section] {
+        let searching = !query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        let key = Key(
+            items: conversations.map {
+                .init(id: $0.id, title: $0.title, modelId: $0.modelId, createdAt: $0.createdAt,
+                      messageCount: searching ? $0.messages.count : 0,
+                      lastMessageLength: searching ? ($0.messages.last?.content.count ?? 0) : 0)
+            },
+            query: query, pinned: pinned, pinOrder: pinOrder, day: calendar.startOfDay(for: now)
+        )
+        if key == self.key { return value }
+        computeCount += 1
+        self.key = key
+        value = ConversationListModel.sections(conversations, query: query, pinned: pinned, pinOrder: pinOrder, now: now, calendar: calendar)
+        return value
+    }
+}
+
 /// Persisted, ordered set of pinned conversation IDs. Takes its defaults as a
 /// seam so tests never touch the real preferences.
 final class ConversationPinStore: ObservableObject {
@@ -310,6 +353,10 @@ enum UndoToast {
     static func message(deleted count: Int) -> String {
         "Deleted \(count) session\(count == 1 ? "" : "s")"
     }
+
+    static func editMessage(removed count: Int) -> String {
+        "Editing — removed \(count) message\(count == 1 ? "" : "s")"
+    }
 }
 
 // MARK: Quick sampling ("model default" is a real choice)
@@ -334,20 +381,62 @@ struct ApprovalPresentation: Equatable {
     let title: String
     let symbol: String
     let riskWord: String
+    /// The key argument in full (the shell command, file path, URL, script),
+    /// or nil when the tool has none. Shown prominently, never truncated.
+    let primary: String?
+    let primaryLabel: String?
+    /// Every argument, pretty-printed. Capped only as a rendering guard.
     let displaySummary: String
+    /// Characters of `displaySummary` cut by the rendering cap (0 = none).
+    let hiddenCharacters: Int
+
+    /// Rendering guard for pathological payloads (e.g. a whole file being
+    /// written). Anything cut is announced, never silently dropped.
+    static let displayLimit = 20_000
 
     static func make(toolName: String, server: String?, summary: String) -> ApprovalPresentation {
         let trimmed = summary.trimmingCharacters(in: .whitespacesAndNewlines)
-        let shown = trimmed.isEmpty ? "No arguments shown." : String(trimmed.prefix(600))
+        let object = JSONValue.parse(trimmed)?.objectValue
+        let (primaryLabel, primary) = primaryArgument(toolName: toolName, arguments: object)
+        let pretty = object.map { prettyJSON(.object($0)) } ?? trimmed
+        let hidden = max(0, pretty.count - displayLimit)
+        let shown = pretty.isEmpty ? "No arguments." : String(pretty.prefix(displayLimit))
+        func build(_ risk: Risk, _ title: String, _ symbol: String, _ word: String) -> ApprovalPresentation {
+            .init(risk: risk, title: title, symbol: symbol, riskWord: word,
+                  primary: primary, primaryLabel: primaryLabel,
+                  displaySummary: shown, hiddenCharacters: hidden)
+        }
         switch toolName {
         case "run_command":
-            return .init(risk: .high, title: "Run a command on this Mac?", symbol: "terminal.fill", riskWord: "High risk", displaySummary: shown)
+            return build(.high, "Run a command on this Mac?", "terminal.fill", "High risk")
         case "run_applescript", "computer_action", "open_application", "open_url", "capture_screen", "view_image":
-            return .init(risk: .high, title: "Let the agent control this Mac?", symbol: "desktopcomputer.trianglebadge.exclamationmark", riskWord: "High risk", displaySummary: shown)
+            return build(.high, "Let the agent control this Mac?", "desktopcomputer.trianglebadge.exclamationmark", "High risk")
         default:
             let name = server ?? "an MCP server"
-            return .init(risk: .elevated, title: "Allow a tool from \(name)?", symbol: "puzzlepiece.extension.fill", riskWord: "Needs review", displaySummary: shown)
+            return build(.elevated, "Allow a tool from \(name)?", "puzzlepiece.extension.fill", "Needs review")
         }
+    }
+
+    private static func prettyJSON(_ value: JSONValue) -> String {
+        guard let data = try? JSONSerialization.data(
+            withJSONObject: value.anyValue, options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
+        ) else { return value.jsonText }
+        return String(decoding: data, as: UTF8.self)
+    }
+
+    private static let primaryKeys: [(key: String, label: String)] = [
+        ("command", "Command"), ("script", "Script"), ("path", "Path"), ("url", "URL"),
+        ("application", "Application"), ("app", "Application"), ("action", "Action"), ("uri", "URI"),
+    ]
+
+    private static func primaryArgument(toolName: String, arguments: [String: JSONValue]?) -> (String?, String?) {
+        guard let arguments else { return (nil, nil) }
+        for candidate in primaryKeys {
+            if let value = arguments[candidate.key]?.stringValue, !value.isEmpty {
+                return (candidate.label, value)
+            }
+        }
+        return (nil, nil)
     }
 }
 

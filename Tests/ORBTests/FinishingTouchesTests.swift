@@ -90,7 +90,8 @@ struct SaveFeedbackTests {
         f.succeed()
         #expect(f.status == .saved)
         #expect(center.toasts.map(\.message) == ["API key saved"])
-        try? await Task.sleep(for: .milliseconds(120))
+        // Poll instead of one fixed sleep: a loaded machine can delay the 20 ms fade.
+        for _ in 0..<200 where f.status != .idle { try? await Task.sleep(for: .milliseconds(10)) }
         #expect(f.status == .idle)
     }
 

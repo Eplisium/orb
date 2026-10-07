@@ -105,22 +105,26 @@ enum ModelLeaderboard {
     /// Per-model stats from experiment runs, best pass rate first, then more
     /// runs, then lower median latency, then model ID (deterministic).
     static func rows(_ runs: [ExperimentRunSummary]) -> [ModelLeaderboardRow] {
-        Dictionary(grouping: runs, by: \.modelID).map { model, items in
-            ModelLeaderboardRow(
-                modelID: model,
-                runs: items.count,
-                passed: items.filter { $0.verdict == ExperimentVerdict.passed.rawValue }.count,
-                unverified: items.filter { $0.verdict == ExperimentVerdict.unverified.rawValue }.count,
-                medianLatency: median(items.map(\.latencySeconds)),
-                knownCost: items.compactMap(\.knownCost).reduce(0, +),
-                unknownCostRuns: items.filter { $0.knownCost == nil }.count)
+        let grouped: [String: [ExperimentRunSummary]] = Dictionary(grouping: runs, by: \.modelID)
+        var rows: [ModelLeaderboardRow] = []
+        for (model, items) in grouped {
+            let passed = items.filter { $0.verdict == ExperimentVerdict.passed.rawValue }.count
+            let unverified = items.filter { $0.verdict == ExperimentVerdict.unverified.rawValue }.count
+            let latencies: [Double] = items.map(\.latencySeconds)
+            let knownCost: Double = items.compactMap(\.knownCost).reduce(0, +)
+            let unknownCostRuns = items.filter { $0.knownCost == nil }.count
+            rows.append(ModelLeaderboardRow(
+                modelID: model, runs: items.count, passed: passed, unverified: unverified,
+                medianLatency: median(latencies), knownCost: knownCost, unknownCostRuns: unknownCostRuns))
         }
-        .sorted {
-            if $0.passRate != $1.passRate { return $0.passRate > $1.passRate }
-            if $0.runs != $1.runs { return $0.runs > $1.runs }
-            if $0.medianLatency != $1.medianLatency { return $0.medianLatency < $1.medianLatency }
-            return $0.modelID < $1.modelID
-        }
+        return rows.sorted(by: ranksBefore)
+    }
+
+    private static func ranksBefore(_ a: ModelLeaderboardRow, _ b: ModelLeaderboardRow) -> Bool {
+        if a.passRate != b.passRate { return a.passRate > b.passRate }
+        if a.runs != b.runs { return a.runs > b.runs }
+        if a.medianLatency != b.medianLatency { return a.medianLatency < b.medianLatency }
+        return a.modelID < b.modelID
     }
 
     static func median(_ values: [Double]) -> Double {

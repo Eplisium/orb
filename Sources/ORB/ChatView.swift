@@ -14,6 +14,10 @@ struct ChatView: View {
     @State private var unread = UnreadTracker()
     @AppStorage("playground.requireCommandToSend") private var requireCommandToSend = false
     @State private var undoSnapshot: [StoredConversation]?
+    /// Last edit, for Undo and to carry its attachments into the resend.
+    @State private var pendingEdit: ChatService.ConversationEdit?
+    /// Attachments of the message being edited; resent unless removed.
+    @State private var carriedParts: [MessageContentPart]?
     @State private var dropTargeted = false
     @State private var temperatureIsModelDefault = false
     @StateObject private var pins = ConversationPinStore(key: "orb.pinned.chat")
@@ -30,6 +34,7 @@ struct ChatView: View {
     @State private var followsLatest = true
     @State private var attachmentDrafts: [ChatAttachmentDraft] = []
     @State private var attachmentWarnings: [String] = []
+    @State private var isPreparingAttachments = false
     /// Latest sentinel maxY in the scroll coordinate space. Updated by
     /// onPreferenceChange; read by the scroll decision in onChange.
     @State private var bottomOffset: CGFloat = .infinity
@@ -39,6 +44,8 @@ struct ChatView: View {
     /// stacking scroll requests faster than ~30fps.
     @State private var lastScrollRequest: ContinuousClock.Instant?
     @FocusState private var inputFocused: Bool
+    @State private var searchFocusRequest = 0
+    @State private var pasteMonitor = ComposerPasteMonitor()
 
     private let accent = PlaygroundTheme.chatAccent
 
@@ -60,6 +67,15 @@ struct ChatView: View {
             mainArea
         }
         .background(playgroundBackground)
+        .focusedSceneValue(\.conversationActions, conversationActions)
+        .onAppear {
+            pasteMonitor.install(
+                isActive: { inputFocused && !chatService.isStreaming },
+                onAttach: { urls in _ = attachFiles(urls) },
+                onError: { chatService.lastError = $0 }
+            )
+        }
+        .onDisappear { pasteMonitor.remove() }
         .task {
             chatService.activateConversation(for: .chat)
             selectedModelId = PlaygroundModelDefaults.initialSelection(
@@ -68,6 +84,12 @@ struct ChatView: View {
             )
             viewModel.loadFavorites()
             inputFocused = true
+        }
+        .onChange(of: selectedModelId) { _, newValue in
+            // A picker change switches this session's model in place.
+            if let id = chatService.activeConversation?.id, !newValue.isEmpty {
+                chatService.switchModel(newValue, for: id)
+            }
         }
         .onChange(of: chatService.activeConversation?.id) { _, _ in resetFollowState() }
     }
@@ -94,6 +116,15 @@ struct ChatView: View {
                     message: UndoToast.message(deleted: snapshot.count),
                     undo: { chatService.restore(snapshot); undoSnapshot = nil },
                     dismiss: { undoSnapshot = nil }
+                )
+                .padding(.bottom, 80)
+                .transition(.move(edge: .bottom).combined(with: .opacity))
+            } else if let edit = pendingEdit {
+                UndoToastView(
+                    message: UndoToast.editMessage(removed: edit.removedCount),
+                    symbol: "pencil",
+                    undo: { undoEdit(edit) },
+                    dismiss: { pendingEdit = nil }
                 )
                 .padding(.bottom, 80)
                 .transition(.move(edge: .bottom).combined(with: .opacity))
@@ -135,7 +166,7 @@ struct ChatView: View {
                 }
             )
 
-            ConversationSearchField(text: $sessionQuery)
+            ConversationSearchField(text: $sessionQuery, focusRequest: searchFocusRequest)
             ConversationSectionsList(
                 conversations: chatService.conversations.filter { $0.mode == .chat },
                 query: $sessionQuery,
@@ -464,11 +495,12 @@ struct ChatView: View {
                                         onRegenerate: regenerateAction(for: message, in: conversation, running: conversationIsRunning),
                                         onEdit: conversationIsRunning || message.role != "user"
                                             ? nil
-                                            : { if let text = chatService.truncateConversation(from: message.id, in: conversation.id) { messageText = text; inputFocused = true } },
+                                            : { beginEdit(message.id, in: conversation.id) },
                                         onBranch: conversationIsRunning
                                             ? nil
                                             : { if let branch = chatService.branchConversation(from: message.id, in: conversation.id) { selectedModelId = branch.modelId } }
                                     )
+                                    .equatable()
                                     .id(message.id)
                                 }
 
@@ -654,6 +686,19 @@ struct ChatView: View {
                 }
             }
 
+            if let carried = carriedParts, !carried.isEmpty {
+                HStack(spacing: 6) {
+                    Label("\(carried.count) attachment\(carried.count == 1 ? "" : "s") from the original message", systemImage: "paperclip")
+                        .orbFont(size: 11)
+                        .foregroundStyle(.secondary)
+                    Button { carriedParts = nil } label: { Image(systemName: "xmark.circle.fill") }
+                        .buttonStyle(.plain)
+                        .foregroundStyle(.secondary)
+                        .accessibilityLabel("Remove original attachments")
+                    Spacer()
+                }
+            }
+
             if !attachmentWarnings.isEmpty {
                 VStack(alignment: .leading, spacing: 3) {
                     ForEach(attachmentWarnings, id: \.self) { warning in
@@ -758,7 +803,8 @@ struct ChatView: View {
 
     private var canSend: Bool {
         let hasText = !messageText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-        return (hasText || !attachmentDrafts.isEmpty) && KeychainManager.hasAPIKey && !chatService.isStreaming
+        return (hasText || !attachmentDrafts.isEmpty) && KeychainManager.hasAPIKey
+            && !chatService.isStreaming && !isPreparingAttachments
     }
 
     private var composerPlaceholder: String {
@@ -846,30 +892,66 @@ struct ChatView: View {
             return
         }
 
-        let prompt = messageText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let sentText = messageText
+        let prompt = sentText.trimmingCharacters(in: .whitespacesAndNewlines)
         let drafts = attachmentDrafts
-        messageText = ""
-        attachmentDrafts = []
-        attachmentWarnings = []
-
-        let wireParts: [MessageContentPart]?
-        do {
-            wireParts = drafts.isEmpty ? nil : try ChatAttachmentBuilder.parts(for: drafts)
-        } catch {
-            chatService.lastError = "Could not read attachments: \(error.localizedDescription)"
+        let modelId = currentModelId
+        let settings = requestSettings
+        let carried = carriedParts ?? []
+        carriedParts = nil
+        pendingEdit = nil
+        guard drafts.isEmpty else {
+            // Build parts first (off-main); the draft is cleared only once the
+            // attachments were read, so a failed read never loses the text.
+            isPreparingAttachments = true
+            Task { @MainActor in
+                defer { isPreparingAttachments = false }
+                do {
+                    let wireParts = try await ChatAttachmentBuilder.buildParts(for: drafts)
+                    clearComposer(ifUnchanged: sentText, drafts: drafts)
+                    chatService.sendMessage(prompt, modelId: modelId, settings: settings, parts: carried + wireParts)
+                } catch {
+                    if !carried.isEmpty, carriedParts == nil { carriedParts = carried }
+                    chatService.lastError = "Could not read attachments: \(error.localizedDescription). Your message was kept."
+                }
+            }
             return
         }
+        clearComposer(ifUnchanged: sentText, drafts: drafts)
+        chatService.sendMessage(prompt, modelId: modelId, settings: settings, parts: carried.isEmpty ? nil : carried)
+    }
 
-        chatService.sendMessage(
-            prompt,
-            modelId: currentModelId,
-            settings: requestSettings,
-            parts: wireParts
-        )
+    private func beginEdit(_ messageID: UUID, in conversationID: UUID) {
+        guard let edit = chatService.beginEdit(from: messageID, in: conversationID) else { return }
+        pendingEdit = edit
+        messageText = edit.text
+        carriedParts = edit.parts
+        inputFocused = true
+    }
+
+    private func undoEdit(_ edit: ChatService.ConversationEdit) {
+        if chatService.undoEdit(edit) {
+            if messageText == edit.text { messageText = "" }
+            carriedParts = nil
+        }
+        pendingEdit = nil
+    }
+
+    /// Clears what was sent, keeping anything typed while attachments loaded.
+    private func clearComposer(ifUnchanged sentText: String, drafts: [ChatAttachmentDraft]) {
+        if messageText == sentText { messageText = "" }
+        let sentIDs = Set(drafts.map(\.id))
+        attachmentDrafts.removeAll { sentIDs.contains($0.id) }
+        if attachmentDrafts.isEmpty { attachmentWarnings = [] }
     }
 
     private func handleDrop(_ urls: [URL]) -> Bool {
         guard !chatService.isStreaming, !urls.isEmpty else { return false }
+        return attachFiles(urls)
+    }
+
+    /// Shared by drop and ⌘V paste.
+    private func attachFiles(_ urls: [URL]) -> Bool {
         let result = ChatAttachmentBuilder.classify(urls: urls)
         attachmentDrafts.append(contentsOf: result.drafts)
         refreshAttachmentWarnings(extra: result.warnings)
@@ -905,40 +987,31 @@ struct ChatView: View {
         }
     }
 
+    /// Menu-bar actions for this playground (Conversation menu).
+    private var conversationActions: ConversationActions {
+        let conversation = chatService.activeConversation
+        let regenerate: (() -> Void)? = {
+            guard let conversation, let last = conversation.messages.last else { return nil }
+            return regenerateAction(for: last, in: conversation, running: currentSessionRunning)
+        }()
+        return ConversationActions(
+            stop: currentSessionRunning ? { chatService.stopStreaming() } : nil,
+            regenerate: regenerate,
+            copyLastReply: ConversationActionLogic.lastReply(in: conversation).map { text in
+                { ConversationActionLogic.copyToPasteboard(text) }
+            },
+            export: conversation.map { conv in { exportConversation(conv) } },
+            searchSessions: { searchFocusRequest += 1 }
+        )
+    }
+
     private func exportConversationJSON(_ conv: ChatConversation) {
-        let panel = NSSavePanel()
-        panel.title = "Export Conversation as JSON"
-        panel.nameFieldStringValue = "\(conv.title).json"
-        panel.allowedContentTypes = [.json]
-        guard panel.runModal() == .OK, let url = panel.url else { return }
-        let payload: [String: Any] = [
-            "title": conv.title, "model": conv.modelId, "mode": conv.mode.rawValue,
-            "systemPrompt": conv.systemPrompt,
-            "messages": conv.messages.map { ["role": $0.role, "content": $0.content] },
-        ]
-        do {
-            let data = try JSONSerialization.data(withJSONObject: payload, options: [.prettyPrinted, .sortedKeys])
-            try data.write(to: url, options: .atomic)
-        } catch {
-            chatService.lastError = "Could not export: \(error.localizedDescription)"
-        }
+        if let error = ConversationExporter.saveWithPanel(conv, as: .json) { chatService.lastError = error }
     }
 
     private func exportConversation(_ conv: ChatConversation) {
-        let markdown = DatabaseManager.shared.exportConversationMarkdown(conv)
-        let panel = NSSavePanel()
-        panel.title = "Export Conversation"
-        panel.nameFieldStringValue = "\(conv.title).md"
-        panel.allowedContentTypes = [UTType(filenameExtension: "md") ?? .plainText]
-        if panel.runModal() == .OK, let url = panel.url {
-            do {
-                try markdown.write(to: url, atomically: true, encoding: .utf8)
-            } catch {
-                chatService.lastError = "Could not export conversation: \(error.localizedDescription)"
-            }
-        }
+        if let error = ConversationExporter.saveWithPanel(conv, as: .markdown) { chatService.lastError = error }
     }
-
 
     /// Composite key covering every source of content growth during a run:
     /// message count, the streaming text, reasoning length, tool-call count

@@ -728,6 +728,10 @@ struct ChatMessage: Codable, Identifiable, Equatable, Sendable {
     /// being rendered (F07).
     var reasoningDetails: [ReasoningDetail]?
     var transcript: [MessageTranscriptSegment]?
+    /// When the message was created. Persisted once; never restamped on save.
+    var createdAt: Date
+    /// Tokens, cost, and throughput for the reply (assistant rows only).
+    var usage: MessageUsage?
 
     init(
         id: UUID = UUID(),
@@ -745,8 +749,12 @@ struct ChatMessage: Codable, Identifiable, Equatable, Sendable {
         reasoningStartedAt: Date? = nil,
         reasoningDuration: TimeInterval? = nil,
         reasoningDetails: [ReasoningDetail]? = nil,
-        transcript: [MessageTranscriptSegment]? = nil
+        transcript: [MessageTranscriptSegment]? = nil,
+        createdAt: Date = Date(),
+        usage: MessageUsage? = nil
     ) {
+        self.createdAt = createdAt
+        self.usage = usage
         self.id = id
         self.role = role
         self.content = content
@@ -766,7 +774,8 @@ struct ChatMessage: Codable, Identifiable, Equatable, Sendable {
     }
 
     enum CodingKeys: String, CodingKey {
-        case role, content, reasoning, reasoningStartedAt, reasoningDuration, parts, images, transcript
+        case role, content, reasoning, reasoningStartedAt, reasoningDuration, parts, images, transcript, usage
+        case createdAt = "created_at"
         case reasoningDetails = "reasoning_details"
         case toolCalls = "tool_calls_display"
         case toolCallId = "tool_call_id"
@@ -794,6 +803,8 @@ struct ChatMessage: Codable, Identifiable, Equatable, Sendable {
         reasoningDuration = try c.decodeIfPresent(TimeInterval.self, forKey: .reasoningDuration)
         reasoningDetails = try c.decodeIfPresent([ReasoningDetail].self, forKey: .reasoningDetails)
         transcript = try c.decodeIfPresent([MessageTranscriptSegment].self, forKey: .transcript)
+        createdAt = try c.decodeIfPresent(Date.self, forKey: .createdAt) ?? Date()
+        usage = try c.decodeIfPresent(MessageUsage.self, forKey: .usage)
     }
 
     /// Compares the fields that actually drive rendering. The previous version
@@ -815,7 +826,55 @@ struct ChatMessage: Codable, Identifiable, Equatable, Sendable {
             && lhs.images == rhs.images
             && lhs.reasoningDetails == rhs.reasoningDetails
             && lhs.transcript == rhs.transcript
+            && lhs.usage == rhs.usage
+        // createdAt is set once at creation and never drives a redraw.
     }
+}
+
+/// Per-reply usage stored on the assistant message.
+struct MessageUsage: Codable, Equatable, Sendable {
+    var promptTokens: Int?
+    var completionTokens: Int?
+    var totalTokens: Int?
+    var reasoningTokens: Int?
+    var cost: Double?
+    /// Completion tokens per second of wall time for the run.
+    var tokensPerSecond: Double?
+
+    init(promptTokens: Int? = nil, completionTokens: Int? = nil, totalTokens: Int? = nil,
+         reasoningTokens: Int? = nil, cost: Double? = nil, tokensPerSecond: Double? = nil) {
+        self.promptTokens = promptTokens
+        self.completionTokens = completionTokens
+        self.totalTokens = totalTokens
+        self.reasoningTokens = reasoningTokens
+        self.cost = cost
+        self.tokensPerSecond = tokensPerSecond
+    }
+
+    init(_ usage: ChatUsage, elapsed: TimeInterval?) {
+        self.init(
+            promptTokens: usage.promptTokens, completionTokens: usage.completionTokens,
+            totalTokens: usage.totalTokens, reasoningTokens: usage.reasoningTokens, cost: usage.cost,
+            tokensPerSecond: zip(usage.completionTokens, elapsed).flatMap { tokens, seconds in
+                seconds > 0 ? Double(tokens) / seconds : nil
+            }
+        )
+    }
+
+    /// Compact footer text, e.g. "1,204 tokens · $0.0031 · 42 tok/s".
+    var summary: String {
+        var parts: [String] = []
+        if let totalTokens { parts.append("\(totalTokens.formatted()) tokens") }
+        else if let completionTokens { parts.append("\(completionTokens.formatted()) out") }
+        if let cost, cost > 0 { parts.append(cost < 0.01 ? String(format: "$%.4f", cost) : String(format: "$%.2f", cost)) }
+        if let tokensPerSecond { parts.append("\(Int(tokensPerSecond.rounded())) tok/s") }
+        return parts.joined(separator: " · ")
+    }
+}
+
+private func zip<A, B>(_ a: A?, _ b: B?) -> (A, B)? {
+    guard let a, let b else { return nil }
+    return (a, b)
 }
 
 /// Lightweight tool-call summary stored alongside ChatMessage for display.

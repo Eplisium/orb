@@ -166,6 +166,8 @@ actor MCPConnection {
     private var process: Process?
     private var stdinHandle: FileHandle?
     private var pending: [Int: CheckedContinuation<JSONValue, Error>] = [:]
+    private var stdoutPump: Task<Void, Never>?
+    private var stdoutSink: AsyncStream<Data>.Continuation?
     private var nextID = 1
     private var readBuffer = Data()
     private var isShuttingDown = false
@@ -246,11 +248,18 @@ actor MCPConnection {
         task.standardOutput = stdoutPipe
         task.standardError = stderrPipe
 
-        stdoutPipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
+        // One ordered consumer: a Task per chunk could run out of order and
+        // splice JSON-RPC lines together.
+        let (chunks, chunkSink) = AsyncStream<Data>.makeStream()
+        stdoutPipe.fileHandleForReading.readabilityHandler = { handle in
             let data = handle.availableData
             guard !data.isEmpty else { return }
-            Task { await self?.ingest(data) }
+            chunkSink.yield(data)
         }
+        stdoutPump = Task { [weak self] in
+            for await chunk in chunks { await self?.ingest(chunk) }
+        }
+        stdoutSink = chunkSink
         // Drain stderr so a chatty server cannot fill the pipe buffer and block.
         stderrPipe.fileHandleForReading.readabilityHandler = { handle in
             _ = handle.availableData
@@ -306,6 +315,10 @@ actor MCPConnection {
             continuation.resume(throwing: MCPError.notConnected)
         }
         pending.removeAll()
+        stdoutSink?.finish()
+        stdoutSink = nil
+        stdoutPump?.cancel()
+        stdoutPump = nil
         stdinHandle?.closeFile()
         process?.terminate()
         process = nil
@@ -470,32 +483,40 @@ actor MCPConnection {
             "method": .string(method),
             "params": params
         ])
-        try write(envelope)
 
-        return try await withThrowingTaskGroup(of: JSONValue.self) { group in
-            group.addTask { [requestTimeout] in
-                try await Task.sleep(for: requestTimeout)
-                throw MCPError.timedOut(method)
-            }
-            group.addTask {
-                try await withCheckedThrowingContinuation { continuation in
-                    Task { await self.register(id: id, continuation: continuation) }
-                }
-            }
-            defer { group.cancelAll() }
-            guard let first = try await group.next() else {
-                throw MCPError.transport("no response")
-            }
-            return first
+        let timeout = requestTimeout
+        let timer = Task { [weak self] in
+            try? await Task.sleep(for: timeout)
+            guard !Task.isCancelled else { return }
+            await self?.fail(id: id, with: MCPError.timedOut(method))
+        }
+        defer { timer.cancel() }
+        return try await withCheckedThrowingContinuation { continuation in
+            // Register BEFORE writing, on the actor: a fast server's reply can
+            // otherwise arrive before the continuation exists and be dropped,
+            // leaving the call to hang until the timeout.
+            Task { await self.registerAndWrite(id: id, envelope: envelope, continuation: continuation) }
         }
     }
 
-    private func register(id: Int, continuation: CheckedContinuation<JSONValue, Error>) {
+    private func registerAndWrite(id: Int, envelope: JSONValue, continuation: CheckedContinuation<JSONValue, Error>) {
         guard process?.isRunning == true else {
             continuation.resume(throwing: MCPError.notConnected)
             return
         }
         pending[id] = continuation
+        do {
+            try write(envelope)
+        } catch {
+            pending[id] = nil
+            continuation.resume(throwing: error)
+        }
+    }
+
+    /// Resolves one pending request with an error (timeout). No-op when the
+    /// reply already arrived.
+    private func fail(id: Int, with error: Error) {
+        pending.removeValue(forKey: id)?.resume(throwing: error)
     }
 
     private func notify(method: String, params: JSONValue) async throws {

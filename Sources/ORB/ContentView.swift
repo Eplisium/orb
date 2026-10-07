@@ -398,8 +398,8 @@ struct ContentView: View {
     @StateObject private var vm = BrowserViewModel(defaults: .standard)
     // Keep independent, root-owned coordinators so an Agent run survives its
     // view disappearing and does not prevent a simultaneous direct Chat run.
-    @StateObject private var agentService = ChatService()
-    @StateObject private var chatService = ChatService()
+    @StateObject private var agentService = ChatService(loadMode: .agent)
+    @StateObject private var chatService = ChatService(loadMode: .chat)
     /// Last section, restored per window scene. `-orb.startSection <name>`
     /// (launch argument / defaults override) still wins on first appearance.
     @SceneStorage(ORBShell.sectionStorageKey) private var storedSection = ""
