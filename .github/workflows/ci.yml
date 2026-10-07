@@ -74,7 +74,11 @@ jobs:
         timeout-minutes: 15 # fail fast if a test hangs instead of burning the job timeout
         run: |
           set -o pipefail
-          swift test --skip-build 2>&1 | tee "$LOG_DIR/test.log"
+          # Serial on CI: the streaming/latency tests assert on wall-clock
+          # timing, and 1,000+ tests in parallel on a shared 3-core runner
+          # starve them (each run flaked a different timing test). The full
+          # suite takes ~15 s serially on a laptop.
+          swift test --skip-build --no-parallel 2>&1 | tee "$LOG_DIR/test.log"
 
       - name: Package ad-hoc app
         run: |
