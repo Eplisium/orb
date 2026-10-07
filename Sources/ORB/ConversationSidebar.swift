@@ -42,8 +42,9 @@ struct ConversationSidebarHeader: View {
                 Text(subtitle)
                     .orbFont(size: 11, weight: .medium)
                     .foregroundStyle(.secondary)
-                    .lineLimit(1)
-                    .truncationMode(.tail)
+                    .lineLimit(2)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .help(subtitle)
             }
             Spacer(minLength: 4)
             if let onToggleSelecting {
@@ -132,6 +133,7 @@ struct ConversationRow: View {
             .padding(.vertical, 9)
             .frame(maxWidth: .infinity, alignment: .leading)
             .contentShape(Rectangle())
+            .help("\(conversation.title)\n\(conversation.modelId) · \(conversation.messages.count) messages")
             .background((isSelecting ? isChecked : isSelected) ? accent.opacity(0.14) : Color.primary.opacity(0.025))
             .overlay {
                 RoundedRectangle(cornerRadius: 9)

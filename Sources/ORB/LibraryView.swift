@@ -199,7 +199,7 @@ struct SavedCreationsLibraryView: View {
         let accent = ORBTheme.accent
         let fill: Color = on ? accent.opacity(0.14) : Color.clear
         let ring: AnyShapeStyle = on ? AnyShapeStyle(accent) : AnyShapeStyle(.orbSurface(0.08))
-        let subtitle = "\(c.modelID) · \(c.createdAt.formatted(date: .abbreviated, time: .omitted))"
+        let subtitle = CreationIdentity.metadata(for: c, includeKind: false)
         let shape = RoundedRectangle(cornerRadius: 10)
 
         let card = VStack(alignment: .leading, spacing: 6) {
@@ -208,9 +208,10 @@ struct SavedCreationsLibraryView: View {
                 .frame(height: 100)
                 .background(.orbSurface(0.06))
                 .clipShape(RoundedRectangle(cornerRadius: 8))
-            Text(label(c)).font(ORBFont.footnote).lineLimit(2)
+            Text(CreationIdentity.title(for: c)).font(ORBFont.footnote.weight(.medium)).lineLimit(2)
                 .frame(maxWidth: .infinity, minHeight: 32, alignment: .topLeading)
             Text(subtitle).font(ORBFont.caption).foregroundStyle(.secondary).lineLimit(1)
+                .truncationMode(.middle)
                 .frame(maxWidth: .infinity, alignment: .leading)
         }
         .padding(8)
@@ -223,8 +224,10 @@ struct SavedCreationsLibraryView: View {
             .onTapGesture(count: 2) { open(c) }
             .onTapGesture { tap(c) }
             .contextMenu { itemMenu(c) }
+            .help(label(c))
             .accessibilityElement(children: .combine)
-            .accessibilityLabel("\(c.kind.title): \(label(c))")
+            .accessibilityLabel(CreationIdentity.accessibilityLabel(for: c))
+            .accessibilityHint(c.prompt ?? "")
             .accessibilityAddTraits(on ? .isSelected : [])
             .accessibilityAction(named: "Open") { open(c) }
             .accessibilityAction(named: on ? "Deselect" : "Select") { selection.toggle(c.id) }
@@ -233,13 +236,25 @@ struct SavedCreationsLibraryView: View {
     private func row(_ c: SavedCreation) -> some View {
         let on = selection.contains(c.id)
         return HStack(spacing: 12) {
-            Image(systemName: on ? "checkmark.circle.fill" : c.kind.symbol).frame(width: 28)
-                .foregroundStyle(on ? ORBTheme.accent : .secondary)
+            LibraryThumbnail(creation: c, store: store, maxPixel: 120)
+                .frame(width: 44, height: 44)
+                .background(.orbSurface(0.06))
+                .clipShape(RoundedRectangle(cornerRadius: 6))
+                .overlay(alignment: .topLeading) {
+                    if on {
+                        Image(systemName: "checkmark.circle.fill")
+                            .foregroundStyle(.white, ORBTheme.accent)
+                            .padding(2)
+                            .accessibilityHidden(true)
+                    }
+                }
             VStack(alignment: .leading, spacing: 3) {
-                Text(label(c)).font(ORBFont.footnote).lineLimit(2)
-                Text("\(c.kind.title) · \(c.modelID) · \(c.createdAt.formatted(date: .abbreviated, time: .shortened))")
+                Text(CreationIdentity.title(for: c)).font(ORBFont.footnote.weight(.medium)).lineLimit(1)
+                Text(CreationIdentity.metadata(for: c))
                     .font(ORBFont.caption).foregroundStyle(.secondary).lineLimit(1)
+                    .truncationMode(.middle)
             }
+            .help(label(c))
             Spacer()
             Button("Open") { open(c) }
             Button("Export…") { export(c) }
@@ -251,6 +266,7 @@ struct SavedCreationsLibraryView: View {
         .creationDrag(c, store: store)
         .contextMenu { itemMenu(c) }
         .accessibilityElement(children: .contain)
+        .accessibilityLabel(CreationIdentity.accessibilityLabel(for: c))
         .accessibilityAddTraits(on ? .isSelected : [])
     }
 

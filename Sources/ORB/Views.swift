@@ -85,11 +85,16 @@ struct ModelRowView: View {
         .padding(.vertical, 4)
         .contentShape(Rectangle())
         .onHover { isHovered = $0 }
-        .accessibilityElement(children: .contain)
+        // One labelled element per row (model + provider + state). The
+        // hover-only quick buttons are reachable as named actions below.
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(ModelRowAccessibility.label(model, isFavorite: isFavorite, isComparing: isComparing))
+        .accessibilityValue(ModelRowAccessibility.value(facts))
         .accessibilityAction(named: isFavorite ? "Remove from favorites" : "Add to favorites") { actions.toggleFavorite(model) }
         .accessibilityAction(named: isComparing ? "Remove from compare" : "Add to compare") { actions.toggleCompare(model) }
         .accessibilityAction(named: "Copy model ID") { actions.copyID(model) }
         .accessibilityAction(named: "Chat with this model") { actions.chat(model) }
+        .accessibilityAction(named: "Use in the Agent") { actions.agent(model) }
         .contextMenu {
             Button {
                 actions.copyID(model)
@@ -287,11 +292,61 @@ struct ModelDetailView: View {
         }
     }
 
+    @ViewBuilder
+    private func detailActions(isFav: Bool, iconOnly: Bool) -> some View {
+        let row = HStack(spacing: 8) {
+            Button { shell.send(.chatWithModel(model.id)) } label: { Label("Chat", systemImage: "bubble.left") }
+                .buttonStyle(.borderedProminent).tint(ORBTheme.accent)
+                .help("Start a chat with this model")
+                .accessibilityLabel("Chat with \(model.name)")
+            Button { shell.send(.agentWithModel(model.id)) } label: { Label("Agent", systemImage: "wand.and.stars") }
+                .help("Run this model in the Agent")
+                .accessibilityLabel("Use \(model.name) in the Agent")
+            Button { viewModel.toggleFavorite(model) } label: {
+                Label(isFav ? "Favorited" : "Favorite", systemImage: isFav ? "star.fill" : "star")
+            }
+            .help(isFav ? "Remove from favorites" : "Add to favorites")
+            .accessibilityLabel(isFav ? "Remove \(model.name) from favorites" : "Add \(model.name) to favorites")
+            .accessibilityValue(isFav ? "Favorite" : "Not a favorite")
+            Button { viewModel.copyModelId(model) } label: {
+                Label(viewModel.copiedModelId == model.id ? "Copied" : "Copy ID",
+                      systemImage: viewModel.copiedModelId == model.id ? "checkmark" : "doc.on.doc")
+            }
+            .help("Copy the model ID")
+            .accessibilityLabel("Copy model ID \(model.id)")
+
+            if let url = model.openRouterURL {
+                Button { NSWorkspace.shared.open(url) } label: { Label("Open on OpenRouter", systemImage: "safari") }
+                    .help("Open on OpenRouter")
+                    .accessibilityLabel("Open \(model.name) on OpenRouter")
+            }
+        }
+        .fixedSize()
+        if iconOnly { row.labelStyle(.iconOnly) } else { row }
+    }
+
     // MARK: Sticky header
 
     private var stickyHeader: some View {
         let isFav = viewModel.favoriteIds.contains(model.id)
         return VStack(alignment: .leading, spacing: 10) {
+            if viewModel.selectedModel?.id == model.id, viewModel.selectionIsOutsideList {
+                HStack(spacing: 8) {
+                    Image(systemName: "eye.slash").accessibilityHidden(true)
+                    Text("Not in the current list. Kept from your last selection.")
+                        .lineLimit(2)
+                    Spacer(minLength: 4)
+                    Button("Close") { viewModel.selectModel(nil) }
+                        .controlSize(.small)
+                        .help("Clear the detail pane")
+                }
+                .font(ORBFont.caption)
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 6)
+                .background(.orbSurface(0.05), in: RoundedRectangle(cornerRadius: 8))
+                .accessibilityElement(children: .combine)
+            }
             HStack(alignment: .firstTextBaseline, spacing: 6) {
                 Text(model.provider.uppercased())
                     .font(ORBFont.caption.weight(.semibold))
@@ -319,25 +374,13 @@ struct ModelDetailView: View {
                 .orbFont(size: 12, design: .monospaced)
                 .foregroundStyle(.secondary)
                 .textSelection(.enabled)
-            HStack(spacing: 8) {
-                Button { shell.send(.chatWithModel(model.id)) } label: { Label("Chat", systemImage: "bubble.left") }
-                    .buttonStyle(.borderedProminent).tint(ORBTheme.accent)
-                    .help("Start a chat with this model")
-                Button { shell.send(.agentWithModel(model.id)) } label: { Label("Agent", systemImage: "wand.and.stars") }
-                    .help("Run this model in the Agent")
-                Button { viewModel.toggleFavorite(model) } label: {
-                    Label(isFav ? "Favorited" : "Favorite", systemImage: isFav ? "star.fill" : "star")
-                }
-                Button { viewModel.copyModelId(model) } label: {
-                    Label(viewModel.copiedModelId == model.id ? "Copied" : "Copy ID",
-                          systemImage: viewModel.copiedModelId == model.id ? "checkmark" : "doc.on.doc")
-                }
-
-                if let url = model.openRouterURL {
-                    Button { NSWorkspace.shared.open(url) } label: { Label("Open on OpenRouter", systemImage: "safari") }
-                }
-                Spacer(minLength: 0)
+            // Full labels when they fit; icons (with tooltips and spoken
+            // labels) in a narrow detail column instead of clipped words.
+            ViewThatFits(in: .horizontal) {
+                detailActions(isFav: isFav, iconOnly: false)
+                detailActions(isFav: isFav, iconOnly: true)
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
             .controlSize(.regular)
             Picker("Section", selection: $tab) {
                 ForEach(ModelDetailTab.allCases) { Text($0.rawValue).tag($0) }

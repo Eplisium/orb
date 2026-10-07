@@ -217,6 +217,38 @@ final class BrowserViewModel: ObservableObject {
         favoriteIds = Set(db.getAllFavorites())
     }
 
+    /// Stored favorites resolved against the loaded catalog. The sidebar
+    /// badge and the Favorites list header both read this.
+    var favoriteSummary: FavoriteSummary {
+        FavoriteSummary.make(favoriteIds: favoriteIds, catalogIds: Set(api.models.map(\.id)))
+    }
+
+    var listHeaderText: String {
+        BrowserListHeader.text(
+            shown: filteredModels.count, showFavoritesOnly: showFavoritesOnly,
+            favorites: favoriteSummary, refined: hasActiveRefinements
+        )
+    }
+
+    /// True when the detail pane shows a model the current list doesn't
+    /// contain (kept while a search or filter hides it).
+    var selectionIsOutsideList: Bool {
+        guard let selectedModel else { return false }
+        return !filteredModels.contains { $0.id == selectedModel.id }
+    }
+
+    /// Called after a sidebar collection switch: never leave a model from
+    /// another collection in detail.
+    func reconcileSelectionForCollectionChange() {
+        switch SelectionReconciliation.forCollectionChange(
+            selectedID: selectedModel?.id, visibleIDs: filteredModels.map(\.id)
+        ) {
+        case .keep: break
+        case .select(let id): select(id: id)
+        case .clear: selectModel(nil)
+        }
+    }
+
     /// Last favorite/notes write failure, for tests and the toast.
     @Published private(set) var lastStorageError: String?
 
@@ -626,8 +658,11 @@ struct ContentView: View {
 
     private func applyFilterEffects(for section: SidebarSection) {
         let effects = AppRouter.filterEffects(for: section)
+        let changed = vm.showFavoritesOnly != effects.showFavoritesOnly
+            || vm.showNewThisWeek != effects.showNewThisWeek
         vm.showFavoritesOnly = effects.showFavoritesOnly
         vm.showNewThisWeek = effects.showNewThisWeek
+        if changed, section.isBrowser { vm.reconcileSelectionForCollectionChange() }
     }
 
     private func perform(_ action: ShellAction) {
@@ -761,6 +796,9 @@ struct ContentView: View {
         .badge(sidebarCount(section))
         .tag(section)
         .help(sidebarHelp(section))
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(section.title)
+        .accessibilityValue(SidebarAccessibility.value(count: sidebarCount(section), section: section))
     }
 
     @ViewBuilder
@@ -782,7 +820,7 @@ struct ContentView: View {
     private func sidebarCount(_ section: SidebarSection) -> Int {
         switch section {
         case .allModels: return vm.api.models.count
-        case .favorites: return vm.favoriteIds.count
+        case .favorites: return vm.favoriteSummary.available
         case .newThisWeek: return vm.newThisWeekCount
         default: return 0
         }
@@ -876,9 +914,16 @@ struct ContentView: View {
 
     private var statusBar: some View {
         HStack {
-            Text("\(vm.filteredModels.count) models")
+            Text(vm.listHeaderText)
                 .font(ORBFont.footnote.weight(.medium))
                 .foregroundStyle(.secondary)
+            if vm.showFavoritesOnly, let note = vm.favoriteSummary.unavailableNote {
+                Label(note, systemImage: "questionmark.circle")
+                    .font(ORBFont.caption)
+                    .foregroundStyle(.secondary)
+                    .help(vm.favoriteSummary.unavailableHelp ?? "")
+                    .accessibilityLabel(vm.favoriteSummary.unavailableHelp ?? note)
+            }
             Menu {
                 ForEach(ModelExportFormat.allCases) { format in
                     Button("Export as \(format.title)…") { perform(.exportModels(format)) }
@@ -965,6 +1010,7 @@ struct ContentView: View {
                 .tag(model)
             }
             .listStyle(.inset)
+            .accessibilityLabel("Models")
             .onChange(of: vm.selectedModel) { _, newValue in
                 vm.selectModel(newValue)
             }

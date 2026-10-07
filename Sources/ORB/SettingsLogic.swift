@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 // MARK: - Settings logic (Phase 7)
@@ -100,6 +101,36 @@ struct AppearancePrefs: Equatable {
     }
 }
 
+/// Applies the colour scheme at ONE boundary: the application's
+/// `NSAppearance`. Every window, AppKit control and SwiftUI view then resolves
+/// the same effective appearance.
+///
+/// SwiftUI's `.preferredColorScheme` is deliberately not used. Going back to
+/// `nil` after an explicit `.light` left Settings windows with a dark
+/// background but light-scheme text and controls (Light → System produced
+/// black text on dark surfaces). Setting `NSApp.appearance` and clearing any
+/// per-window override keeps background, text and controls in step.
+@MainActor
+enum AppAppearance {
+    static func appearanceName(for scheme: AppearancePrefs.Scheme) -> NSAppearance.Name? {
+        switch scheme {
+        case .system: return nil
+        case .light: return .aqua
+        case .dark: return .darkAqua
+        }
+    }
+
+    static func apply(_ scheme: AppearancePrefs.Scheme, to app: NSApplication = .shared) {
+        let target = appearanceName(for: scheme).flatMap(NSAppearance.init(named:))
+        if app.appearance?.name != target?.name { app.appearance = target }
+        // Windows inherit from the app only when they carry no override of
+        // their own; drop any stale one left by an earlier transition.
+        for window in app.windows where window.appearance != nil {
+            window.appearance = nil
+        }
+    }
+}
+
 /// Applies the saved appearance to a window's whole view tree.
 struct AppearanceModifier: ViewModifier {
     @AppStorage(AppearancePrefs.schemeKey) private var scheme = AppearancePrefs.Scheme.system.rawValue
@@ -113,7 +144,8 @@ struct AppearanceModifier: ViewModifier {
             density: .init(rawValue: density) ?? .comfortable
         )
         content
-            .preferredColorScheme(prefs.preferredColorScheme)
+            .onAppear { AppAppearance.apply(prefs.scheme) }
+            .onChange(of: scheme) { _, newValue in AppAppearance.apply(.init(rawValue: newValue) ?? .system) }
             .dynamicTypeSize(prefs.textSize.dynamicTypeSize)
             .environment(\.orbTextScale, prefs.textSize.scale)
             .controlSize(prefs.density.controlSize)
@@ -178,6 +210,8 @@ enum SettingsPane: String, CaseIterable, Identifiable {
 struct UsagePoint: Identifiable, Equatable {
     let label: String
     let cost: Double
+    /// Calendar day for daily series; nil for categorical (per-model) points.
+    var date: Date? = nil
     var id: String { label }
 }
 
@@ -195,7 +229,7 @@ enum UsageSeries {
         return (0..<max(days, 0)).reversed().compactMap { offset in
             calendar.date(byAdding: .day, value: -offset, to: endDay).map { date in
                 let label = formatter.string(from: date)
-                return UsagePoint(label: label, cost: byDay[label] ?? 0)
+                return UsagePoint(label: label, cost: byDay[label] ?? 0, date: date)
             }
         }
     }
@@ -208,6 +242,33 @@ enum UsageSeries {
         if rest > 0 { slices.append(UsagePoint(label: "Other", cost: rest)) }
         return slices
     }
+
+    /// Days between x-axis labels so a window never shows more than about
+    /// six of them: every day for a week, weekly for 30 days.
+    static func axisStride(days: Int) -> Int {
+        switch days {
+        case ...7: return 1
+        case ...14: return 2
+        default: return 7
+        }
+    }
+
+    /// Readable axis/hover date, e.g. "Oct 7".
+    static func shortDate(_ date: Date, calendar: Calendar = .current) -> String {
+        var style = Date.FormatStyle.dateTime.month(.abbreviated).day()
+        style.calendar = calendar
+        style.timeZone = calendar.timeZone
+        return date.formatted(style)
+    }
+
+    /// Header that states the chart's real window, which is independent of
+    /// the period picker for "All time".
+    static func chartTitle(days: Int, range: UsageRangeTitleKind) -> String {
+        let base = days == 1 ? "SPEND TODAY" : "SPEND PER DAY · LAST \(days) DAYS"
+        return range == .allTime ? base + " (ALL-TIME TOTALS BELOW)" : base
+    }
+
+    enum UsageRangeTitleKind { case bounded, allTime }
 
     static func accessibilitySummary(_ series: [UsagePoint]) -> String {
         let total = series.reduce(0) { $0 + $1.cost }

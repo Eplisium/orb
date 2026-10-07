@@ -54,7 +54,8 @@ struct SidebarAccountChip: View {
                     .font(.title3)
                 VStack(alignment: .leading, spacing: 1) {
                     Text(state.title).font(ORBFont.footnote.weight(.semibold)).lineLimit(1)
-                    Text(state.subtitle).font(ORBFont.caption).foregroundStyle(.secondary).lineLimit(1)
+                    Text(state.subtitle).font(ORBFont.caption).foregroundStyle(.secondary)
+                        .lineLimit(2).fixedSize(horizontal: false, vertical: true)
                 }
                 Spacer(minLength: 0)
                 Image(systemName: "gearshape").foregroundStyle(.secondary)
@@ -66,8 +67,9 @@ struct SidebarAccountChip: View {
         .buttonStyle(.plain)
         .background(.bar)
         .overlay(alignment: .top) { Divider() }
-        .help("Account and settings (⌘,)")
+        .help(state.help)
         .accessibilityLabel("Account and settings")
+        .accessibilityHint(state.help)
         .accessibilityValue(state.accessibilityValue)
         .task {
             if account.hasManagementKey { await account.fetchCredits() }

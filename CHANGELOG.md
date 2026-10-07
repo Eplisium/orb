@@ -29,6 +29,18 @@ All notable changes to ORB are listed here. The format is based on [Keep a Chang
 - Sortable Test Suite results with a verdict legend.
 - Design tokens, accent color choice, and shared components.
 
+### Fixed (hands-on UI audit, 2026-10-07)
+- Theme: switching Light → System no longer leaves black text and light controls on dark Settings surfaces. Appearance is applied once at the app level (`NSApp.appearance`) instead of per-window `preferredColorScheme`.
+- Favorites: the sidebar badge and the list header now count the same resolved favorites. Favorites missing from the current catalog show as "N unavailable" with an explanation; they are kept, not deleted.
+- Model browser: switching between All Models, Favorites and New This Week no longer leaves a model from another collection in detail. A selection hidden by a search or filter is labelled "Not in the current list".
+- Accounts & Keys: the first section is now "Inference Key" and describes Chat, Agent and Generate. Credits and activity are only described under the management key.
+- MCP settings: copy now matches the real policy (offered to the Agent only with Computer Access, each call needs approval) and each server shows its availability. README limitations updated.
+- Accessibility: model rows and sidebar destinations expose a name, provider, favorite/compare state and counts; model-detail actions name their model.
+- Usage chart: dated x-axis with readable "Oct 7" labels at most weekly, hover readout of each day's spend, and a title that states the real 30-day window under All Time.
+- Images: result cards no longer show a duplicate Save button next to Export. Saved results offer "View in Library". In chat, the image button is now "Export…".
+- Library: list rows show thumbnails, a short title from the prompt and a content tag (`#a1b2c3`) shared by list and grid, with the full prompt in the tooltip.
+- Sidebar copy: the account chip says "Management key needed" with the full hint in its tooltip; Chat/Agent subtitles fit; session rows show their full title on hover.
+
 ### Fixes
 - Inspector attached to the pane root, sidebar header truncation, uniform Library grid, and no stray focus ring.
 

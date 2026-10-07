@@ -59,9 +59,10 @@ struct MCPSettingsView: View {
             VStack(alignment: .leading, spacing: 1) {
                 Text("MCP Servers")
                     .font(.headline)
-                Text("Model Context Protocol tools become available to the agent automatically.")
+                Text(MCPAgentAvailability.header)
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
             Spacer()
             if !isEmbedded {
@@ -115,6 +116,12 @@ struct MCPSettingsView: View {
                 .buttonStyle(.plain)
                 .accessibilityLabel("Remove server")
             }
+
+            Label(MCPAgentAvailability.status(isEnabled: config.wrappedValue.isEnabled),
+                  systemImage: config.wrappedValue.isEnabled ? "checkmark.shield" : "minus.circle")
+                .orbFont(size: 11)
+                .foregroundStyle(.secondary)
+                .help(MCPAgentAvailability.header)
 
             TextField("Command (e.g. npx)", text: config.command)
                 .textFieldStyle(.roundedBorder)
@@ -366,5 +373,19 @@ struct MCPSettingsView: View {
                 status[row.name] = row.error ?? "✓ Connected — \(row.toolCount) tool(s)"
             }
         }
+    }
+}
+
+/// Truthful copy for what an MCP server actually grants. Mirrors
+/// `ToolPolicy.agentSession`: an enabled server is the per-server approval,
+/// tools are offered only with the Agent's Computer Access capability, and
+/// every call still goes through the approval prompt (unless OP Mode).
+enum MCPAgentAvailability {
+    static let header = "Enabled servers' tools are offered to the Agent only when Computer Access is on. Each tool call asks for your approval first (OP Mode skips the prompt). Web Only never uses MCP."
+
+    static func status(isEnabled: Bool) -> String {
+        isEnabled
+            ? "Enabled: offered to the Agent with Computer Access, each call needs approval"
+            : "Off: never offered to the Agent"
     }
 }

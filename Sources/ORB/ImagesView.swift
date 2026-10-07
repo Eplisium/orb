@@ -505,11 +505,11 @@ struct ImagesView: View {
             Group {
                 if let savedCreation {
                     AssistantImageRow(images: [result.attachment], accent: accent,
-                                      onReusePrompt: { prompt = $0 })
+                                      onReusePrompt: { prompt = $0 }, showsExport: false)
                         .creationDrag(savedCreation, store: saved)
                 } else {
                     AssistantImageRow(images: [result.attachment], accent: accent,
-                                      onReusePrompt: { prompt = $0 })
+                                      onReusePrompt: { prompt = $0 }, showsExport: false)
                 }
             }
             Text(result.modelId)
@@ -518,6 +518,10 @@ struct ImagesView: View {
             HStack {
                 if result.savedID != nil {
                     Label("Saved in ORB", systemImage: "checkmark.circle.fill").foregroundStyle(.green)
+                        .accessibilityLabel("Saved in the ORB library")
+                    Button("View in Library") { showLibrary() }
+                        .buttonStyle(.link)
+                        .help("Open Files → Saved creations")
                     if let savedCreation { CreationActionsMenu(creation: savedCreation, store: saved) }
                 } else {
                     Button("Retry save") { Task { await persist(result.id) } }

@@ -158,7 +158,7 @@ struct AgentView: View {
         VStack(spacing: 0) {
             ConversationSidebarHeader(
                 title: "Agent",
-                subtitle: "Native function-calling agent",
+                subtitle: "Tool-using agent",
                 icon: "wand.and.stars",
                 accent: accent,
                 onNew: { newConversation() },

@@ -11,6 +11,7 @@ struct UsageSettingsView: View {
     @State private var days: [UsageBucket] = []
     @State private var months: [UsageBucket] = []
     @State private var firstDate: Date?
+    @State private var hoveredDay: Date?
 
     let accent: Color
 
@@ -91,16 +92,31 @@ struct UsageSettingsView: View {
         let slices = UsageSeries.topModels(models, limit: 5)
         VStack(alignment: .leading, spacing: 16) {
             VStack(alignment: .leading, spacing: 6) {
-                Text("SPEND PER DAY (LAST \(chartDays))").font(.caption.bold()).foregroundStyle(.secondary)
-                Chart(series) { point in
-                    BarMark(x: .value("Day", point.label), y: .value("Spend", point.cost))
-                        .foregroundStyle(accent)
+                HStack(alignment: .firstTextBaseline) {
+                    Text(UsageSeries.chartTitle(days: chartDays, range: range == .allTime ? .allTime : .bounded))
+                        .font(.caption.bold()).foregroundStyle(.secondary)
+                    Spacer()
+                    if let hovered = hoverPoint(in: series), let date = hovered.date {
+                        Text("\(UsageSeries.shortDate(date)): \(Self.money(hovered.cost))")
+                            .font(.caption.monospacedDigit()).foregroundStyle(.primary)
+                    }
                 }
-                .chartXAxis { AxisMarks(values: .automatic(desiredCount: 4)) }
+                Chart(series.filter { $0.date != nil }) { point in
+                    BarMark(x: .value("Day", point.date ?? Date(), unit: .day), y: .value("Spend", point.cost))
+                        .foregroundStyle(accent.opacity(hoveredDay == nil || isHovered(point) ? 1 : 0.45))
+                        .accessibilityLabel(point.date.map { UsageSeries.shortDate($0) } ?? point.label)
+                        .accessibilityValue(Self.money(point.cost))
+                }
+                .chartXAxis {
+                    AxisMarks(values: .stride(by: .day, count: UsageSeries.axisStride(days: chartDays))) { _ in
+                        AxisGridLine()
+                        AxisValueLabel(format: .dateTime.month(.abbreviated).day(), centered: true)
+                    }
+                }
                 .chartYAxis { AxisMarks { v in AxisGridLine(); AxisValueLabel { if let d = v.as(Double.self) { Text(Self.money(d)) } } } }
-                .frame(height: 120)
-                .accessibilityLabel("Spend per day")
-                .accessibilityValue(UsageSeries.accessibilitySummary(series))
+                .chartXSelection(value: $hoveredDay)
+                .frame(height: 130)
+                .help("Hover a bar to see that day's spend")
             }
             if !slices.isEmpty {
                 VStack(alignment: .leading, spacing: 6) {
@@ -118,6 +134,16 @@ struct UsageSettingsView: View {
         }
         .padding(14)
         .background(.orbSurface(0.03), in: RoundedRectangle(cornerRadius: 12))
+    }
+
+    private func isHovered(_ point: UsagePoint) -> Bool {
+        guard let hoveredDay, let date = point.date else { return false }
+        return Calendar.current.isDate(date, inSameDayAs: hoveredDay)
+    }
+
+    private func hoverPoint(in series: [UsagePoint]) -> UsagePoint? {
+        guard hoveredDay != nil else { return nil }
+        return series.first(where: isHovered)
     }
 
     private func reload() {

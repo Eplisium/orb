@@ -151,7 +151,7 @@ struct ChatView: View {
         VStack(spacing: 0) {
             ConversationSidebarHeader(
                 title: "Chat",
-                subtitle: "Direct OpenRouter completion",
+                subtitle: "Direct model chat",
                 icon: "bubble.left.fill",
                 accent: accent,
                 onNew: { newConversation() },

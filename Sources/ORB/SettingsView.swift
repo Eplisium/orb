@@ -216,10 +216,10 @@ struct SettingsView: View {
 
     private var apiKeySection: some View {
         VStack(alignment: .leading, spacing: 16) {
-            Label("API Key", systemImage: "key.fill")
+            Label("Inference Key", systemImage: "key.fill")
                 .orbFont(size: 17, weight: .semibold)
 
-            Text("Your OpenRouter API key is stored securely in the macOS Keychain. It's used for authenticated features like checking credits and sending chat messages.")
+            Text(ManagementKeyPanel.inferenceExplanation)
                 .font(.callout)
                 .foregroundStyle(.secondary)
 
@@ -229,7 +229,7 @@ struct SettingsView: View {
             HStack {
                 Image(systemName: KeychainManager.hasAPIKey ? "checkmark.circle.fill" : "exclamationmark.circle.fill")
                     .foregroundStyle(KeychainManager.hasAPIKey ? Color.green : Color.red)
-                Text(KeychainManager.hasAPIKey ? "API key configured" : "No API key set")
+                Text(KeychainManager.hasAPIKey ? "Inference key configured" : "No inference key set")
                     .font(.subheadline.weight(.medium))
 
                 Spacer()
@@ -246,7 +246,7 @@ struct SettingsView: View {
 
             // Key input
             VStack(alignment: .leading, spacing: 8) {
-                Text("Enter API Key")
+                Text("Enter Inference Key")
                     .font(.subheadline.weight(.medium))
 
                 HStack {
@@ -723,7 +723,10 @@ struct ManagementKeyPanel {
 
     // MARK: Copy (section 7.7 — confirmations name the exact target and effect)
 
-    static let explanation = "A management key unlocks account-wide credits, usage activity, and administration on OpenRouter. Chat and media generation keep working with your inference key — they never use this one."
+    /// Inference-key copy: what it powers, and explicitly what it doesn't.
+    static let inferenceExplanation = "Your OpenRouter inference (API) key is stored in the macOS Keychain. ORB uses it for Chat, Agent, and Generate (images, video, speech, embeddings). Account-wide credits and activity need the optional management key below."
+
+    static let explanation = "Optional. A management key unlocks account-wide credits, usage activity, and administration on OpenRouter. Chat and media generation keep working with your inference key — they never use this one."
 
     static let removeTitle = "Remove the management key?"
 

@@ -110,6 +110,13 @@ final class FocusManager: ObservableObject {
 }
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
+    /// Set the saved colour scheme before the first window draws, so no
+    /// window ever renders a frame in the wrong appearance.
+    @MainActor
+    func applicationWillFinishLaunching(_ notification: Notification) {
+        AppAppearance.apply(AppearancePrefs.load().scheme)
+    }
+
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         .terminateNow
     }

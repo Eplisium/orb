@@ -31,11 +31,14 @@ struct AssistantImageRow: View {
     let images: [ChatImageAttachment]
     let accent: Color
     var onReusePrompt: ((String) -> Void)? = nil
+    /// Hosts that already offer their own Export action (the Images studio)
+    /// turn this off so a card never shows two ways to do the same thing.
+    var showsExport = true
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             ForEach(images) { image in
-                AssistantImageCard(image: image, accent: accent, onReusePrompt: onReusePrompt)
+                AssistantImageCard(image: image, accent: accent, onReusePrompt: onReusePrompt, showsExport: showsExport)
             }
         }
     }
@@ -45,6 +48,7 @@ private struct AssistantImageCard: View {
     let image: ChatImageAttachment
     let accent: Color
     var onReusePrompt: ((String) -> Void)? = nil
+    var showsExport = true
 
     @State private var nsImage: NSImage?
     @State private var isLoading = true
@@ -116,17 +120,20 @@ private struct AssistantImageCard: View {
                     }
                 }
             }
-            HStack(spacing: 8) {
-                Spacer()
-                Button {
-                    saveImage()
-                } label: {
-                    Label(showSaved ? "Saved" : "Save", systemImage: showSaved ? "checkmark" : "square.and.arrow.down")
-                        .font(.caption)
+            if showsExport {
+                HStack(spacing: 8) {
+                    Spacer()
+                    Button {
+                        saveImage()
+                    } label: {
+                        Label(showSaved ? "Exported" : "Export…", systemImage: showSaved ? "checkmark" : "square.and.arrow.up")
+                            .font(.caption)
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(showSaved ? .green : accent)
+                    .disabled(nsImage == nil)
+                    .help("Save a copy of this image to a folder on your Mac")
                 }
-                .buttonStyle(.plain)
-                .foregroundStyle(showSaved ? .green : accent)
-                .disabled(nsImage == nil)
             }
         }
     }
@@ -134,7 +141,7 @@ private struct AssistantImageCard: View {
     private func saveImage() {
         guard let nsImage else { return }
         let panel = NSSavePanel()
-        panel.title = "Save Image"
+        panel.title = "Export Image"
         panel.nameFieldStringValue = "orb-image.\(image.fileExtension)"
         if panel.runModal() == .OK, let url = panel.url {
             guard let tiff = nsImage.tiffRepresentation,

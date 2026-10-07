@@ -210,3 +210,56 @@ enum LibraryDelete {
         "Deleted \(count) creation\(count == 1 ? "" : "s")"
     }
 }
+
+// MARK: - Creation identity (list and grid share it)
+
+/// A short, scannable title plus a stable variant tag, so variants generated
+/// from one long prompt are distinguishable at a glance. The full prompt is
+/// never altered; it stays available as a tooltip, in the context menu and
+/// in accessibility.
+enum CreationIdentity {
+    static let maxTitleLength = 48
+
+    /// First sentence/line of the prompt, shortened at a word boundary.
+    /// Falls back to "<Kind> from <model>" when there is no prompt.
+    static func title(for c: SavedCreation) -> String {
+        let prompt = (c.prompt ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !prompt.isEmpty else {
+            let model = c.modelID.split(separator: "/").last.map(String.init) ?? c.modelID
+            return "\(c.kind.title) from \(model)"
+        }
+        let firstLine = prompt.split(whereSeparator: \.isNewline).first.map(String.init) ?? prompt
+        var sentence = firstLine
+        if let end = firstLine.firstIndex(where: { ".!?".contains($0) }),
+           firstLine.distance(from: firstLine.startIndex, to: end) >= 12 {
+            sentence = String(firstLine[..<end])
+        }
+        sentence = sentence.trimmingCharacters(in: .whitespaces)
+        guard sentence.count > maxTitleLength else { return sentence }
+        let cut = sentence.prefix(maxTitleLength)
+        let trimmed = cut.lastIndex(of: " ").map { cut[..<$0] } ?? cut
+        return trimmed.trimmingCharacters(in: CharacterSet(charactersIn: " ,;:-")) + "…"
+    }
+
+    /// Six hex characters of the content checksum: identical tags mean the
+    /// identical stored file; different tags mean distinct variants.
+    static func variantTag(for c: SavedCreation) -> String {
+        let hex = c.checksum.lowercased().filter { $0.isHexDigit }
+        return hex.isEmpty ? String(c.id.uuidString.prefix(6)).lowercased() : String(hex.prefix(6))
+    }
+
+    /// "Image · gpt-image-1 · Oct 7, 3:41 PM · #a1b2c3"
+    static func metadata(for c: SavedCreation, includeKind: Bool = true) -> String {
+        let model = c.modelID.split(separator: "/").last.map(String.init) ?? c.modelID
+        var parts: [String] = []
+        if includeKind { parts.append(c.kind.title) }
+        parts.append(model)
+        parts.append(c.createdAt.formatted(date: .abbreviated, time: .shortened))
+        parts.append("#" + variantTag(for: c))
+        return parts.joined(separator: " · ")
+    }
+
+    static func accessibilityLabel(for c: SavedCreation) -> String {
+        "\(c.kind.title): \(title(for: c)), \(metadata(for: c, includeKind: false))"
+    }
+}

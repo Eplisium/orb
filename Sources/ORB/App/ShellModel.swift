@@ -159,11 +159,19 @@ struct AccountChipState: Equatable {
     var systemImage: String { isLow ? "exclamationmark.triangle.fill" : "person.crop.circle.fill" }
     var accessibilityValue: String { "\(title), \(subtitle)" }
 
+    /// Full explanation for the tooltip; the subtitle itself stays short
+    /// enough for the default sidebar width.
+    var help: String {
+        subtitle == "Management key needed"
+            ? "Add an optional management key in Settings → Accounts & Keys to see credits and activity (⌘,)"
+            : "Account and settings (⌘,)"
+    }
+
     static let lowBalanceThreshold = 1.0
 
     static func make(hasManagementKey: Bool, remaining: Double?, isLoading: Bool, hasError: Bool) -> AccountChipState {
         guard hasManagementKey else {
-            return AccountChipState(title: "Account", subtitle: "Add a management key for credits", isLow: false)
+            return AccountChipState(title: "Account", subtitle: "Management key needed", isLow: false)
         }
         if let remaining {
             let low = remaining < lowBalanceThreshold
