@@ -287,7 +287,7 @@ struct AgentView: View {
                     .foregroundStyle(ORBTheme.warning)
                     .padding(.horizontal, 9).padding(.vertical, 6)
                     .background(ORBTheme.warning.opacity(0.12), in: Capsule())
-                    .help("OP Mode is on: risky tools run without asking. Change it in Settings > Advanced.")
+                    .help("OP Mode is on: risky tools run without asking, and the agent can inspect and manage ORB itself (sessions, usage, settings, MCP). Change it in Settings > Advanced.")
             }
 
             ConversationMeterView(conversation: chatService.activeConversation)

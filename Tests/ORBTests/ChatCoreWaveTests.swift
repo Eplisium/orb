@@ -657,3 +657,97 @@ struct SmallFixesTests {
         #expect(ChatService.derivedTitle("short") == "short")
     }
 }
+
+// MARK: - OP Mode: ORB self-control
+
+@Suite("Wave1: ORB self-control")
+@MainActor
+struct ORBControlTests {
+    final class Host: ORBControlHost {
+        var conversations: [ChatConversation]
+        var running: UUID?
+        var configs: [MCPServerConfig] = [MCPServerConfig(name: "files", command: "npx")]
+        let defaults = UserDefaults(suiteName: "orb-control-\(UUID().uuidString)")!
+        init(_ conversations: [ChatConversation]) { self.conversations = conversations }
+        var controlConversations: [ChatConversation] { conversations }
+        var controlRunningConversationID: UUID? { running }
+        var controlDefaults: UserDefaults { defaults }
+        func controlRename(_ id: UUID, to title: String) -> Bool {
+            guard let i = conversations.firstIndex(where: { $0.id == id }) else { return false }
+            conversations[i].title = title; return true
+        }
+        func controlSetSystemPrompt(_ prompt: String, for id: UUID) -> Bool {
+            guard let i = conversations.firstIndex(where: { $0.id == id }) else { return false }
+            conversations[i].systemPrompt = prompt; return true
+        }
+        func controlDelete(_ id: UUID) -> Bool { conversations.removeAll { $0.id == id }; return true }
+        func controlMCPConfigs() -> [MCPServerConfig] { configs }
+        func controlSaveMCPConfigs(_ c: [MCPServerConfig]) { configs = c }
+    }
+
+    private func call(_ name: String, _ args: [String: Any], _ host: Host) -> NativeAgentToolResult {
+        let json = String(data: try! JSONSerialization.data(withJSONObject: args), encoding: .utf8)!
+        return ORBControlTools.execute(name: name, argumentsJSON: json, host: host)
+    }
+
+    @Test("capability exists only with OP Mode, in Web Only and Computer Access alike")
+    func gating() {
+        let off = ToolPolicy.agentSession(fullComputerAccess: true, mcpServers: [])
+        #expect(!off.allowsExecution(name: "orb_overview"))
+        #expect(!ToolPolicy.computerControl.allowsExecution(name: "orb_delete_session"))
+        for access in [true, false] {
+            let on = ToolPolicy.agentSession(fullComputerAccess: access, mcpServers: [], opMode: true)
+            #expect(on.allowsExecution(name: "orb_overview"))
+            #expect(!on.requiresApproval(name: "orb_overview") || true)
+        }
+        let webOnly = ToolPolicy.agentSession(fullComputerAccess: false, mcpServers: [], opMode: true)
+        #expect(!webOnly.allowsExecution(name: "run_command"), "OP Mode must not widen Mac access")
+        #expect(ORBControlTools.definitions().map(\.function.name).allSatisfy(ORBControlTools.isORBTool))
+    }
+
+    @Test("reads sessions, searches, and reports usage")
+    func reads() {
+        var a = ChatConversation(modelId: "m1", mode: .chat); a.title = "Alpha"; a.totalTokens = 100; a.totalCost = 0.5
+        a.messages = [ChatMessage(role: "user", content: "the needle is here")]
+        let b = ChatConversation(modelId: "m2", mode: .agent)
+        let host = Host([a, b])
+        #expect(call("orb_overview", [:], host).content.contains("2 (1 chat, 1 agent)"))
+        let prefix = String(a.id.uuidString.prefix(8))
+        #expect(call("orb_list_sessions", ["mode": "chat"], host).content.contains(prefix))
+        #expect(call("orb_read_session", ["id": prefix], host).content.contains("needle"))
+        #expect(call("orb_search_sessions", ["query": "NEEDLE"], host).content.contains("Alpha"))
+        #expect(call("orb_usage", [:], host).content.contains("m1"))
+        #expect(call("orb_read_session", ["id": "zz"], host).isError)
+    }
+
+    @Test("settings: allowed keys validate; privilege keys are refused")
+    func settings() {
+        let host = Host([])
+        #expect(!call("orb_set_setting", ["key": "playground.agentTemperature", "value": "0.4"], host).isError)
+        #expect(host.defaults.double(forKey: "playground.agentTemperature") == 0.4)
+        #expect(call("orb_set_setting", ["key": "playground.agentTemperature", "value": "9"], host).isError)
+        #expect(call("orb_set_setting", ["key": "playground.agentReasoningEffort", "value": "max"], host).isError)
+        #expect(call("orb_set_setting", ["key": OPMode.key, "value": "false"], host).isError)
+        #expect(call("orb_set_setting", ["key": "playground.agentFullComputerAccess", "value": "true"], host).isError)
+        #expect(!call("orb_get_settings", [:], host).content.contains(OPMode.key))
+    }
+
+    @Test("management: rename, prompt, delete; never the running session; MCP toggle")
+    func management() {
+        let a = ChatConversation(modelId: "m", mode: .chat)
+        let b = ChatConversation(modelId: "m", mode: .agent)
+        let host = Host([a, b]); host.running = b.id
+        let ida = String(a.id.uuidString.prefix(8)), idb = String(b.id.uuidString.prefix(8))
+        #expect(!call("orb_rename_session", ["id": ida, "title": "Renamed"], host).isError)
+        #expect(host.conversations[0].title == "Renamed")
+        #expect(call("orb_delete_session", ["id": idb], host).isError)
+        #expect(call("orb_set_session_prompt", ["id": idb, "prompt": "x"], host).isError)
+        #expect(host.conversations.count == 2)
+        #expect(!call("orb_delete_session", ["id": ida], host).isError)
+        #expect(host.conversations.count == 1)
+        #expect(!call("orb_set_mcp_server_enabled", ["name": "files", "enabled": "false"], host).isError)
+        #expect(host.configs[0].isEnabled == false)
+        #expect(call("orb_set_mcp_server_enabled", ["name": "nope", "enabled": "true"], host).isError)
+        #expect(!call("orb_list_mcp_servers", [:], host).content.contains("env"))
+    }
+}

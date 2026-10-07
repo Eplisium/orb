@@ -70,7 +70,7 @@ final class ChatService: ObservableObject {
     private let agentMaximumTurns: Int
     /// Source of MCP server configs for the Agent tool policy. Injected so
     /// tests never read the user's real MCP settings.
-    private let mcpServerProvider: () -> [MCPServerConfig]
+    let mcpServerProvider: () -> [MCPServerConfig]
     /// The policy handed to the most recent Agent run (diagnostics/tests).
     private(set) var lastAgentPolicy: ToolPolicy?
     /// Risky agent tools (terminal, computer control, MCP) wait here for the user.
@@ -944,8 +944,11 @@ final class ChatService: ObservableObject {
         }
         let history = agentHistories[conversationID] ?? []
         let customPrompt = conversations[index].systemPrompt
-        let policy = ToolPolicy.agentSession(fullComputerAccess: fullComputerAccess, mcpServers: mcpServerProvider())
+        let opMode = OPMode.isEnabled()
+        let policy = ToolPolicy.agentSession(fullComputerAccess: fullComputerAccess, mcpServers: mcpServerProvider(), opMode: opMode)
         lastAgentPolicy = policy
+        let orbControl: (@Sendable (String, String) async -> NativeAgentToolResult)? = opMode
+            ? makeORBControlExecutor() : nil
         streamTask = Task { [weak self] in
             guard let self else { return }
             do {
@@ -958,6 +961,7 @@ final class ChatService: ObservableObject {
                     policy: policy,
                     approvals: OPMode.approvals(self.approvals),
                     settings: settings,
+                    orbControl: orbControl,
                     onEvent: { event in
                         let arrival = NativeAgentRunner.eventArrival ?? Date()
                         await self.receiveAgent(event, context: context, at: arrival)
@@ -1145,6 +1149,15 @@ final class ChatService: ObservableObject {
         agentReasoningCoalescer?.flush()
         agentDetailCoalescer?.flush()
         agentToolPreviewCoalescer?.flush()
+    }
+
+    private func makeORBControlExecutor() -> @Sendable (String, String) async -> NativeAgentToolResult {
+        { [weak self] name, arguments in
+            await MainActor.run { () -> NativeAgentToolResult in
+                guard let self else { return NativeAgentToolResult(content: "ORB is shutting down.", isError: true) }
+                return ORBControlTools.execute(name: name, argumentsJSON: arguments, host: self)
+            }
+        }
     }
 
     func exportActiveConversation() -> String? {

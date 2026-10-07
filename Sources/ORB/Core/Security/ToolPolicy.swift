@@ -30,6 +30,9 @@ enum ToolCapability: String, Codable, Sendable, CaseIterable {
     case mediaGeneration
     /// Every MCP-namespaced tool, further gated by per-server approval.
     case mcp
+    /// Inspect and manage ORB itself (sessions, usage, settings, MCP toggles).
+    /// Granted only by OP Mode; never part of Computer Access.
+    case orbControl
 }
 
 /// The single authorization point for the native agent's toolbox.
@@ -71,7 +74,9 @@ struct ToolPolicy: Sendable, Equatable {
     )
 
     /// Everything ORB can do locally; MCP tools still require per-server approval.
-    static let computerControl = ToolPolicy(capabilities: Set(ToolCapability.allCases), constrainsFilesystem: false)
+    static let computerControl = ToolPolicy(
+        capabilities: Set(ToolCapability.allCases).subtracting([.orbControl]), constrainsFilesystem: false
+    )
 
     /// Compatibility mapping for the pre-policy two-level UI switch.
     static func legacy(fullComputerAccess: Bool) -> ToolPolicy {
@@ -82,8 +87,11 @@ struct ToolPolicy: Sendable, Equatable {
     /// Settings is the per-server approval; every MCP call still prompts
     /// unless the user approves it for the run. Web Only never gains MCP
     /// (it lacks the `.mcp` capability), so the list is ignored there.
-    static func agentSession(fullComputerAccess: Bool, mcpServers: [MCPServerConfig]) -> ToolPolicy {
+    static func agentSession(fullComputerAccess: Bool, mcpServers: [MCPServerConfig], opMode: Bool = false) -> ToolPolicy {
         var policy = legacy(fullComputerAccess: fullComputerAccess)
+        // OP Mode adds ORB self-control. It works even in Web Only: it never
+        // touches the Mac, only ORB's own data and settings.
+        if opMode { policy = policy.adding(.orbControl) }
         guard policy.capabilities.contains(.mcp) else { return policy }
         policy.approvedMCPServers = Set(
             mcpServers.filter(\.isEnabled).map { MCPToolNaming.sanitize($0.name) }
@@ -98,6 +106,16 @@ struct ToolPolicy: Sendable, Equatable {
         capabilities: [.web, .memory, .planning, .workspaceRead, .workspaceWrite, .approvedTerminal],
         constrainsFilesystem: true
     )
+
+    func adding(_ capability: ToolCapability) -> ToolPolicy {
+        var copy = ToolPolicy(
+            capabilities: capabilities.union([capability]),
+            approvedMCPServers: approvedMCPServers,
+            constrainsFilesystem: constrainsFilesystem
+        )
+        copy.approvedMCPServers = approvedMCPServers
+        return copy
+    }
 
     func allowsDefinition(name: String) -> Bool {
         allowsExecution(name: name)
@@ -142,6 +160,7 @@ struct ToolPolicy: Sendable, Equatable {
         case "remember", "recall": return .memory
         case "plan_tasks": return .planning
         case "generate_image", "speak_text": return .mediaGeneration
+        case _ where ORBControlTools.isORBTool(name): return .orbControl
         default: return nil
         }
     }

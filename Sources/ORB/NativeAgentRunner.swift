@@ -33,11 +33,22 @@ enum NativeAgentRunner {
         /// Sampling for every turn. Unset values are omitted so the
         /// provider's defaults apply (never a hardcoded temperature).
         settings: GenerationSettings = .agentDefault,
+        /// Runs ORB self-control tools (OP Mode). Nil = not available.
+        orbControl: (@Sendable (String, String) async -> NativeAgentToolResult)? = nil,
         onEvent: @escaping @Sendable (NativeAgentEvent) async -> Void
     ) async throws -> NativeAgentRunResult {
         let effectivePolicy = policy ?? ToolPolicy.legacy(fullComputerAccess: fullComputerAccess)
         let custom = systemPromptOverride?.trimmingCharacters(in: .whitespacesAndNewlines)
         var promptText = systemPrompt(workspace: workspace, fullComputerAccess: fullComputerAccess)
+        if effectivePolicy.capabilities.contains(.orbControl) {
+            promptText += """
+
+
+            ORB control (OP Mode): orb_* functions let you inspect and manage ORB itself — sessions, usage, settings, MCP servers. \
+            Read before you change, never delete or rewrite sessions the user did not ask about, and report exactly what you changed. \
+            Secrets and OP Mode itself are off limits.
+            """
+        }
         if let custom, !custom.isEmpty {
             promptText += "\n\n--- Additional user instructions ---\n\(custom)\n--- End additional user instructions ---"
         }
@@ -49,7 +60,7 @@ enum NativeAgentRunner {
         // full native list is generated once and filtered, so a Web Only
         // session neither exposes nor can invoke local or MCP tools, and a
         // policy change invalidates stale definitions immediately.
-        var definitions = NativeAgentTools.definitions(fullComputerAccess: true)
+        var definitions = (NativeAgentTools.definitions(fullComputerAccess: true) + ORBControlTools.definitions())
             .filter { effectivePolicy.allowsDefinition(name: $0.function.name) }
         // Fold in tools published by connected MCP servers. Native tools win on
         // a name collision because the MCP names are namespaced. Every MCP
@@ -71,6 +82,12 @@ enum NativeAgentRunner {
                 let result = await MCPRegistry.shared.call(
                     qualifiedName: call.name, argumentsJSON: call.arguments
                 )
+                try Task.checkCancellation()
+                return result
+            }
+            if ORBControlTools.isORBTool(call.name) {
+                guard let orbControl else { return .init(content: "ORB control is not available in this session.", isError: true) }
+                let result = await orbControl(call.name, call.arguments)
                 try Task.checkCancellation()
                 return result
             }
