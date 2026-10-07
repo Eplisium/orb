@@ -145,8 +145,11 @@ struct UsageSeriesTests {
         let rows = (1...8).map { bucket("m\($0)", cost: Double(9 - $0)) }
         let slices = UsageSeries.topModels(rows, limit: 3)
         #expect(slices.map(\.label) == ["m1", "m2", "m3", "Other"])
-        #expect(slices.last?.cost == rows.dropFirst(3).reduce(0) { $0 + $1.cost })
-        #expect(abs(slices.reduce(0) { $0 + $1.cost } - rows.reduce(0) { $0 + $1.cost }) < 0.0001)
+        let otherTotal: Double = rows.dropFirst(3).reduce(0) { $0 + $1.cost }
+        #expect(slices.last?.cost == otherTotal)
+        let sliceTotal: Double = slices.reduce(0) { $0 + $1.cost }
+        let rowTotal: Double = rows.reduce(0) { $0 + $1.cost }
+        #expect(abs(sliceTotal - rowTotal) < 0.0001)
     }
 
     @Test("No Other slice when everything fits, and zero-cost models are not charted")

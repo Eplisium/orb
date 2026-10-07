@@ -142,7 +142,8 @@ struct ChatServiceTests {
         try await waitUntilIdle(service)
         let message = try #require(service.activeConversation?.messages.last)
         #expect(message.displayTranscript.map(\.kind) == [.reasoning, .text, .reasoning, .text])
-        #expect(message.displayTranscript.filter { $0.kind == .text }.map(\.text).joined() == message.content)
+        let transcriptText: String = message.displayTranscript.filter { $0.kind == .text }.map(\.text).joined()
+        #expect(transcriptText == message.content)
     }
 
     @Test("first Chat send creates a Chat conversation")

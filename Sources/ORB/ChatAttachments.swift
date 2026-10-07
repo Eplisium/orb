@@ -254,24 +254,35 @@ enum PasteboardAttachments {
 final class ComposerPasteMonitor {
     private var monitor: Any?
 
+    /// Returns nil when the paste was consumed as attachments, otherwise the
+    /// original event so normal text paste continues.
+    @MainActor
+    private static func handlePaste(_ event: NSEvent, isActive: @MainActor () -> Bool,
+                                    onAttach: @MainActor ([URL]) -> Void,
+                                    onError: @MainActor (String) -> Void) -> NSEvent? {
+        let pasteboard = NSPasteboard.general
+        guard isActive(), PasteboardAttachments.hasAttachments(pasteboard) else { return event }
+        do {
+            let urls = try PasteboardAttachments.urls(from: pasteboard)
+            guard !urls.isEmpty else { return event }
+            onAttach(urls)
+        } catch {
+            let message = "Could not paste the image: " + error.localizedDescription
+            onError(message)
+        }
+        return nil
+    }
+
     func install(isActive: @escaping @MainActor () -> Bool, onAttach: @escaping @MainActor ([URL]) -> Void,
                  onError: @escaping @MainActor (String) -> Void) {
         remove()
         monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
             guard event.modifierFlags.intersection(.deviceIndependentFlagsMask) == .command,
                   event.charactersIgnoringModifiers?.lowercased() == "v" else { return event }
-            return MainActor.assumeIsolated {
-                let pasteboard = NSPasteboard.general
-                guard isActive(), PasteboardAttachments.hasAttachments(pasteboard) else { return event }
-                do {
-                    let urls = try PasteboardAttachments.urls(from: pasteboard)
-                    guard !urls.isEmpty else { return event }
-                    onAttach(urls)
-                } catch {
-                    onError("Could not paste the image: \(error.localizedDescription)")
-                }
-                return nil
+            let handled: NSEvent? = MainActor.assumeIsolated {
+                Self.handlePaste(event, isActive: isActive, onAttach: onAttach, onError: onError)
             }
+            return handled
         }
     }
 

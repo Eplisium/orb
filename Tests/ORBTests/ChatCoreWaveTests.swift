@@ -249,7 +249,8 @@ struct ModelSwitchTests {
         let firstID = try #require(service.activeConversation?.id)
         try await send("two", "test/b")
         #expect(service.activeConversation?.id == firstID)
-        #expect(service.conversations.filter { $0.mode == mode }.count == 1)
+        let modeCount: Int = service.conversations.filter { $0.mode == mode }.count
+        #expect(modeCount == 1)
         #expect(service.activeConversation?.messages.count == 4)
         #expect(service.activeConversation?.modelId == "test/b")
         #expect(store.records[firstID]?.conversation.modelId == "test/b")
@@ -295,7 +296,8 @@ struct WireHistoryTests {
         let wire = try #require(await client.requests.last?.messages)
         let assistants = wire.filter { $0.role == "assistant" }
         #expect(assistants.map(\.content) == ["good"])
-        #expect(wire.filter { $0.role == "user" }.map(\.content) == ["q1", "q2", "q3", "q4"])
+        let userContents = wire.filter { $0.role == "user" }.map(\.content)
+        #expect(userContents == ["q1", "q2", "q3", "q4"])
         // Display rows are untouched.
         #expect(service.activeConversation?.messages.count == 8)
     }
