@@ -1155,15 +1155,21 @@ struct AgentView: View {
     /// on the last message, and the activity label. Any change means the view
     /// got taller.
     private func scrollFollowKey(_ conversation: ChatConversation) -> String {
+        // Built in typed steps: one array literal with optional chains and a
+        // reduce closure exceeds the CI compiler's type-check time limit.
         let last = conversation.messages.last
-        return [
+        let calls = last?.toolCalls ?? []
+        var resultLength = 0
+        for call in calls { resultLength += call.result?.count ?? 0 }
+        let parts: [String] = [
             String(conversation.messages.count),
             String(last?.content.count ?? 0),
             String(last?.reasoning?.count ?? 0),
-            String(last?.toolCalls?.count ?? 0),
-            String(last?.toolCalls?.reduce(0) { $0 + ($1.result?.count ?? 0) } ?? 0),
+            String(calls.count),
+            String(resultLength),
             chatService.activityLabel
-        ].joined(separator: "|")
+        ]
+        return parts.joined(separator: "|")
     }
 
     /// Hysteresis thresholds for follow behavior. We follow when within
