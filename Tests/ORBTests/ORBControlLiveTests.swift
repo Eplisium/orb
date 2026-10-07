@@ -42,7 +42,8 @@ struct ORBControlLiveTests {
         let conversation = try #require(service.activeConversation)
         let calls = conversation.messages.flatMap { $0.toolCalls ?? [] }
         print("LIVE tools:", calls.map { "\($0.name)\($0.isError ? "!" : "")" })
-        print("LIVE reply:", conversation.messages.last(where: { $0.role == "assistant" })?.content ?? "")
+        for call in calls { print("LIVE call:", call.name, call.arguments ?? "", "=>", (call.result ?? "").prefix(300)) }
+        print("LIVE reply:", conversation.messages.filter { $0.role == "assistant" }.map(\.content).joined(separator: "\n---\n"))
         print("LIVE error:", service.lastError ?? "none")
 
         #expect(calls.contains { $0.name == "orb_search_sessions" || $0.name == "orb_read_session" })
