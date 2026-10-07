@@ -104,10 +104,12 @@ struct StreamingTransportLatencyTests {
         let server = try ChunkedServer(chunks: chunks, gap: gap)
         defer { server.shutdown() }
 
+        // Measured from before the request: the server cannot send the last
+        // chunk earlier than 3 gaps after its headers, however slow the host.
+        let start = Date()
         let transport = URLSessionStreamingTransport()
         let stream = try await transport.bytes(for: makeRequest(port: server.port)).body
 
-        let start = Date()
         var arrivals: [TimeInterval] = []
         var received = ""
         for try await data in stream {
@@ -124,12 +126,13 @@ struct StreamingTransportLatencyTests {
         let firstArrival = try #require(arrivals.first)
         let totalSpan = try #require(arrivals.last)
 
-        // The decisive assertion: the first chunk lands long before the last
-        // one is sent. A buffering transport would push firstArrival up to
-        // roughly totalSpan.
-        #expect(firstArrival < gap * 2,
-                "first chunk took \(firstArrival)s — transport is buffering")
-        #expect(totalSpan > gap * 2,
+        // The decisive assertion: the first chunk lands at least a full gap
+        // before the last. A buffering transport delivers everything at the
+        // end, so firstArrival would be roughly totalSpan. Relative, not
+        // absolute, so a slow CI host does not flake it.
+        #expect(firstArrival < totalSpan - gap,
+                "first chunk took \(firstArrival)s of \(totalSpan)s — transport is buffering")
+        #expect(totalSpan >= gap * 3,
                 "expected the server's pacing to be observable")
         #expect(arrivals.count >= 2,
                 "expected multiple discrete deliveries, got \(arrivals.count)")
@@ -150,9 +153,13 @@ struct StreamingTransportLatencyTests {
         for try await data in stream where !data.isEmpty {
             if firstAt == nil { firstAt = Date().timeIntervalSince(start) }
         }
+        // The body closes no earlier than the server's 0.4 s pause after the
+        // chunk. Compare against that instead of a fixed wall-clock budget so
+        // a slow CI host does not flake it.
+        let closedAt = Date().timeIntervalSince(start)
 
         let arrival = try #require(firstAt)
-        #expect(arrival < 0.3, "tiny chunk withheld for \(arrival)s")
+        #expect(arrival < closedAt - 0.2, "tiny chunk withheld for \(arrival)s of \(closedAt)s")
     }
 
     @Test("cancelling a body reader releases it before the next network chunk")
