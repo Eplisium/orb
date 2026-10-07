@@ -750,3 +750,54 @@ struct ORBControlTests {
         #expect(!call("orb_list_mcp_servers", [:], host).content.contains("env"))
     }
 }
+
+// MARK: - Test Suite: policy-granted tools must run with the real executor
+
+@Suite("Wave1: policy tools reach the real executor")
+struct PolicyExecutorTests {
+    private func toolTurn(_ id: String, _ name: String, _ args: String) -> WaveScriptedClient.Script {
+        .init(events: [.toolCallFragment(choiceIndex: 0, toolIndex: 0, id: id, type: "function", name: name, arguments: args),
+                       .finishReason(choiceIndex: 0, reason: "tool_calls"), .done])
+    }
+
+    @Test("projectBuild writes files with fullComputerAccess false (Test Suite regression)")
+    func projectBuildWrites() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("orb-policy-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let approvals = ApprovalCoordinator()
+        await approvals.setHandler { _ in .approved }
+        let client = WaveScriptedClient([
+            toolTurn("w", "write_file", #"{"path":"main.tf","content":"hello"}"#),
+            toolTurn("l", "list_directory", #"{"path":"."}"#),
+            toolTurn("c", "run_command", #"{"command":"echo hi"}"#),
+            toolTurn("p", "plan_tasks", #"{"tasks":[{"title":"t","status":"pending"}]}"#),
+            .init(events: [.contentDelta(choiceIndex: 0, text: "done"), .finishReason(choiceIndex: 0, reason: "stop"), .done]),
+        ])
+        let result = try await NativeAgentRunner.run(
+            prompt: "build", modelId: "test/model", apiKey: "fixture", workspace: directory.path,
+            fullComputerAccess: false, history: [], client: client,
+            policy: .projectBuild, approvals: approvals, onEvent: { _ in }
+        )
+        for message in result.toolMessages {
+            #expect(!message.content.contains("Computer Access is off"), "\(message.toolCallId ?? "?"): \(message.content)")
+        }
+        #expect((try? String(contentsOf: directory.appendingPathComponent("main.tf"), encoding: .utf8)) == "hello")
+    }
+
+    @Test("Web Only still refuses local tools")
+    func webOnlyStillRefuses() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("orb-policy-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let client = WaveScriptedClient([
+            toolTurn("w", "write_file", #"{"path":"x.txt","content":"no"}"#),
+            .init(events: [.contentDelta(choiceIndex: 0, text: "done"), .finishReason(choiceIndex: 0, reason: "stop"), .done]),
+        ])
+        _ = try await NativeAgentRunner.run(
+            prompt: "x", modelId: "test/model", apiKey: "fixture", workspace: directory.path,
+            fullComputerAccess: false, history: [], client: client, policy: .webOnly, onEvent: { _ in }
+        )
+        #expect(!FileManager.default.fileExists(atPath: directory.appendingPathComponent("x.txt").path))
+    }
+}

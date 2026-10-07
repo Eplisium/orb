@@ -93,7 +93,11 @@ enum NativeAgentRunner {
             }
             let result = try await NativeAgentTools.execute(
                 name: call.name, argumentsJSON: call.arguments,
-                workspace: workspace, fullComputerAccess: fullComputerAccess,
+                // The policy already authorized this call (allowsExecution runs
+                // before the executor). Passing the raw toggle here made the
+                // Test Suite (projectBuild policy, toggle false) reject every
+                // tool, and Web Only reject web_search/remember/plan_tasks.
+                workspace: workspace, fullComputerAccess: true,
                 constrainPathsToWorkspace: effectivePolicy.constrainsFilesystem
             )
             try Task.checkCancellation()
