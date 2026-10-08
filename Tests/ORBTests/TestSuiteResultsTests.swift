@@ -117,3 +117,36 @@ struct TestResultsRenderTests {
         }
     }
 }
+
+@Suite("Results table fits a 960pt window")
+struct TestResultsTableFormattingTests {
+    @Test("Latency is humanized so long agent runs never split mid-number")
+    func latency() {
+        #expect(TestResultsTable.latencyText(0) == "—")
+        #expect(TestResultsTable.latencyText(845) == "845 ms")
+        #expect(TestResultsTable.latencyText(12_340) == "12.3 s")
+        #expect(TestResultsTable.latencyText(1_894_556) == "31m 34s")
+        #expect(TestResultsTable.latencyText(7_384_000) == "2h 3m")
+    }
+
+    @Test("When column stays short: time today, month/day this year, numeric otherwise")
+    func when() {
+        var cal = Calendar(identifier: .gregorian)
+        cal.timeZone = TimeZone(identifier: "UTC")!
+        let locale = Locale(identifier: "en_US_POSIX")
+        let now = cal.date(from: DateComponents(year: 2026, month: 10, day: 7, hour: 20, minute: 30))!
+        let today = cal.date(from: DateComponents(year: 2026, month: 10, day: 7, hour: 9, minute: 5))!
+        let earlier = cal.date(from: DateComponents(year: 2026, month: 9, day: 24, hour: 9))!
+        let lastYear = cal.date(from: DateComponents(year: 2025, month: 12, day: 31, hour: 9))!
+        #expect(TestResultsTable.whenText(today, now: now, calendar: cal, locale: locale).replacingOccurrences(of: "\u{202F}", with: " ") == "9:05 AM")
+        #expect(TestResultsTable.whenText(earlier, now: now, calendar: cal, locale: locale) == "Sep 24")
+        #expect(TestResultsTable.whenText(lastYear, now: now, calendar: cal, locale: locale) == "12/31/25")
+    }
+
+    @Test("Every column declares a width; only scenario and model flex")
+    func columns() {
+        let flexible = TestResultsTable.Field.allCases.filter { $0.fixedWidth == nil }
+        #expect(Set(flexible) == [.scenario, .model])
+        #expect((TestResultsTable.Field.verdict.fixedWidth ?? 0) >= 96)
+    }
+}

@@ -223,12 +223,88 @@ struct ConversationMeterView: View {
 
     var body: some View {
         if let conversation {
-            Text(ConversationMeter.text(tokens: conversation.totalTokens, cost: conversation.totalCost))
-                .orbFont(size: 11, weight: .medium)
-                .monospacedDigit()
-                .foregroundStyle(.secondary)
-                .help("Tokens and cost for this session")
+            let full = ConversationMeter.text(tokens: conversation.totalTokens, cost: conversation.totalCost)
+            // Never wrap: show the full meter when it fits, else one figure, else nothing (tooltip keeps it).
+            ViewThatFits(in: .horizontal) {
+                meterText(full)
+                if let compact = ConversationMeter.compactText(tokens: conversation.totalTokens,
+                                                               cost: conversation.totalCost) {
+                    meterText(compact)
+                }
+                Color.clear.frame(width: 0, height: 0)
+            }
+            .help("Tokens and cost for this session: \(full)")
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel(full)
         }
+    }
+
+    private func meterText(_ text: String) -> some View {
+        Text(text)
+            .orbFont(size: 11, weight: .medium)
+            .monospacedDigit()
+            .foregroundStyle(.secondary)
+            .lineLimit(1)
+            .fixedSize()
+    }
+}
+
+/// Capsule header control that never wraps: full label when the header has room, icon-only otherwise.
+/// Replaces ad-hoc pills that rendered one letter per line ("C/o/m/p/u/t/e/r") in a 960pt window.
+struct HeaderPill: View {
+    let title: String
+    let systemImage: String
+    let tint: Color
+    var foreground: Color? = nil
+
+    var body: some View {
+        ViewThatFits(in: .horizontal) {
+            pill { Label(title, systemImage: systemImage) }
+            pill { Image(systemName: systemImage) }
+        }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(title)
+    }
+
+    private func pill<C: View>(@ViewBuilder _ content: () -> C) -> some View {
+        content()
+            .labelStyle(PillLabelStyle())
+            .orbFont(size: 11, weight: .semibold)
+            .lineLimit(1)
+            .fixedSize()
+            .foregroundStyle(foreground ?? tint)
+            .padding(.horizontal, 9)
+            .padding(.vertical, 6)
+            .background(tint.opacity(0.11), in: Capsule())
+    }
+
+    private struct PillLabelStyle: LabelStyle {
+        func makeBody(configuration: Configuration) -> some View {
+            HStack(spacing: 5) { configuration.icon; configuration.title }
+        }
+    }
+}
+
+/// Two-line header title column shared by Chat and Agent: it keeps a readable minimum width and
+/// claims space before the trailing controls, so "New Agent Session" no longer collapses to "New…".
+struct PlaygroundHeaderTitle: View {
+    let title: String
+    let subtitle: String
+    let subtitleIcon: String
+    let rename: (String) -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 3) {
+            EditableTitle(title: title, commit: rename)
+            HStack(spacing: 5) {
+                Image(systemName: subtitleIcon)
+                Text(subtitle).lineLimit(1).truncationMode(.tail)
+            }
+            .orbFont(size: 11, weight: .medium)
+            .foregroundStyle(.secondary)
+        }
+        .frame(minWidth: 130, alignment: .leading)
+        .layoutPriority(1)
     }
 }
 

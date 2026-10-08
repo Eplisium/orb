@@ -279,8 +279,19 @@ enum ConversationMeter {
         guard tokens > 0 else { return "No usage yet" }
         let tokenText = tokens < 1000 ? "\(tokens) tokens" : String(format: "%.1fK tokens", Double(tokens) / 1000)
         guard cost > 0 else { return tokenText }
-        let money = cost < 0.01 ? String(format: "$%.4f", cost) : String(format: "$%.2f", cost)
-        return "\(tokenText) · \(money)"
+        return "\(tokenText) · \(money(cost))"
+    }
+
+    /// One short figure for headers that cannot fit `text`: cost when known, else the token count.
+    /// `nil` before any usage, so a narrow header drops the meter instead of wrapping "No usage yet".
+    static func compactText(tokens: Int, cost: Double) -> String? {
+        guard tokens > 0 else { return nil }
+        if cost > 0 { return money(cost) }
+        return tokens < 1000 ? "\(tokens)" : String(format: "%.1fK", Double(tokens) / 1000)
+    }
+
+    private static func money(_ cost: Double) -> String {
+        cost < 0.01 ? String(format: "$%.4f", cost) : String(format: "$%.2f", cost)
     }
 }
 

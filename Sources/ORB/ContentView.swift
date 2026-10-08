@@ -918,11 +918,30 @@ struct ContentView: View {
                 .font(ORBFont.footnote.weight(.medium))
                 .foregroundStyle(.secondary)
             if vm.showFavoritesOnly, let note = vm.favoriteSummary.unavailableNote {
-                Label(note, systemImage: "questionmark.circle")
-                    .font(ORBFont.caption)
-                    .foregroundStyle(.secondary)
-                    .help(vm.favoriteSummary.unavailableHelp ?? "")
-                    .accessibilityLabel(vm.favoriteSummary.unavailableHelp ?? note)
+                // A menu, not a bare label: these favorites have no rows (they are not in the catalog),
+                // so this is the only place the user can see which ones they are and tidy them up.
+                Menu {
+                    Section("Not in the current catalog") {
+                        ForEach(vm.favoriteSummary.unavailableIDs, id: \.self) { id in
+                            Menu(id) {
+                                Button("Copy Model ID") {
+                                    NSPasteboard.general.clearContents()
+                                    NSPasteboard.general.setString(id, forType: .string)
+                                }
+                                Button("Remove from Favorites", role: .destructive) { vm.toggleFavorite(id: id) }
+                            }
+                        }
+                    }
+                } label: {
+                    Label(note, systemImage: "questionmark.circle")
+                        .font(ORBFont.caption)
+                        .foregroundStyle(.secondary)
+                }
+                .menuStyle(.borderlessButton)
+                .menuIndicator(.hidden)
+                .fixedSize()
+                .help(vm.favoriteSummary.unavailableHelp ?? "")
+                .accessibilityLabel(vm.favoriteSummary.unavailableHelp ?? note)
             }
             Menu {
                 ForEach(ModelExportFormat.allCases) { format in
@@ -1047,7 +1066,7 @@ struct ContentView: View {
                     .font(.title2.weight(.semibold))
                 Text(vm.api.models.isEmpty
                      ? "Loading the OpenRouter catalog…"
-                     : "\(vm.api.models.count) models across \(max(vm.providerOptions.count - 1, 0)) providers")
+                     : "\(vm.api.models.count) models from \(max(vm.providerOptions.count - 1, 0)) model authors")
                     .orbFont(size: 13)
                     .foregroundStyle(.secondary)
             }

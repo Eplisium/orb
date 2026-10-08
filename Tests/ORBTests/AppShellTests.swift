@@ -195,7 +195,7 @@ struct AccountChipStateTests {
     func noKey() {
         let s = AccountChipState.make(hasManagementKey: false, remaining: nil, isLoading: false, hasError: false)
         #expect(s.title == "Account")
-        #expect(s.subtitle == "Management key needed")
+        #expect(s.subtitle == "Add key to see credits")
         #expect(s.help.contains("management key"))
     }
 

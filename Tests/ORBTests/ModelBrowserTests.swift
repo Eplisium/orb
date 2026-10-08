@@ -465,6 +465,14 @@ struct BrowserRowFactsTests {
         #expect(ModelRowFacts.make(browserModel(id: "a/v", prompt: nil, completion: nil)).price == "Variable price")
     }
 
+    @Test("Compact price fits narrow rows: input/output without words")
+    func compactPrice() {
+        let m = browserModel(id: "openai/gpt", prompt: "0.000002", completion: "0.00001")
+        #expect(ModelRowFacts.make(m).compactPrice == "$2/$10")
+        #expect(ModelRowFacts.make(browserModel(id: "a/f", prompt: "0", completion: "0")).compactPrice == "Free")
+        #expect(ModelRowFacts.make(browserModel(id: "a/v", prompt: nil, completion: nil)).compactPrice == "Varies")
+    }
+
     @Test("Unofficial providers drop the tilde for the avatar letter")
     func avatar() {
         #expect(ModelRowFacts.make(browserModel(id: "~anthropic/x")).avatarLetter == "A")

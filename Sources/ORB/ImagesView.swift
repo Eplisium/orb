@@ -324,9 +324,10 @@ struct ImagesView: View {
                 .labelsHidden()
                 if let model = service.models.first(where: { $0.id == selectedModelId }),
                    let desc = model.description, !desc.isEmpty {
-                    Text(desc)
+                    Text(CatalogDescriptionText.plain(desc))
                         .font(.caption).foregroundStyle(.secondary)
                         .lineLimit(3)
+                        .help(CatalogDescriptionText.plain(desc))
                 }
             }
         }

@@ -242,16 +242,9 @@ struct ChatView: View {
 
     private var chatHeader: some View {
         HStack(spacing: 12) {
-            VStack(alignment: .leading, spacing: 3) {
-                EditableTitle(title: chatService.activeConversation?.title ?? "New Chat") { name in
-                    if let id = chatService.activeConversation?.id { chatService.renameConversation(id, to: name) }
-                }
-                HStack(spacing: 5) {
-                    Image(systemName: "bolt.horizontal")
-                    Text("Direct OpenRouter completion")
-                }
-                .orbFont(size: 11, weight: .medium)
-                .foregroundStyle(.secondary)
+            PlaygroundHeaderTitle(title: chatService.activeConversation?.title ?? "New Chat",
+                                  subtitle: "Direct OpenRouter completion", subtitleIcon: "bolt.horizontal") { name in
+                if let id = chatService.activeConversation?.id { chatService.renameConversation(id, to: name) }
             }
 
             Spacer(minLength: 16)
@@ -268,18 +261,10 @@ struct ChatView: View {
                         )
                     }
                 } label: {
-                    HStack(spacing: 4) {
-                        Image(systemName: "arrow.clockwise")
-                        Text("Regenerate")
-                    }
-                    .orbFont(size: 11, weight: .semibold)
-                    .foregroundStyle(accent)
-                    .padding(.horizontal, 9)
-                    .padding(.vertical, 6)
-                    .background(accent.opacity(0.10))
-                    .clipShape(Capsule())
+                    HeaderPill(title: "Regenerate", systemImage: "arrow.clockwise", tint: accent)
                 }
                 .buttonStyle(.plain)
+                .help("Regenerate the last response")
                 .disabled(chatService.isStreaming)
             }
 

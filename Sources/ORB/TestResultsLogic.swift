@@ -69,6 +69,42 @@ enum TestResultsTable {
             case .when: return "When"
             }
         }
+
+        /// Fixed column width in points; `nil` columns share the remaining space. Equal flexible shares
+        /// squeezed badges and numbers into 3-line wraps ("Pa/ss/ed", "1,894,55/6 ms") at 960pt.
+        var fixedWidth: CGFloat? {
+            switch self {
+            case .scenario, .model: return nil
+            case .verdict: return 104
+            case .cost: return 64
+            case .latency: return 66
+            case .tokens: return 58
+            case .when: return 70
+            }
+        }
+    }
+
+    static func latencyText(_ ms: Int) -> String {
+        guard ms > 0 else { return "—" }
+        if ms < 1_000 { return "\(ms) ms" }
+        if ms < 60_000 { return String(format: "%.1f s", Double(ms) / 1_000) }
+        let seconds = ms / 1_000
+        if seconds < 3_600 { return "\(seconds / 60)m \(seconds % 60)s" }
+        return "\(seconds / 3_600)h \((seconds % 3_600) / 60)m"
+    }
+
+    static func whenText(_ date: Date, now: Date = Date(), calendar: Calendar = .current,
+                         locale: Locale = .current) -> String {
+        let f = DateFormatter()
+        f.calendar = calendar; f.timeZone = calendar.timeZone; f.locale = locale
+        if calendar.isDate(date, inSameDayAs: now) {
+            f.dateFormat = DateFormatter.dateFormat(fromTemplate: "jmm", options: 0, locale: locale)
+        } else if calendar.component(.year, from: date) == calendar.component(.year, from: now) {
+            f.dateFormat = DateFormatter.dateFormat(fromTemplate: "MMMd", options: 0, locale: locale)
+        } else {
+            f.dateStyle = .short; f.timeStyle = .none
+        }
+        return f.string(from: date)
     }
 
     /// Stable: rows with equal keys keep their input order in both directions.
@@ -138,6 +174,8 @@ struct TestVerdictPill: View {
     var body: some View {
         Label(kind.label, systemImage: kind.symbol)
             .font(ORBFont.caption.weight(.medium))
+            .lineLimit(1)
+            .fixedSize()
             .foregroundStyle(kind.tone)
             .padding(.horizontal, 8).padding(.vertical, 3)
             .background(kind.tone.opacity(ORBPalette.subtleFillAlpha), in: Capsule())
@@ -208,12 +246,15 @@ struct TestResultsTableView: View {
                         if field == f { Image(systemName: ascending ? "chevron.up" : "chevron.down").orbFont(size: 11) }
                     }
                     .font(ORBFont.caption.weight(.semibold))
-                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .lineLimit(1)
+                    .resultsColumn(f)
                 }
                 .buttonStyle(.plain)
                 .accessibilityLabel("Sort by \(f.title)")
                 .accessibilityValue(field == f ? (ascending ? "ascending" : "descending") : "")
             }
+            // Keep header columns aligned with rows that carry a trailing rerun button.
+            if onRerun != nil { Color.clear.frame(width: 16, height: 1).accessibilityHidden(true) }
         }
         .padding(.horizontal, 10)
         .foregroundStyle(.secondary)
@@ -222,13 +263,17 @@ struct TestResultsTableView: View {
     private func row(_ r: TestRunResult) -> some View {
         Button { onOpen(r) } label: {
             HStack(spacing: 8) {
-                Text(r.scenarioTitle).lineLimit(1).frame(maxWidth: .infinity, alignment: .leading)
-                Text(shortModelName(r.modelId)).lineLimit(1).frame(maxWidth: .infinity, alignment: .leading)
-                TestVerdictPill(kind: .of(r)).frame(maxWidth: .infinity, alignment: .leading)
-                Text(TestResultsTable.costText(r.cost)).monospacedDigit().frame(maxWidth: .infinity, alignment: .leading)
-                Text("\(r.latencyMs) ms").monospacedDigit().frame(maxWidth: .infinity, alignment: .leading)
-                Text("\(r.totalTokens)").monospacedDigit().frame(maxWidth: .infinity, alignment: .leading)
-                Text(r.timestamp.formatted(date: .abbreviated, time: .shortened)).lineLimit(1).frame(maxWidth: .infinity, alignment: .leading)
+                Text(r.scenarioTitle).lineLimit(1).resultsColumn(.scenario)
+                Text(shortModelName(r.modelId)).lineLimit(1).resultsColumn(.model)
+                TestVerdictPill(kind: .of(r)).resultsColumn(.verdict)
+                Text(TestResultsTable.costText(r.cost)).monospacedDigit().lineLimit(1).resultsColumn(.cost)
+                Text(TestResultsTable.latencyText(r.latencyMs)).monospacedDigit().lineLimit(1).resultsColumn(.latency)
+                    .help("\(r.latencyMs.formatted()) ms")
+                Text(r.totalTokens.formatted(.number.notation(.compactName))).monospacedDigit().lineLimit(1)
+                    .resultsColumn(.tokens)
+                    .help("\(r.totalTokens.formatted()) tokens")
+                Text(TestResultsTable.whenText(r.timestamp)).lineLimit(1).resultsColumn(.when)
+                    .help(r.timestamp.formatted(date: .complete, time: .shortened))
                 if let onRerun {
                     Button { onRerun(r) } label: { Image(systemName: "arrow.clockwise") }
                         .buttonStyle(.borderless)
@@ -329,6 +374,18 @@ struct CostCeilingBar: View {
             .accessibilityElement(children: .combine)
             .accessibilityLabel("Spend limit")
             .accessibilityValue(progress.accessibilityValue)
+        }
+    }
+}
+
+
+private extension View {
+    /// Lays a results cell out at its column's fixed width, or flexible for scenario/model.
+    @ViewBuilder func resultsColumn(_ field: TestResultsTable.Field) -> some View {
+        if let width = field.fixedWidth {
+            frame(width: width, alignment: .leading)
+        } else {
+            frame(minWidth: 60, maxWidth: .infinity, alignment: .leading)
         }
     }
 }

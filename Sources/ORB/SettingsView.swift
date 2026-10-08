@@ -687,7 +687,7 @@ struct SettingsView: View {
                 Text("No providers loaded yet.")
                     .foregroundStyle(.secondary)
             } else {
-                Text("\(directory.providers.count) providers serve models on OpenRouter.")
+                Text("\(directory.providers.count) inference providers serve models on OpenRouter.")
                     .font(.callout).foregroundStyle(.secondary)
                 LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 8) {
                     ForEach(directory.providers) { provider in

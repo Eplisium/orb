@@ -161,8 +161,12 @@ struct VideoView: View {
                             .disabled(selectedVideoModel?.seed != true)
                     }
                     StudioField("Audio") {
-                        Toggle("Generate audio", isOn: $generateAudio)
-                            .toggleStyle(.switch).controlSize(.small)
+                        // The field title already says "Audio"; a short state label cannot wrap in the grid cell.
+                        HStack(spacing: 6) {
+                            Toggle("Generate audio", isOn: $generateAudio)
+                                .toggleStyle(.switch).controlSize(.small).labelsHidden()
+                            Text(generateAudio ? "On" : "Off").font(.caption).foregroundStyle(.secondary)
+                        }
                             .disabled(selectedVideoModel?.generateAudio != true)
                             .help("Audio may change the per-job price. When off, send generate_audio: false explicitly.")
                     }
@@ -184,8 +188,13 @@ struct VideoView: View {
                 PlaygroundErrorBanner(message: errorMessage) { self.errorMessage = nil }
             }
 
-            Spacer()
-
+            }
+            .padding(18)
+        }
+        // Pinned footer: the primary action stays fully visible however tall the form grows
+        // (it used to sit at the end of the scroll content, half-clipped by the window edge).
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+            VStack(alignment: .leading, spacing: 8) {
             if !service.inFlightRemoteIDs.isEmpty {
                 HStack(spacing: 8) {
                     ProgressView().controlSize(.small)
@@ -210,7 +219,9 @@ struct VideoView: View {
                     .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
             }
             }
-            .padding(18)
+            .padding(.horizontal, 18).padding(.vertical, 12)
+            .background(.bar)
+            .overlay(alignment: .top) { Divider() }
         }
         .frame(width: 340)
         .background(.ultraThinMaterial.opacity(0.72))

@@ -568,6 +568,8 @@ struct ModelRowFacts: Equatable {
     let oneLiner: String?
     let context: String
     let price: String
+    /// Short price for narrow rows ("$2/$10", "Free", "Varies"); the row falls back to it before truncating.
+    var compactPrice: String = ""
     let capabilities: [Badge]
 
     static func make(_ model: ModelInfo, unit: PriceUnit = .perMillion) -> ModelRowFacts {
@@ -575,19 +577,22 @@ struct ModelRowFacts: Equatable {
         let letter = provider.first.map { String($0).uppercased() } ?? "?"
         let line = model.description?
             .split(whereSeparator: \.isNewline)
-            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .map { CatalogDescriptionText.plain(String($0)) }
             .first { !$0.isEmpty }
 
         let price: String
+        let compactPrice: String
         if model.isFree {
-            price = "Free"
+            price = "Free"; compactPrice = "Free"
         } else if let input = PriceDisplay.perToken(model.pricing?.prompt), input > 0 {
             let output = PriceDisplay.perToken(model.pricing?.completion)
                 .map { PriceDisplay.amount(perToken: $0, unit: unit) } ?? ComparisonColumn.missing
             let suffix = unit == .perMillion ? "" : " /1K"
-            price = "\(PriceDisplay.amount(perToken: input, unit: unit)) in · \(output) out\(suffix)"
+            let inputText = PriceDisplay.amount(perToken: input, unit: unit)
+            price = "\(inputText) in · \(output) out\(suffix)"
+            compactPrice = "\(inputText)/\(output)"
         } else {
-            price = "Variable price"
+            price = "Variable price"; compactPrice = "Varies"
         }
 
         let badges = ModelCapability.allCases
@@ -599,6 +604,7 @@ struct ModelRowFacts: Equatable {
             oneLiner: line,
             context: model.contextLength.map(BrowserFormat.context) ?? "N/A",
             price: price,
+            compactPrice: compactPrice,
             capabilities: badges
         )
     }

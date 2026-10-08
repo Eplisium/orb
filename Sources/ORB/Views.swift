@@ -37,6 +37,19 @@ struct ModelRowView: View {
 
     private var facts: ModelRowFacts { ModelRowFacts.make(model, unit: priceUnit) }
 
+    private func factsLine(price: String, elo: Bool, icons: Bool) -> some View {
+        HStack(spacing: 10) {
+            Text(facts.context + " ctx").monospacedDigit()
+            Text(price)
+                .monospacedDigit()
+                .foregroundStyle(model.isFree ? ORBTheme.success : Color.secondary)
+            if elo, let value = model.bestDesignElo { Text("Elo \(Int(value))") }
+            if icons { capabilityIcons }
+        }
+        .lineLimit(1)
+        .fixedSize()
+    }
+
     var body: some View {
         HStack(spacing: 10) {
             avatar
@@ -52,8 +65,11 @@ struct ModelRowView: View {
                     Text(model.modelSlug)
                         .font(ORBFont.body.weight(.medium))
                         .lineLimit(1)
+                        .truncationMode(.middle)
+                        .help(model.id)
                     if model.isAlias {
                         Text("ALIAS").orbFont(size: 11, weight: .bold).foregroundStyle(ORBTheme.accentLink)
+                            .fixedSize()
                     }
                     if model.hasExpired {
                         Text("EXPIRED").orbFont(size: 11, weight: .bold).foregroundStyle(.red)
@@ -65,17 +81,16 @@ struct ModelRowView: View {
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
                 }
-                HStack(spacing: 10) {
-                    Text(facts.context + " ctx").monospacedDigit()
-                    Text(facts.price)
-                        .monospacedDigit()
-                        .foregroundStyle(model.isFree ? ORBTheme.success : Color.secondary)
-                    if let elo = model.bestDesignElo { Text("Elo \(Int(elo))") }
-                    capabilityIcons
+                // Drop the least important facts first instead of truncating every one ("1.0M c…", "$0.10…").
+                ViewThatFits(in: .horizontal) {
+                    factsLine(price: facts.price, elo: true, icons: true)
+                    factsLine(price: facts.compactPrice, elo: true, icons: true)
+                    factsLine(price: facts.compactPrice, elo: false, icons: true)
+                    factsLine(price: facts.compactPrice, elo: false, icons: false)
                 }
                 .font(ORBFont.caption)
                 .foregroundStyle(.secondary)
-                .lineLimit(1)
+                .help("\(facts.context) context · \(facts.price)")
             }
 
             Spacer(minLength: 8)
@@ -464,11 +479,9 @@ struct ModelDetailView: View {
 
     @ViewBuilder
     private var statsGrid: some View {
-        LazyVGrid(columns: [
-            GridItem(.flexible()),
-            GridItem(.flexible()),
-            GridItem(.flexible())
-        ], spacing: 16) {
+        // Adaptive columns: 3 across in a wide detail pane, 2 when narrow, so values like
+        // "text+image->text" and "Oct 7, 2026" are not cut to "text+im…" / "Oct 7, 2…".
+        LazyVGrid(columns: [GridItem(.adaptive(minimum: 128), spacing: 12)], spacing: 12) {
             StatCard(title: "Context", value: model.contextLengthFormatted, icon: "arrow.left.arrow.right", color: .blue)
             StatCard(title: "Modality", value: model.modalityLabel, icon: "arrow.triangle.branch", color: .purple)
 
@@ -770,12 +783,16 @@ struct StatCard: View {
                 Text(title)
                     .orbFont(size: 11)
                     .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.85)
             }
             Text(value)
                 .orbFont(size: 17, weight: .semibold)
                 .monospacedDigit()
                 .lineLimit(1)
+                .minimumScaleFactor(0.7)
         }
+        .help("\(title): \(value)")
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(12)
         .background(.orbSurface(0.04), in: RoundedRectangle(cornerRadius: ORBMetrics.cardRadius))

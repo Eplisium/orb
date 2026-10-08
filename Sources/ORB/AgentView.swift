@@ -249,16 +249,9 @@ struct AgentView: View {
 
     private var agentHeader: some View {
         HStack(spacing: 12) {
-            VStack(alignment: .leading, spacing: 3) {
-                EditableTitle(title: chatService.activeConversation?.title ?? "New Agent Session") { name in
-                    if let id = chatService.activeConversation?.id { chatService.renameConversation(id, to: name) }
-                }
-                HStack(spacing: 5) {
-                    Image(systemName: "command")
-                    Text("Powered by ORB functions")
-                }
-                .orbFont(size: 11, weight: .medium)
-                .foregroundStyle(.secondary)
+            PlaygroundHeaderTitle(title: chatService.activeConversation?.title ?? "New Agent Session",
+                                  subtitle: "Powered by ORB functions", subtitleIcon: "command") { name in
+                if let id = chatService.activeConversation?.id { chatService.renameConversation(id, to: name) }
             }
 
             Spacer(minLength: 16)
@@ -266,27 +259,17 @@ struct AgentView: View {
             Button {
                 fullComputerAccess.toggle()
             } label: {
-                HStack(spacing: 6) {
-                    Image(systemName: fullComputerAccess ? "desktopcomputer.and.macbook" : "network")
-                    Text(fullComputerAccess ? "Computer Access" : "Web Only")
-                }
-                .orbFont(size: 11, weight: .semibold)
-                .foregroundStyle(fullComputerAccess ? Color.orange : Color.secondary)
-                .padding(.horizontal, 9)
-                .padding(.vertical, 6)
-                .background((fullComputerAccess ? Color.orange : Color.gray).opacity(0.11))
-                .clipShape(Capsule())
+                HeaderPill(title: fullComputerAccess ? "Computer Access" : "Web Only",
+                           systemImage: fullComputerAccess ? "desktopcomputer.and.macbook" : "network",
+                           tint: fullComputerAccess ? Color.orange : Color.gray,
+                           foreground: fullComputerAccess ? Color.orange : Color.secondary)
             }
             .buttonStyle(.plain)
             .help(fullComputerAccess ? "The native agent may use local functions and control this Mac" : "Only the web fetch function is enabled")
             .disabled(chatService.isStreaming)
 
             if opMode {
-                Label("OP Mode", systemImage: "bolt.shield.fill")
-                    .orbFont(size: 11, weight: .semibold)
-                    .foregroundStyle(ORBTheme.warning)
-                    .padding(.horizontal, 9).padding(.vertical, 6)
-                    .background(ORBTheme.warning.opacity(0.12), in: Capsule())
+                HeaderPill(title: "OP Mode", systemImage: "bolt.shield.fill", tint: ORBTheme.warning)
                     .help("OP Mode is on: risky tools run without asking, and the agent can inspect and manage ORB itself (sessions, usage, settings, MCP). Change it in Settings > Advanced.")
             }
 

@@ -257,6 +257,14 @@ struct HeaderMeterTests {
         #expect(ConversationMeter.text(tokens: 900, cost: 1.5) == "900 tokens · $1.50")
     }
 
+    @Test("Compact meter keeps the single most useful figure for narrow headers")
+    func compactMeter() {
+        #expect(ConversationMeter.compactText(tokens: 0, cost: 0) == nil)
+        #expect(ConversationMeter.compactText(tokens: 18_300, cost: 0) == "18.3K")
+        #expect(ConversationMeter.compactText(tokens: 18_300, cost: 0.0098) == "$0.0098")
+        #expect(ConversationMeter.compactText(tokens: 900, cost: 1.5) == "$1.50")
+    }
+
     @Test("Run status counts assistant turns and tool calls and reports elapsed")
     func runStatus() {
         var call = ToolCallDisplay(id: "1", name: "run_command", argumentsSummary: "ls")
