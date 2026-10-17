@@ -31,7 +31,7 @@ struct MCPLiveConnectionTests {
         defer { Task { await connection.shutdown() } }
 
         let tools = await connection.tools
-        #expect(tools.count == 2)
+        #expect(tools.count == 4)
         #expect(tools.contains { $0.toolName == "echo" })
         #expect(await connection.serverInfo == "mock-mcp")
 
@@ -138,13 +138,98 @@ struct MCPLiveConnectionTests {
         let outcome = await MCPRegistry.shared.probe(config)
         switch outcome {
         case .success(let report):
-            #expect(report.tools.count == 2)
+            #expect(report.tools.count == 4)
             #expect(report.tools.contains { $0.qualifiedName == "mcp__mock__echo" })
             // The probe now reports the whole capability surface.
-            #expect(report.summary.contains("2 tool(s)"))
+            #expect(report.summary.contains("4 tool(s)"))
         case .failure(let error):
             Issue.record("probe failed: \(error.localizedDescription)")
         }
+    }
+
+    // MARK: - Cancellation
+
+    private struct CancelReport: Decodable { let hung: [Int]; let cancelled: [Int] }
+
+    private static func report(_ connection: MCPConnection) async throws -> CancelReport {
+        let result = try await connection.callTool(name: "cancel_report", arguments: .object([:]))
+        return try JSONDecoder().decode(CancelReport.self, from: Data(result.content.utf8))
+    }
+
+    @Test("cancelling a hanging call returns promptly, notifies the server, and spares other calls", .enabled(if: MCPLiveConnectionTests.nodeAvailable, "requires node (or NODE_BINARY) for the mock MCP server"), .timeLimit(.minutes(1)))
+    func cancelledCallIsPromptAndScoped() async throws {
+        let config = try #require(Self.serverConfig())
+        let connection = MCPConnection(config: config)
+        try await connection.connect()
+        defer { Task { await connection.shutdown() } }
+
+        let hanging = Task { try await connection.callTool(name: "hang", arguments: .object([:])) }
+        let other = Task { try await connection.callTool(name: "hang", arguments: .object([:])) }
+
+        // Wait until the server has both hung requests (so cancel hits the
+        // registered, written path).
+        var hung: [Int] = []
+        for _ in 0..<100 {
+            hung = try await Self.report(connection).hung
+            if hung.count == 2 { break }
+            try await Task.sleep(for: .milliseconds(50))
+        }
+        #expect(hung.count == 2)
+
+        let started = ContinuousClock.now
+        hanging.cancel()
+        let outcome = await hanging.result
+        let elapsed = ContinuousClock.now - started
+        if case .success = outcome { Issue.record("cancelled call must not succeed") }
+        if case .failure(let error) = outcome { #expect(error is CancellationError) }
+        #expect(elapsed < .seconds(5), "cancel must not wait for the 120s request timeout")
+
+        // The server was told about exactly the cancelled request.
+        var cancelled: [Int] = []
+        for _ in 0..<100 {
+            cancelled = try await Self.report(connection).cancelled
+            if !cancelled.isEmpty { break }
+            try await Task.sleep(for: .milliseconds(50))
+        }
+        #expect(cancelled.count == 1)
+        #expect(cancelled.first.map { hung.contains($0) } == true)
+
+        // The shared connection and other concurrent calls are unaffected.
+        let echo = try await connection.callTool(
+            name: "echo", arguments: .object(["message": .string("after cancel")])
+        )
+        #expect(echo.content == "after cancel")
+        #expect(await connection.isRunning)
+        // The sibling hung call is still pending, not cancelled.
+        let stillHung = try await Self.report(connection)
+        #expect(stillHung.cancelled.count == 1)
+
+        other.cancel()
+        _ = await other.result
+    }
+
+    @Test("a call cancelled before it is registered never reaches the server", .enabled(if: MCPLiveConnectionTests.nodeAvailable, "requires node (or NODE_BINARY) for the mock MCP server"), .timeLimit(.minutes(1)))
+    func cancelBeforeRegistration() async throws {
+        let config = try #require(Self.serverConfig())
+        let connection = MCPConnection(config: config)
+        try await connection.connect()
+        defer { Task { await connection.shutdown() } }
+
+        let task = Task { () -> Result<NativeAgentToolResult, Error> in
+            // Already cancelled when the request is issued.
+            withUnsafeCurrentTask { $0?.cancel() }
+            do { return .success(try await connection.callTool(name: "hang", arguments: .object([:]))) }
+            catch { return .failure(error) }
+        }
+        let outcome = await task.value
+        if case .success = outcome { Issue.record("pre-cancelled call must not succeed") }
+        if case .failure(let error) = outcome { #expect(error is CancellationError) }
+
+        let report = try await Self.report(connection)
+        #expect(report.hung.isEmpty)
+        #expect(report.cancelled.isEmpty)
+        let echo = try await connection.callTool(name: "echo", arguments: .object(["message": .string("ok")]))
+        #expect(echo.content == "ok")
     }
 
     @Test("a bad command fails cleanly instead of hanging")

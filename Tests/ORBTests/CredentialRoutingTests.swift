@@ -188,6 +188,7 @@ struct CredentialRoutingTests {
         let error = service.setManagementKey("replacement-key")
         #expect(error?.contains("Keychain error") == true)
         #expect(store.secret(forReference: CredentialRole.management.keychainAccount) == "previous-management-key")
-        #expect(service.hasManagementKey == false)
+        // The old key is still stored, so presence must stay truthful.
+        #expect(service.hasManagementKey == true)
     }
 }

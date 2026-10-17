@@ -22,6 +22,16 @@ final class AccountService: ObservableObject {
     private let profile: CredentialProfile
     private let secretStore: CredentialSecretStore
     private let dataLoader: DataLoader
+    /// Bumped whenever the management credential changes or disappears.
+    /// In-flight requests capture it and drop their result if it moved, so a
+    /// slow response for a replaced/removed key can't publish into the new
+    /// (or empty) account state.
+    private var credentialGeneration = 0
+
+    private struct FetchFailure: Error {
+        let message: String
+        init(_ message: String) { self.message = message }
+    }
 
     init(
         profile: CredentialProfile = CredentialProfile(
@@ -66,35 +76,35 @@ final class AccountService: ObservableObject {
             return
         }
 
+        let generation = credentialGeneration
         isLoadingCredits = true
         creditsError = nil
 
+        let result: Result<CreditsData, FetchFailure>
         do {
             let (data, response) = try await dataLoader(request)
-            guard let http = response as? HTTPURLResponse else {
-                creditsError = "Invalid response"
-                isLoadingCredits = false
-                return
+            if let http = response as? HTTPURLResponse {
+                if http.statusCode == 401 {
+                    result = .failure(FetchFailure("Management key rejected. Check it in Settings → Accounts & Keys."))
+                } else if http.statusCode != 200 {
+                    result = .failure(FetchFailure("HTTP \(http.statusCode)"))
+                } else {
+                    result = .success(try JSONDecoder().decode(CreditsResponse.self, from: data).data)
+                }
+            } else {
+                result = .failure(FetchFailure("Invalid response"))
             }
-
-            if http.statusCode == 401 {
-                creditsError = "Management key rejected. Check it in Settings → Accounts & Keys."
-                isLoadingCredits = false
-                return
-            }
-
-            guard http.statusCode == 200 else {
-                creditsError = "HTTP \(http.statusCode)"
-                isLoadingCredits = false
-                return
-            }
-
-            let decoded = try JSONDecoder().decode(CreditsResponse.self, from: data)
-            credits = decoded.data
         } catch {
-            creditsError = error.localizedDescription
+            result = .failure(FetchFailure(error.localizedDescription))
         }
 
+        // Stale: the credential changed while we waited. The current
+        // generation owns the published state and loading flag.
+        guard generation == credentialGeneration else { return }
+        switch result {
+        case .success(let value): credits = value
+        case .failure(let failure): creditsError = failure.message
+        }
         isLoadingCredits = false
     }
 
@@ -108,67 +118,95 @@ final class AccountService: ObservableObject {
             return
         }
 
+        let generation = credentialGeneration
         isLoadingActivity = true
         activityError = nil
 
+        let result: Result<[ActivityItem], FetchFailure>
         do {
             let (data, response) = try await dataLoader(request)
-            guard let http = response as? HTTPURLResponse else {
-                activityError = "Invalid response"
-                isLoadingActivity = false
-                return
+            if let http = response as? HTTPURLResponse {
+                if http.statusCode == 401 {
+                    result = .failure(FetchFailure("Management key rejected. Check it in Settings → Accounts & Keys."))
+                } else if http.statusCode != 200 {
+                    result = .failure(FetchFailure("HTTP \(http.statusCode)"))
+                } else {
+                    let decoded = try JSONDecoder().decode(ActivityResponse.self, from: data)
+                    result = .success(decoded.data.sorted { $0.date > $1.date })
+                }
+            } else {
+                result = .failure(FetchFailure("Invalid response"))
             }
-
-            if http.statusCode == 401 {
-                activityError = "Management key rejected. Check it in Settings → Accounts & Keys."
-                isLoadingActivity = false
-                return
-            }
-
-            guard http.statusCode == 200 else {
-                activityError = "HTTP \(http.statusCode)"
-                isLoadingActivity = false
-                return
-            }
-
-            let decoded = try JSONDecoder().decode(ActivityResponse.self, from: data)
-            activity = decoded.data.sorted { $0.date > $1.date }
         } catch {
-            activityError = error.localizedDescription
+            result = .failure(FetchFailure(error.localizedDescription))
         }
 
+        guard generation == credentialGeneration else { return }
+        switch result {
+        case .success(let value): activity = value
+        case .failure(let failure): activityError = failure.message
+        }
         isLoadingActivity = false
     }
 
     // MARK: - Management key lifecycle
 
-    /// Re-reads (existence-only, prompt-free) whether a management key is
-    /// stored, e.g. after it was saved from another window.
-    func refreshManagementKeyPresence() {
-        let present = profile.managementKeyReference.map { secretStore.hasSecret(forReference: $0) } ?? false
-        if present != hasManagementKey { hasManagementKey = present }
-        if !present { credits = nil }
-    }
-
-    /// Saves a management key. A failed save leaves the previous key intact.
-    @discardableResult
-    func setManagementKey(_ key: String) -> String? {
-        let reference = profile.managementKeyReference ?? CredentialRole.management.keychainAccount
-        let error = secretStore.saveSecret(key, forReference: reference)
-        hasManagementKey = (error == nil)
-        return error
-    }
-
-    /// Removes the management key and immediately clears published account
-    /// data so nothing from the removed credential flashes on screen.
-    func removeManagementKey() {
-        let reference = profile.managementKeyReference ?? CredentialRole.management.keychainAccount
-        _ = secretStore.deleteSecret(forReference: reference)
-        hasManagementKey = false
+    /// Invalidates in-flight requests and clears everything published from
+    /// the previous credential, including loading flags (the stale request
+    /// will no longer clear them, and a new request sets them itself).
+    private func invalidateAccountState() {
+        credentialGeneration &+= 1
         credits = nil
         activity = []
         creditsError = nil
         activityError = nil
+        isLoadingCredits = false
+        isLoadingActivity = false
+    }
+
+    private var storeHasManagementKey: Bool {
+        profile.managementKeyReference.map { secretStore.hasSecret(forReference: $0) } ?? false
+    }
+
+    /// Re-reads (existence-only, prompt-free) whether a management key is
+    /// stored, e.g. after it was saved from another window.
+    func refreshManagementKeyPresence() {
+        let present = storeHasManagementKey
+        if present != hasManagementKey { hasManagementKey = present }
+        if !present { invalidateAccountState() }
+    }
+
+    /// Saves a management key. A failed save leaves the previous key (and its
+    /// published data and in-flight requests) intact.
+    @discardableResult
+    func setManagementKey(_ key: String) -> String? {
+        let reference = profile.managementKeyReference ?? CredentialRole.management.keychainAccount
+        let error = secretStore.saveSecret(key, forReference: reference)
+        if error == nil {
+            invalidateAccountState() // new credential = new account data
+            hasManagementKey = true
+        } else {
+            hasManagementKey = storeHasManagementKey // old key may still be there
+        }
+        return error
+    }
+
+    /// Removes the management key. Returns nil on verified removal, or an
+    /// error message when the credential may still exist — in which case
+    /// nothing is cleared and `hasManagementKey` still reflects reality.
+    /// On success published data is cleared immediately and in-flight
+    /// requests are invalidated.
+    @discardableResult
+    func removeManagementKey() -> String? {
+        let reference = profile.managementKeyReference ?? CredentialRole.management.keychainAccount
+        let deleted = secretStore.deleteSecret(forReference: reference)
+        if !deleted || secretStore.hasSecret(forReference: reference) {
+            hasManagementKey = storeHasManagementKey
+            return "The management key could not be removed from Keychain. It may still be stored."
+        }
+        invalidateAccountState()
+        hasManagementKey = false
+        return nil
     }
 
     // MARK: - Computed summaries

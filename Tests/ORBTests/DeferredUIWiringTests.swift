@@ -292,20 +292,22 @@ struct MCPConfigReferenceShapeTests {
         #expect(decoded.secretEnv?["API_KEY"] == "orb-mcp-Referenced-API-KEY")
     }
 
-    @Test("references are deterministic per server and variable")
+    @Test("references are deterministic per config id and variable")
     func referencesAreDeterministic() {
+        let id = UUID()
         #expect(
-            MCPServerConfig.secretReference(serverName: "My Server", variable: "API_KEY")
+            MCPServerConfig.secretReference(configID: id, variable: "API_KEY")
+                == MCPServerConfig.secretReference(configID: id, variable: "API_KEY")
+        )
+        // Different variables on the same config never collide.
+        #expect(
+            MCPServerConfig.secretReference(configID: id, variable: "A")
+                != MCPServerConfig.secretReference(configID: id, variable: "B")
+        )
+        // The legacy sanitized-name scheme is still computable for old configs.
+        #expect(
+            MCPServerConfig.legacySecretReference(serverName: "My Server", variable: "API_KEY")
                 == "orb-mcp-My-Server-API-KEY"
-        )
-        #expect(
-            MCPServerConfig.secretReference(serverName: "My Server", variable: "API_KEY")
-                == MCPServerConfig.secretReference(serverName: "My Server", variable: "API_KEY")
-        )
-        // Different variables on the same server never collide.
-        #expect(
-            MCPServerConfig.secretReference(serverName: "S", variable: "A")
-                != MCPServerConfig.secretReference(serverName: "S", variable: "B")
         )
     }
 
@@ -333,7 +335,7 @@ struct MCPEnvironmentResolutionTests {
 
     @Test("reference values are resolved and the raw reference never reaches the process env")
     func referencesResolveToSecrets() throws {
-        let reference = MCPServerConfig.secretReference(serverName: "Exa MCP", variable: "EXA_API_KEY")
+        let reference = MCPServerConfig.legacySecretReference(serverName: "Exa MCP", variable: "EXA_API_KEY")
         let store = InMemoryCredentialStore()
         store.saveSecret("resolved-secret-value", forReference: reference)
         let config = makeConfig(secretEnv: ["EXA_API_KEY": reference], env: ["DEBUG": "1"])
@@ -352,7 +354,7 @@ struct MCPEnvironmentResolutionTests {
 
     @Test("a resolved secret wins over a stale plaintext copy of the same variable")
     func resolvedSecretShadowsStalePlaintext() throws {
-        let reference = MCPServerConfig.secretReference(serverName: "Exa MCP", variable: "API_KEY")
+        let reference = MCPServerConfig.legacySecretReference(serverName: "Exa MCP", variable: "API_KEY")
         let store = InMemoryCredentialStore()
         store.saveSecret("current-secret", forReference: reference)
         let config = makeConfig(secretEnv: ["API_KEY": reference], env: ["API_KEY": "stale-plaintext"])
@@ -363,7 +365,7 @@ struct MCPEnvironmentResolutionTests {
 
     @Test("a missing or empty secret fails closed instead of launching")
     func missingSecretFailsClosed() {
-        let reference = MCPServerConfig.secretReference(serverName: "Exa MCP", variable: "API_KEY")
+        let reference = MCPServerConfig.legacySecretReference(serverName: "Exa MCP", variable: "API_KEY")
         let emptyStore = InMemoryCredentialStore()
         let config = makeConfig(secretEnv: ["API_KEY": reference])
 
@@ -412,7 +414,7 @@ struct MCPSecretMigrationTests {
     func migrationRoundTrip() throws {
         let store = InMemoryCredentialStore()
         let configs = makeConfigs()
-        let expectedReference = MCPServerConfig.secretReference(serverName: "GitHub", variable: "GITHUB_TOKEN")
+        let expectedReference = MCPServerConfig.secretReference(configID: configs[0].id, variable: "GITHUB_TOKEN")
 
         let (updated, outcome) = MCPRegistry.migrateSecretsToKeychain(
             configs: configs, serverNamed: "GitHub", variables: ["GITHUB_TOKEN"], store: store
@@ -478,8 +480,8 @@ struct MCPSecretMigrationTests {
     @Test("all-or-nothing: one failing variable rolls the whole server back")
     func partialFailureIsAllOrNothing() {
         let configs = makeConfigs()
-        let first = MCPServerConfig.secretReference(serverName: "GitHub", variable: "DEBUG")
-        let second = MCPServerConfig.secretReference(serverName: "GitHub", variable: "GITHUB_TOKEN")
+        let first = MCPServerConfig.secretReference(configID: configs[0].id, variable: "DEBUG")
+        let second = MCPServerConfig.secretReference(configID: configs[0].id, variable: "GITHUB_TOKEN")
 
         // The store accepts the first reference's write and rejects the next,
         // modelling a Keychain failure mid-migration.

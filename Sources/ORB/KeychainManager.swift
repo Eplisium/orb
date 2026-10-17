@@ -23,11 +23,11 @@ enum KeychainManager {
     }
 
     /// Delete the API key (leaves a tombstone so a dormant legacy copy can
-    /// never resurrect the old value).
+    /// never resurrect the old value). Returns true only when the removal
+    /// was verified; false means the key may still be stored.
     @discardableResult
     static func deleteAPIKey() -> Bool {
         KeychainSecrets.delete(account)
-        return true
     }
 
     /// Whether an API key is currently stored. Does NOT trigger auth prompts.

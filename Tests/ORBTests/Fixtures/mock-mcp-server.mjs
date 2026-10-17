@@ -8,6 +8,11 @@ let buffer = "";
 // this, and the client must skip it rather than choke.
 process.stdout.write("mock-mcp starting up\n");
 
+// Bookkeeping for cancellation tests: ids of `hang` calls (never answered)
+// and ids named by `notifications/cancelled`.
+const hungIds = [];
+const cancelledIds = [];
+
 process.stdin.on("data", (chunk) => {
   buffer += chunk.toString();
   let index;
@@ -44,6 +49,11 @@ function handle(line) {
   }
 
   if (method === "notifications/initialized") return; // notification, no reply
+
+  if (method === "notifications/cancelled") {
+    cancelledIds.push(params?.requestId);
+    return;
+  }
 
   if (method === "resources/list") {
     return send({
@@ -156,6 +166,16 @@ function handle(line) {
             description: "Always returns a tool error.",
             inputSchema: { type: "object", properties: {} },
           },
+          {
+            name: "hang",
+            description: "Never replies (cancellation tests).",
+            inputSchema: { type: "object", properties: {} },
+          },
+          {
+            name: "cancel_report",
+            description: "Reports hung and cancelled request ids.",
+            inputSchema: { type: "object", properties: {} },
+          },
         ],
       },
     });
@@ -173,6 +193,19 @@ function handle(line) {
         jsonrpc: "2.0",
         id,
         result: { content: [{ type: "text", text }] },
+      });
+    }
+    if (name === "hang") {
+      hungIds.push(id);
+      return; // deliberately never answered
+    }
+    if (name === "cancel_report") {
+      return send({
+        jsonrpc: "2.0",
+        id,
+        result: {
+          content: [{ type: "text", text: JSON.stringify({ hung: hungIds, cancelled: cancelledIds }) }],
+        },
       });
     }
     if (name === "fail") {

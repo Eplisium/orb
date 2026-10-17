@@ -159,3 +159,78 @@ struct SpeechEmbeddingsPresetTests {
         #expect(StudioPresetStore(studio: .speech, defaults: d).presets.count == 1)
     }
 }
+
+@Suite("Studio presets: menu label and reset handling")
+struct StudioPresetResetTests {
+    @Test("Menu label interpolates name and summary instead of showing escaped text")
+    func menuLabel() {
+        let p = StudioPreset(name: "Wide", settings: ["model": "a/img", "aspect": "16:9"])
+        #expect(p.menuLabel == "Wide  —  img · 16:9")
+        #expect(!p.menuLabel.contains("\\("))
+    }
+
+    private func video(_ model: String) -> VideoPresetValues {
+        VideoPresetValues(StudioPreset(name: "v", settings: [
+            "model": model, "aspect": "9:16", "resolution": "1080p", "duration": "8", "size": "1280x720", "audio": "true"]))
+    }
+
+    @Test("Video: preset for model B applied while A is selected keeps B's options")
+    func videoPresetSurvivesModelChange() {
+        let o = PresetReset.videoOptions(afterChangingTo: "b/vid", pending: video("b/vid"))
+        #expect(o.aspect == "9:16" && o.resolution == "1080p" && o.duration == "8" && o.size == "1280x720" && o.generateAudio)
+    }
+
+    @Test("Video: ordinary model change resets to defaults")
+    func videoPlainChangeResets() {
+        let o = PresetReset.videoOptions(afterChangingTo: "b/vid", pending: nil)
+        #expect(o == PresetReset.VideoOptions.defaults)
+        #expect(!o.generateAudio && o.aspect == "auto" && o.duration == "")
+    }
+
+    @Test("Video: a stale preset for another model is ignored")
+    func videoStalePendingIgnored() {
+        let o = PresetReset.videoOptions(afterChangingTo: "c/vid", pending: video("b/vid"))
+        #expect(o == PresetReset.VideoOptions.defaults)
+    }
+
+    @Test("Video: preset with the same model needs no staging (no change handler will fire)")
+    func videoSameModel() {
+        #expect(PresetReset.stagedModel(presetModel: "a/vid", current: "a/vid") == false)
+        #expect(PresetReset.stagedModel(presetModel: "b/vid", current: "a/vid") == true)
+        #expect(PresetReset.stagedModel(presetModel: "", current: "a/vid") == false)
+    }
+
+    private func image(model: String, provider: String = "") -> ImagePresetValues {
+        ImagePresetValues(StudioPreset(name: "i", settings: [
+            "model": model, "aspect": "16:9", "resolution": "2K", "quality": "high", "count": "3", "provider": provider]), maxCount: 10)
+    }
+
+    @Test("Images: preset for model B keeps its options and provider through the model reset")
+    func imageModelChangeKeepsPreset() {
+        let o = PresetReset.imageOptions(afterChangingTo: "b/img", pending: image(model: "b/img", provider: "p"))
+        #expect(o.aspect == "16:9" && o.resolution == "2K" && o.quality == "high" && o.count == 3 && o.provider == "p")
+    }
+
+    @Test("Images: ordinary model change resets everything")
+    func imageModelChangeResets() {
+        #expect(PresetReset.imageOptions(afterChangingTo: "b/img", pending: nil) == .defaults)
+        #expect(PresetReset.imageOptions(afterChangingTo: "c/img", pending: image(model: "b/img")) == .defaults)
+    }
+
+    @Test("Images: provider change from a preset keeps aspect/resolution/quality")
+    func imageProviderFromPreset() {
+        let r = PresetReset.imageProviderChange(to: "p", model: "b/img", pending: image(model: "b/img", provider: "p"))
+        #expect(r.aspect == "16:9" && r.resolution == "2K" && r.quality == "high")
+        #expect(r.keepPending)
+    }
+
+    @Test("Images: manual provider change resets and drops the pending preset")
+    func imageProviderManual() {
+        let none = PresetReset.imageProviderChange(to: "q", model: "b/img", pending: nil)
+        #expect(none.aspect == "auto" && none.resolution == "auto" && none.quality == "auto" && !none.keepPending)
+        let other = PresetReset.imageProviderChange(to: "q", model: "b/img", pending: image(model: "b/img", provider: "p"))
+        #expect(other.aspect == "auto" && !other.keepPending)
+        let otherModel = PresetReset.imageProviderChange(to: "p", model: "c/img", pending: image(model: "b/img", provider: "p"))
+        #expect(otherModel.aspect == "auto" && !otherModel.keepPending)
+    }
+}

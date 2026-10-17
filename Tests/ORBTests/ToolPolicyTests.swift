@@ -53,7 +53,11 @@ struct ToolPolicyTests {
     @Test("Web Only exposes and executes no MCP tool, including synthetic bridges")
     func webOnlyDeniesMCP() {
         let policy = ToolPolicy.webOnly
-        for name in ["mcp__fs__read_file", "mcp__fs__list", "mcp__read_resource", "mcp__get_prompt"] {
+        for name in [
+            "mcp__fs__read_file", "mcp__fs__list",
+            MCPToolNaming.readResourceTool(server: "fs"), MCPToolNaming.getPromptTool(server: "fs"),
+            "mcp__read_resource", "mcp__get_prompt",
+        ] {
             #expect(policy.allowsDefinition(name: name) == false, "\(name) must not be advertised")
             #expect(policy.allowsExecution(name: name) == false, "\(name) must not be executable")
         }
@@ -66,8 +70,43 @@ struct ToolPolicyTests {
         #expect(policy.allowsExecution(name: "mcp__fs__read_file") == false)
         policy.approvedMCPServers = ["fs"]
         #expect(policy.allowsExecution(name: "mcp__fs__read_file"))
-        #expect(policy.allowsDefinition(name: "mcp__read_resource") == false) // synthetic bridge has no server
         #expect(policy.allowsExecution(name: "mcp__other__tool") == false)
+    }
+
+    @Test("server-qualified resource/prompt bridges follow their server's approval")
+    func bridgesFollowServerApproval() {
+        var policy = ToolPolicy.computerControl
+        let fsResource = MCPToolNaming.readResourceTool(server: "fs")
+        let fsPrompt = MCPToolNaming.getPromptTool(server: "fs")
+        let otherResource = MCPToolNaming.readResourceTool(server: "other")
+
+        // Unapproved: denied.
+        #expect(policy.allowsDefinition(name: fsResource) == false)
+        #expect(policy.allowsExecution(name: fsPrompt) == false)
+
+        policy.approvedMCPServers = ["fs"]
+        #expect(policy.allowsDefinition(name: fsResource))
+        #expect(policy.allowsExecution(name: fsResource))
+        #expect(policy.allowsDefinition(name: fsPrompt))
+        #expect(policy.allowsExecution(name: fsPrompt))
+        #expect(policy.requiresApproval(name: fsResource)) // still an MCP call
+        // Approving one server never approves another server's bridge.
+        #expect(policy.allowsDefinition(name: otherResource) == false)
+        #expect(policy.allowsExecution(name: otherResource) == false)
+        // The old global bridges are not exempt.
+        #expect(policy.allowsExecution(name: "mcp__read_resource") == false)
+        #expect(policy.allowsExecution(name: "mcp__get_prompt") == false)
+    }
+
+    @Test("bridge names are parseable and sanitize the server like tool names")
+    func bridgeNamesResolve() throws {
+        let name = MCPToolNaming.readResourceTool(server: "File System")
+        let route = try #require(MCPToolNaming.resolve(name))
+        #expect(route.server == MCPToolNaming.sanitize("File System"))
+        #expect(route.tool == "read_resource")
+        #expect(MCPToolNaming.bridge(forTool: route.tool) == .readResource)
+        #expect(MCPToolNaming.bridge(forTool: "echo") == nil)
+        #expect(MCPRegistry.isMCPTool(name))
     }
 
     @Test("unknown tools are denied by every policy")

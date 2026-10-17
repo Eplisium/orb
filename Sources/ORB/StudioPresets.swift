@@ -42,6 +42,9 @@ struct StudioPreset: Identifiable, Codable, Equatable {
         }
         return parts.isEmpty ? "Default settings" : parts.joined(separator: " · ")
     }
+
+    /// Apply-menu entry text.
+    var menuLabel: String { "\(name)  —  \(summary)" }
 }
 
 enum PresetStudio: String { case images, video, speech, embeddings }
@@ -87,7 +90,7 @@ struct StudioPresetStore {
     }
 }
 
-struct ImagePresetValues {
+struct ImagePresetValues: Equatable {
     let model: String, aspect: String, resolution: String, quality: String, provider: String
     let count: Int
 
@@ -101,7 +104,7 @@ struct ImagePresetValues {
     }
 }
 
-struct VideoPresetValues {
+struct VideoPresetValues: Equatable {
     let model: String, aspect: String, resolution: String, duration: String, size: String
     let generateAudio: Bool
 
@@ -112,6 +115,58 @@ struct VideoPresetValues {
         duration = p.settings["duration"] ?? ""
         size = p.settings["size"] ?? "auto"
         generateAudio = p.settings["audio"] == "true"
+    }
+}
+
+/// Pure decisions for the model/provider change handlers, so a preset applied
+/// together with a different model is not wiped by the reset that model change
+/// normally triggers. Views stage the preset values as `pending`; a handler
+/// uses them only when they match the change it is handling, and otherwise
+/// resets to defaults (and drops the stale pending value).
+enum PresetReset {
+    /// True when applying a preset will change the model, so the model-change
+    /// handler will fire and the preset must be staged for it.
+    static func stagedModel(presetModel: String, current: String) -> Bool {
+        !presetModel.isEmpty && presetModel != current
+    }
+
+    struct VideoOptions: Equatable {
+        var aspect = "auto", resolution = "auto", duration = "", size = "auto"
+        var generateAudio = false
+        static let defaults = VideoOptions()
+    }
+
+    static func videoOptions(afterChangingTo model: String, pending: VideoPresetValues?) -> VideoOptions {
+        guard let v = pending, v.model == model else { return .defaults }
+        return VideoOptions(aspect: v.aspect, resolution: v.resolution, duration: v.duration,
+                            size: v.size, generateAudio: v.generateAudio)
+    }
+
+    struct ImageOptions: Equatable {
+        var aspect = "auto", resolution = "auto", quality = "auto", provider = ""
+        var count = 1
+        static let defaults = ImageOptions()
+    }
+
+    static func imageOptions(afterChangingTo model: String, pending: ImagePresetValues?) -> ImageOptions {
+        guard let v = pending, v.model == model else { return .defaults }
+        return ImageOptions(aspect: v.aspect, resolution: v.resolution, quality: v.quality,
+                            provider: v.provider, count: v.count)
+    }
+
+    struct ImageProviderResult: Equatable {
+        var aspect: String, resolution: String, quality: String
+        /// Whether the staged preset is still the explanation for the current state.
+        var keepPending: Bool
+    }
+
+    /// A provider change caused by the staged preset keeps its options; any other
+    /// provider change resets them (capabilities differ per provider).
+    static func imageProviderChange(to slug: String, model: String, pending: ImagePresetValues?) -> ImageProviderResult {
+        if let v = pending, v.model == model, v.provider == slug {
+            return ImageProviderResult(aspect: v.aspect, resolution: v.resolution, quality: v.quality, keepPending: true)
+        }
+        return ImageProviderResult(aspect: "auto", resolution: "auto", quality: "auto", keepPending: false)
     }
 }
 
@@ -176,7 +231,7 @@ struct StudioPresetMenu: View {
             if !store.presets.isEmpty {
                 Divider()
                 ForEach(store.presets.filter(isApplicable)) { preset in
-                    Button { apply(preset) } label: { Text("\\(preset.name)  —  \\(preset.summary)") }
+                    Button { apply(preset) } label: { Text(preset.menuLabel) }
                 }
                 Divider()
                 Menu("Delete Preset") {

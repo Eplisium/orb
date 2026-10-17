@@ -123,7 +123,7 @@ struct ToolPolicy: Sendable, Equatable {
 
     /// Fail closed: unknown names, ungranted capabilities, and unapproved MCP
     /// servers are all denied. A Web Only session therefore neither exposes nor
-    /// can execute any MCP tool, including the synthetic resource/prompt bridges.
+    /// can execute any MCP tool, including the server-qualified resource/prompt bridges.
     func allowsExecution(name: String) -> Bool {
         if MCPRegistry.isMCPTool(name) {
             guard capabilities.contains(.mcp) else { return false }

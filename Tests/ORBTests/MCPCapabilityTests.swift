@@ -105,9 +105,25 @@ struct MCPCapabilityTests {
         defer { Task { await MCPRegistry.shared.shutdownAll() } }
 
         let names = await MCPRegistry.shared.toolDefinitions().map(\.function.name)
-        #expect(names.contains(MCPToolNaming.readResourceTool))
-        #expect(names.contains(MCPToolNaming.getPromptTool))
+        #expect(names.contains("mcp__mock__read_resource"))
+        #expect(names.contains("mcp__mock__get_prompt"))
         #expect(names.contains("mcp__mock__echo"))
+        #expect(!names.contains("mcp__read_resource"))
+        #expect(!names.contains("mcp__get_prompt"))
+
+        // An approved server's bridges survive the same policy filter the
+        // agent applies; Web Only and unapproved sessions drop them.
+        let approved = ToolPolicy.agentSession(fullComputerAccess: true, mcpServers: [enabled])
+        let approvedNames = names.filter { approved.allowsDefinition(name: $0) }
+        #expect(approvedNames.contains("mcp__mock__read_resource"))
+        #expect(approvedNames.contains("mcp__mock__get_prompt"))
+
+        let webOnly = ToolPolicy.agentSession(fullComputerAccess: false, mcpServers: [enabled])
+        #expect(names.filter { webOnly.allowsDefinition(name: $0) }.allSatisfy { !MCPRegistry.isMCPTool($0) })
+
+        var unapproved = ToolPolicy.computerControl
+        unapproved.approvedMCPServers = ["someone-else"]
+        #expect(names.filter { unapproved.allowsExecution(name: $0) }.allSatisfy { !MCPRegistry.isMCPTool($0) })
     }
 
     @Test("synthetic read_resource routes through to the live server")
@@ -122,7 +138,7 @@ struct MCPCapabilityTests {
         defer { Task { await MCPRegistry.shared.shutdownAll() } }
 
         let result = await MCPRegistry.shared.call(
-            qualifiedName: MCPToolNaming.readResourceTool,
+            qualifiedName: "mcp__mock__read_resource",
             argumentsJSON: #"{"uri":"mock://readme"}"#
         )
         #expect(!result.isError)
@@ -143,11 +159,40 @@ struct MCPCapabilityTests {
         // Models frequently emit numbers for numeric-looking arguments; those
         // must be coerced rather than silently dropped.
         let result = await MCPRegistry.shared.call(
-            qualifiedName: MCPToolNaming.getPromptTool,
+            qualifiedName: "mcp__mock__get_prompt",
             argumentsJSON: #"{"name":"greet","arguments":{"who":"Zach","times":3}}"#
         )
         #expect(!result.isError)
         #expect(result.content == "Hello Zach x3")
+    }
+
+    @Test("a bridge only reads from the server it is qualified with")
+    func bridgeIsScopedToItsServer() async throws {
+        guard let config = Self.serverConfig() else { return }
+        var enabled = config
+        enabled.isEnabled = true
+        MCPRegistry.saveConfigs([enabled])
+        defer { MCPRegistry.saveConfigs([]) }
+
+        await MCPRegistry.shared.startEnabledServers()
+        defer { Task { await MCPRegistry.shared.shutdownAll() } }
+
+        // mock://readme exists on `mock`, but a bridge for another server
+        // must not reach it.
+        let wrong = await MCPRegistry.shared.call(
+            qualifiedName: "mcp__elsewhere__read_resource",
+            argumentsJSON: #"{"uri":"mock://readme"}"#
+        )
+        #expect(wrong.isError)
+        #expect(!wrong.content.contains("ORB resource body"))
+    }
+
+    @Test("legacy global bridge names are no longer routable")
+    func legacyGlobalBridgeNames() async {
+        let result = await MCPRegistry.shared.call(
+            qualifiedName: "mcp__read_resource", argumentsJSON: #"{"uri":"mock://readme"}"#
+        )
+        #expect(result.isError)
     }
 
     @Test("unknown resources return a tool error instead of throwing")
@@ -162,7 +207,7 @@ struct MCPCapabilityTests {
         defer { Task { await MCPRegistry.shared.shutdownAll() } }
 
         let result = await MCPRegistry.shared.call(
-            qualifiedName: MCPToolNaming.readResourceTool,
+            qualifiedName: "mcp__mock__read_resource",
             argumentsJSON: #"{"uri":"mock://missing"}"#
         )
         // An agent run must survive a bad URI.
@@ -172,7 +217,7 @@ struct MCPCapabilityTests {
     @Test("missing required arguments are rejected with a clear message")
     func missingArgumentsRejected() async throws {
         let result = await MCPRegistry.shared.call(
-            qualifiedName: MCPToolNaming.readResourceTool,
+            qualifiedName: "mcp__mock__read_resource",
             argumentsJSON: "{}"
         )
         #expect(result.isError)

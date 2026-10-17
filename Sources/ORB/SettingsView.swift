@@ -759,7 +759,10 @@ struct ManagementKeyPanel {
     /// credits/activity so nothing from the removed credential stays on screen.
     @MainActor
     mutating func removeKey(into service: AccountService) {
-        service.removeManagementKey()
+        if let error = service.removeManagementKey() {
+            actionError = error
+            return // key still stored: keep the draft and don't show a removal
+        }
         actionError = nil
         showSaved = false
         draftKey = ""

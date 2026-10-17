@@ -22,10 +22,31 @@ struct MCPServerConfig: Codable, Sendable, Identifiable, Equatable {
         case id, name, command, args, env, isEnabled, secretEnv
     }
 
-    /// Deterministic store reference for one server env variable, namespaced
-    /// per server+variable so two servers never overwrite each other's secret.
-    /// Sanitized to the same character class as tool-name slugs.
-    static func secretReference(serverName: String, variable: String) -> String {
+    /// Prefix of every reference minted by the current scheme.
+    static let secretReferencePrefix = "orb-mcp-v2-"
+
+    /// Collision-resistant store reference for one env variable of one config.
+    ///
+    /// Built from the config's stable `id` (UUID) plus the variable name
+    /// encoded as unpadded base64url of its UTF-8 bytes. The encoding is
+    /// injective and its alphabet has no `-` delimiter ambiguity with the UUID
+    /// (fixed 36 chars), so two configs — or two variables differing only by
+    /// punctuation (`prod_api` vs `prod-api`, `A_B` vs `A-B`) — never share a
+    /// reference. Renaming a server does not orphan its secrets.
+    static func secretReference(configID: UUID, variable: String) -> String {
+        let encoded = Data(variable.utf8).base64EncodedString()
+            .replacingOccurrences(of: "+", with: "-")
+            .replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: "=", with: "")
+        return "\(secretReferencePrefix)\(configID.uuidString.lowercased())-\(encoded)"
+    }
+
+    /// The pre-UUID reference scheme (sanitized names). NOT collision-safe:
+    /// `prod_api` and `prod-api` map to the same value. Kept only so configs
+    /// that already store such references keep resolving — `secretEnv` values
+    /// are opaque and are looked up verbatim at launch. Never used to mint a
+    /// new reference.
+    static func legacySecretReference(serverName: String, variable: String) -> String {
         "orb-mcp-\(MCPToolNaming.sanitize(serverName))-\(MCPToolNaming.sanitize(variable))"
     }
 
@@ -122,13 +143,38 @@ enum MCPToolNaming {
     static let separator = "__"
     static let prefix = "mcp"
 
-    /// Synthetic tools bridging MCP's non-tool capabilities into the
-    /// tool-calling interface a chat model can actually use.
-    static let readResourceTool = "mcp__read_resource"
-    static let getPromptTool = "mcp__get_prompt"
+    /// Synthetic tools bridging MCP's non-tool capabilities (resources,
+    /// prompts) into the tool-calling interface a chat model can use.
+    /// Bridges are SERVER-QUALIFIED (`mcp__<server>__read_resource`) so they
+    /// parse with `resolve`, flow through the same per-server policy approval
+    /// as any MCP tool, and route only to that server.
+    enum Bridge: Equatable, Sendable {
+        case readResource
+        case getPrompt
 
-    static func isSynthetic(_ name: String) -> Bool {
-        name == readResourceTool || name == getPromptTool
+        var toolName: String {
+            switch self {
+            case .readResource: return "read_resource"
+            case .getPrompt: return "get_prompt"
+            }
+        }
+    }
+
+    static func readResourceTool(server: String) -> String {
+        qualify(server: server, tool: Bridge.readResource.toolName)
+    }
+
+    static func getPromptTool(server: String) -> String {
+        qualify(server: server, tool: Bridge.getPrompt.toolName)
+    }
+
+    /// The bridge a bare tool name (the part after the server) denotes, if any.
+    static func bridge(forTool tool: String) -> Bridge? {
+        switch tool {
+        case Bridge.readResource.toolName: return .readResource
+        case Bridge.getPrompt.toolName: return .getPrompt
+        default: return nil
+        }
     }
 
     static func qualify(server: String, tool: String) -> String {
@@ -165,7 +211,11 @@ actor MCPConnection {
     private let secretStore: CredentialSecretStore
     private var process: Process?
     private var stdinHandle: FileHandle?
-    private var pending: [Int: CheckedContinuation<JSONValue, Error>] = [:]
+    private struct PendingRequest {
+        let method: String
+        let continuation: CheckedContinuation<JSONValue, Error>
+    }
+    private var pending: [Int: PendingRequest] = [:]
     private var stdoutPump: Task<Void, Never>?
     private var stdoutSink: AsyncStream<Data>.Continuation?
     private var nextID = 1
@@ -311,8 +361,8 @@ actor MCPConnection {
 
     func shutdown() {
         isShuttingDown = true
-        for (_, continuation) in pending {
-            continuation.resume(throwing: MCPError.notConnected)
+        for (_, request) in pending {
+            request.continuation.resume(throwing: MCPError.notConnected)
         }
         pending.removeAll()
         stdoutSink?.finish()
@@ -330,8 +380,8 @@ actor MCPConnection {
 
     private func handleTermination() {
         guard !isShuttingDown else { return }
-        for (_, continuation) in pending {
-            continuation.resume(throwing: MCPError.transport("server exited unexpectedly"))
+        for (_, request) in pending {
+            request.continuation.resume(throwing: MCPError.transport("server exited unexpectedly"))
         }
         pending.removeAll()
         process = nil
@@ -488,35 +538,63 @@ actor MCPConnection {
         let timer = Task { [weak self] in
             try? await Task.sleep(for: timeout)
             guard !Task.isCancelled else { return }
-            await self?.fail(id: id, with: MCPError.timedOut(method))
+            await self?.fail(id: id, method: method, with: MCPError.timedOut(method), notifyServer: true)
         }
         defer { timer.cancel() }
-        return try await withCheckedThrowingContinuation { continuation in
-            // Register BEFORE writing, on the actor: a fast server's reply can
-            // otherwise arrive before the continuation exists and be dropped,
-            // leaving the call to hang until the timeout.
-            Task { await self.registerAndWrite(id: id, envelope: envelope, continuation: continuation) }
+        // Cancelling the calling task (e.g. Stop in Agent) abandons exactly
+        // this request: it is removed from `pending`, the caller resumes with
+        // CancellationError, and the server is told via
+        // `notifications/cancelled`. The shared connection stays up.
+        return try await withTaskCancellationHandler {
+            try await self.awaitReply(id: id, method: method, envelope: envelope)
+        } onCancel: {
+            Task { await self.fail(id: id, method: method, with: CancellationError(), notifyServer: true, reason: "Cancelled by client") }
         }
     }
 
-    private func registerAndWrite(id: Int, envelope: JSONValue, continuation: CheckedContinuation<JSONValue, Error>) {
-        guard process?.isRunning == true else {
-            continuation.resume(throwing: MCPError.notConnected)
-            return
-        }
-        pending[id] = continuation
-        do {
-            try write(envelope)
-        } catch {
-            pending[id] = nil
-            continuation.resume(throwing: error)
+    /// Registers the pending request and writes it, atomically on the actor:
+    /// registration happens before the write (a fast reply can never be
+    /// dropped) and the task's cancellation flag is checked at registration,
+    /// so a cancel that raced ahead of this call is honored without ever
+    /// sending the request.
+    private func awaitReply(id: Int, method: String, envelope: JSONValue) async throws -> JSONValue {
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<JSONValue, Error>) in
+            if Task.isCancelled {
+                continuation.resume(throwing: CancellationError())
+                return
+            }
+            guard process?.isRunning == true else {
+                continuation.resume(throwing: MCPError.notConnected)
+                return
+            }
+            pending[id] = PendingRequest(method: method, continuation: continuation)
+            do {
+                try write(envelope)
+            } catch {
+                pending[id] = nil
+                continuation.resume(throwing: error)
+            }
         }
     }
 
-    /// Resolves one pending request with an error (timeout). No-op when the
-    /// reply already arrived.
-    private func fail(id: Int, with error: Error) {
-        pending.removeValue(forKey: id)?.resume(throwing: error)
+    /// Resolves one pending request with an error (timeout or cancellation)
+    /// and, when it was already sent, tells the server to stop working on it.
+    /// No-op when the reply already arrived or the request was already failed,
+    /// which also makes a late timer or a late server reply for a cancelled id
+    /// harmless (`dispatch` drops replies with no pending entry).
+    private func fail(id: Int, method: String, with error: Error, notifyServer: Bool, reason: String = "Request timed out") {
+        guard let request = pending.removeValue(forKey: id) else { return }
+        request.continuation.resume(throwing: error)
+        // `initialize` must never be cancelled (MCP spec).
+        guard notifyServer, method != "initialize", process?.isRunning == true else { return }
+        try? write(.object([
+            "jsonrpc": .string("2.0"),
+            "method": .string("notifications/cancelled"),
+            "params": .object([
+                "requestId": .number(Double(id)),
+                "reason": .string(reason)
+            ])
+        ]))
     }
 
     private func notify(method: String, params: JSONValue) async throws {
@@ -554,7 +632,7 @@ actor MCPConnection {
         guard let message = JSONValue.parse(line)?.objectValue else { return }
         guard let idValue = message["id"], case .number(let rawID) = idValue else { return }
         let id = Int(rawID)
-        guard let continuation = pending.removeValue(forKey: id) else { return }
+        guard let continuation = pending.removeValue(forKey: id)?.continuation else { return }
 
         if let error = message["error"]?.objectValue {
             let code = Int(error["code"].flatMap { value -> Double? in

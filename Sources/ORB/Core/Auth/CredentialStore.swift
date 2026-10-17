@@ -56,6 +56,8 @@ protocol CredentialSecretStore: Sendable {
     /// Returns nil on success or a diagnostic error string on failure. Failed
     /// updates must leave the previous secret intact.
     func saveSecret(_ secret: String, forReference reference: String) -> String?
+    /// Returns true only when the secret is verified absent afterwards; false
+    /// means it may still exist and callers must not report it as removed.
     func deleteSecret(forReference reference: String) -> Bool
     func hasSecret(forReference reference: String) -> Bool
 }
@@ -75,7 +77,6 @@ struct KeychainCredentialStore: CredentialSecretStore {
 
     func deleteSecret(forReference reference: String) -> Bool {
         KeychainSecrets.delete(reference)
-        return true
     }
 
     func hasSecret(forReference reference: String) -> Bool {
@@ -104,7 +105,8 @@ final class InMemoryCredentialStore: CredentialSecretStore, @unchecked Sendable 
     func deleteSecret(forReference reference: String) -> Bool {
         lock.lock()
         defer { lock.unlock() }
-        return secrets.removeValue(forKey: reference) != nil
+        secrets.removeValue(forKey: reference)
+        return true // absent afterwards, whether or not it existed
     }
 
     func hasSecret(forReference reference: String) -> Bool {

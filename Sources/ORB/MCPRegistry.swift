@@ -114,7 +114,10 @@ actor MCPRegistry {
     /// exactly as before. All-or-nothing per server: every requested variable
     /// is validated first, then saved; if any save fails, the returned configs
     /// are the input unchanged (the store may already hold earlier saves —
-    /// harmless, since a retry overwrites the same deterministic references).
+    /// harmless, since a retry overwrites the same config-owned references,
+    /// which are keyed by the config's UUID and never shared with another
+    /// server). References already present in `secretEnv`, including legacy
+    /// sanitized-name ones, are left untouched and keep resolving.
     /// Idempotent: variables already carrying a reference are reported back
     /// and never re-saved, because their plaintext value no longer exists.
     /// Configs carry references only — no secret value is ever written into a
@@ -156,9 +159,30 @@ actor MCPRegistry {
             }
         }
 
+        // Never write to a reference some OTHER config already owns (legacy
+        // sanitized-name references can be shared by punctuation-colliding
+        // servers, and ids can be duplicated by pasted configs).
+        let foreignReferences = Set(
+            configs.enumerated().filter { $0.offset != index }
+                .flatMap { ($0.element.secretEnv ?? [:]).values }
+        )
+        for variable in variables.sorted() where config.secretEnv?[variable] == nil {
+            let reference = MCPServerConfig.secretReference(configID: config.id, variable: variable)
+            if foreignReferences.contains(reference) {
+                return (
+                    configs,
+                    MCPSecretMigrationOutcome(
+                        serverName: name, migratedVariables: [],
+                        alreadyMigratedVariables: [],
+                        error: "The Keychain reference for \(variable) is already used by another MCP server; nothing was changed."
+                    )
+                )
+            }
+        }
+
         // Phase 2 — save all plaintext values, aborting on the first failure.
         for variable in variables.sorted() where config.secretEnv?[variable] == nil {
-            let reference = MCPServerConfig.secretReference(serverName: name, variable: variable)
+            let reference = MCPServerConfig.secretReference(configID: config.id, variable: variable)
             guard let value = config.env[variable] else { continue }  // Phase 1 verified presence.
             if let error = store.saveSecret(value, forReference: reference) {
                 return (
@@ -176,7 +200,7 @@ actor MCPRegistry {
         // Phase 3 — rewrite the config only after every save succeeded.
         var secretEnv = config.secretEnv ?? [:]
         for variable in migrated {
-            secretEnv[variable] = MCPServerConfig.secretReference(serverName: name, variable: variable)
+            secretEnv[variable] = MCPServerConfig.secretReference(configID: config.id, variable: variable)
             config.env[variable] = nil
         }
         config.secretEnv = secretEnv.isEmpty ? nil : secretEnv
@@ -287,15 +311,18 @@ actor MCPRegistry {
             ))
         }
 
+        // One bridge pair per server that publishes resources/prompts. Names
+        // are server-qualified so policy approval and routing are per server.
+        // A server's own tool of the same name wins; the bridge is skipped.
+        let realTools = Set(await availableTools().map(\.qualifiedName))
         let resources = await availableResources()
-        if !resources.isEmpty {
-            let catalog = resources
-                .prefix(40)
-                .map { "\($0.uri) — \($0.name)" }
-                .joined(separator: "; ")
+        for (server, entries) in Dictionary(grouping: resources, by: \.serverName).sorted(by: { $0.key < $1.key }) {
+            let name = MCPToolNaming.readResourceTool(server: server)
+            guard !realTools.contains(name) else { continue }
+            let catalog = entries.prefix(40).map { "\($0.uri) — \($0.name)" }.joined(separator: "; ")
             definitions.append(AgentToolDefinition(function: .init(
-                name: MCPToolNaming.readResourceTool,
-                description: "Read a resource published by a connected MCP server. Available: \(catalog)",
+                name: name,
+                description: "[\(server)] Read a resource published by this MCP server. Available: \(catalog)",
                 parameters: .raw(.object([
                     "type": .string("object"),
                     "properties": .object([
@@ -310,14 +337,15 @@ actor MCPRegistry {
         }
 
         let prompts = await availablePrompts()
-        if !prompts.isEmpty {
-            let catalog = prompts
-                .prefix(40)
+        for (server, entries) in Dictionary(grouping: prompts, by: \.serverName).sorted(by: { $0.key < $1.key }) {
+            let name = MCPToolNaming.getPromptTool(server: server)
+            guard !realTools.contains(name) else { continue }
+            let catalog = entries.prefix(40)
                 .map { "\($0.name) — \($0.description ?? "no description")" }
                 .joined(separator: "; ")
             definitions.append(AgentToolDefinition(function: .init(
-                name: MCPToolNaming.getPromptTool,
-                description: "Expand a prompt template from a connected MCP server. Available: \(catalog)",
+                name: name,
+                description: "[\(server)] Expand a prompt template from this MCP server. Available: \(catalog)",
                 parameters: .raw(.object([
                     "type": .string("object"),
                     "properties": .object([
@@ -358,35 +386,31 @@ actor MCPRegistry {
         return all.sorted { $0.id < $1.id }
     }
 
-    /// Reads a resource by URI, searching every connected server that publishes
-    /// it. URIs are server-defined, so the owning server is resolved by lookup
-    /// rather than assumed from the name.
-    func readResource(uri: String) async -> NativeAgentToolResult {
-        for (_, connection) in connections {
-            let owns = await connection.resources.contains { $0.uri == uri }
-            guard owns else { continue }
-            do {
-                let text = try await connection.readResource(uri: uri)
-                return .init(content: text.isEmpty ? "(empty resource)" : text, isError: false)
-            } catch {
-                return .init(content: "Failed to read \(uri): \(error.localizedDescription)", isError: true)
-            }
+    /// Reads a resource by URI from ONE server's connection. URIs are
+    /// server-defined, so a bridge only ever reads from the server whose name
+    /// it carries.
+    private func readResource(uri: String, from connection: MCPConnection) async -> NativeAgentToolResult {
+        guard await connection.resources.contains(where: { $0.uri == uri }) else {
+            return .init(content: "No resource \(uri) is published by MCP server \"\(await connection.name)\".", isError: true)
         }
-        return .init(content: "No connected MCP server publishes resource \(uri).", isError: true)
+        do {
+            let text = try await connection.readResource(uri: uri)
+            return .init(content: text.isEmpty ? "(empty resource)" : text, isError: false)
+        } catch {
+            return .init(content: "Failed to read \(uri): \(error.localizedDescription)", isError: true)
+        }
     }
 
-    func expandPrompt(name: String, arguments: [String: String]) async -> NativeAgentToolResult {
-        for (_, connection) in connections {
-            let owns = await connection.prompts.contains { $0.name == name }
-            guard owns else { continue }
-            do {
-                let text = try await connection.getPrompt(name: name, arguments: arguments)
-                return .init(content: text.isEmpty ? "(empty prompt)" : text, isError: false)
-            } catch {
-                return .init(content: "Failed to expand \(name): \(error.localizedDescription)", isError: true)
-            }
+    private func expandPrompt(name: String, arguments: [String: String], from connection: MCPConnection) async -> NativeAgentToolResult {
+        guard await connection.prompts.contains(where: { $0.name == name }) else {
+            return .init(content: "No prompt \(name) is published by MCP server \"\(await connection.name)\".", isError: true)
         }
-        return .init(content: "No connected MCP server publishes prompt \(name).", isError: true)
+        do {
+            let text = try await connection.getPrompt(name: name, arguments: arguments)
+            return .init(content: text.isEmpty ? "(empty prompt)" : text, isError: false)
+        } catch {
+            return .init(content: "Failed to expand \(name): \(error.localizedDescription)", isError: true)
+        }
     }
 
     func status() async -> [(name: String, toolCount: Int, error: String?)] {
@@ -400,62 +424,78 @@ actor MCPRegistry {
 
     // MARK: - Dispatch
 
-    /// True when this tool name belongs to an MCP server.
+    /// True when this tool name belongs to an MCP server (including its
+    /// server-qualified resource/prompt bridges).
     nonisolated static func isMCPTool(_ name: String) -> Bool {
-        MCPToolNaming.isSynthetic(name) || MCPToolNaming.resolve(name) != nil
+        MCPToolNaming.resolve(name) != nil
     }
 
     func call(qualifiedName: String, argumentsJSON: String) async -> NativeAgentToolResult {
-        let parsed = JSONValue.parse(argumentsJSON)?.objectValue ?? [:]
-
-        // Synthetic capability bridges are handled before server routing —
-        // they span servers rather than belonging to any single one.
-        if qualifiedName == MCPToolNaming.readResourceTool {
-            guard let uri = parsed["uri"]?.stringValue, !uri.isEmpty else {
-                return .init(content: "read_resource requires a \"uri\" argument.", isError: true)
-            }
-            return await readResource(uri: uri)
-        }
-        if qualifiedName == MCPToolNaming.getPromptTool {
-            guard let name = parsed["name"]?.stringValue, !name.isEmpty else {
-                return .init(content: "get_prompt requires a \"name\" argument.", isError: true)
-            }
-            var arguments: [String: String] = [:]
-            parsed["arguments"]?.objectValue?.forEach { key, value in
-                // Templates take strings; coerce numbers/bools rather than
-                // dropping arguments the model reasonably supplied.
-                if let string = value.stringValue {
-                    arguments[key] = string
-                } else if let number = value.doubleValue {
-                    arguments[key] = number == number.rounded()
-                        ? String(Int(number))
-                        : String(number)
-                } else if let flag = value.boolValue {
-                    arguments[key] = String(flag)
-                }
-            }
-            return await expandPrompt(name: name, arguments: arguments)
-        }
-
         guard let route = MCPToolNaming.resolve(qualifiedName) else {
             return .init(content: "Unknown MCP tool \(qualifiedName).", isError: true)
         }
+        let parsed = JSONValue.parse(argumentsJSON)?.objectValue ?? [:]
+        let bridge = MCPToolNaming.bridge(forTool: route.tool)
+
         // The qualified name carries a sanitized server slug, so match on that.
         let match = connections.first { name, _ in
             MCPToolNaming.sanitize(name) == route.server
         }
         guard let connection = match?.value else {
+            if let bridge, let invalid = Self.invalidBridgeArguments(bridge, parsed) { return invalid }
             let detail = lastErrors[route.server].map { " (\($0))" } ?? ""
             return .init(
                 content: "MCP server \"\(route.server)\" is not connected\(detail).",
                 isError: true
             )
         }
+
+        // A real tool of the same name on that server takes precedence over
+        // the synthetic bridge.
+        let hasRealTool = await connection.tools.contains { $0.toolName == route.tool }
+        if let bridge, !hasRealTool {
+            if let invalid = Self.invalidBridgeArguments(bridge, parsed) { return invalid }
+            switch bridge {
+            case .readResource:
+                return await readResource(uri: parsed["uri"]?.stringValue ?? "", from: connection)
+            case .getPrompt:
+                var arguments: [String: String] = [:]
+                parsed["arguments"]?.objectValue?.forEach { key, value in
+                    // Templates take strings; coerce numbers/bools rather than
+                    // dropping arguments the model reasonably supplied.
+                    if let string = value.stringValue {
+                        arguments[key] = string
+                    } else if let number = value.doubleValue {
+                        arguments[key] = number == number.rounded()
+                            ? String(Int(number))
+                            : String(number)
+                    } else if let flag = value.boolValue {
+                        arguments[key] = String(flag)
+                    }
+                }
+                return await expandPrompt(name: parsed["name"]?.stringValue ?? "", arguments: arguments, from: connection)
+            }
+        }
+
         let arguments = JSONValue.parse(argumentsJSON) ?? .object([:])
         do {
             return try await connection.callTool(name: route.tool, arguments: arguments)
         } catch {
             return .init(content: "MCP call failed: \(error.localizedDescription)", isError: true)
         }
+    }
+
+    private static func invalidBridgeArguments(_ bridge: MCPToolNaming.Bridge, _ parsed: [String: JSONValue]) -> NativeAgentToolResult? {
+        switch bridge {
+        case .readResource:
+            guard let uri = parsed["uri"]?.stringValue, !uri.isEmpty else {
+                return .init(content: "read_resource requires a \"uri\" argument.", isError: true)
+            }
+        case .getPrompt:
+            guard let name = parsed["name"]?.stringValue, !name.isEmpty else {
+                return .init(content: "get_prompt requires a \"name\" argument.", isError: true)
+            }
+        }
+        return nil
     }
 }

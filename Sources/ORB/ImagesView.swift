@@ -125,6 +125,8 @@ struct ImagesView: View {
     @StudioState("ImagesView.runTasks") private var runTasks: [UUID: Task<Void, Never>] = [:]
     /// Partial-failure / cancellation summary of the last run.
     @StudioState("ImagesView.runSummary") private var runSummary: String? = nil
+    /// Preset staged by Apply; consumed (when it matches) by the model/provider reset handlers.
+    @State private var pendingPreset: ImagePresetValues? = nil
     @EnvironmentObject private var shell: ShellController
 
     private let accent = ORBTheme.accent
@@ -158,11 +160,13 @@ struct ImagesView: View {
             configuredModelId = selectedModelId
             endpoints = []
             endpointError = nil
-            aspectRatio = "auto"
-            resolution = "auto"
-            quality = "auto"
-            imageCount = 1
-            selectedProviderSlug = ""
+            let o = PresetReset.imageOptions(afterChangingTo: selectedModelId, pending: pendingPreset)
+            if o == .defaults { pendingPreset = nil }
+            aspectRatio = o.aspect
+            resolution = o.resolution
+            quality = o.quality
+            imageCount = o.count
+            selectedProviderSlug = o.provider
             guard !selectedModelId.isEmpty else { return }
             do { endpoints = try await service.fetchImageModelEndpoints(modelID: selectedModelId) }
             catch { endpointError = error.localizedDescription }
@@ -170,9 +174,11 @@ struct ImagesView: View {
         .task { CreationActions.pruneStaging(); Self.cleanEditReferences(keeping: referenceURLs) }
         .onChange(of: selectedProviderSlug) { _, _ in
             if imageCount > maximumCount { imageCount = maximumCount }
-            aspectRatio = "auto"
-            resolution = "auto"
-            quality = "auto"
+            let r = PresetReset.imageProviderChange(to: selectedProviderSlug, model: selectedModelId, pending: pendingPreset)
+            if !r.keepPending { pendingPreset = nil }
+            aspectRatio = r.aspect
+            resolution = r.resolution
+            quality = r.quality
         }
     }
 
@@ -190,6 +196,7 @@ struct ImagesView: View {
                         },
                         apply: { preset in
                             let v = ImagePresetValues(preset, maxCount: Self.maxImagesPerRun)
+                            pendingPreset = v
                             if !v.model.isEmpty { selectedModelId = v.model }
                             imageCount = v.count; aspectRatio = v.aspect
                             resolution = v.resolution; quality = v.quality

@@ -164,8 +164,17 @@ final class DatabaseManager {
         let backup = path + ".corrupt-" + stamp
         do {
             try fm.moveItem(atPath: path, toPath: backup)
-            try? fm.removeItem(atPath: path + "-wal")
-            try? fm.removeItem(atPath: path + "-shm")
+            // Committed frames may still live in the WAL; keep the sidecars
+            // with the main file so the backup stays recoverable, and so a
+            // stale WAL is never replayed against the fresh database.
+            for suffix in ["-wal", "-shm"] {
+                let sidecar = path + suffix
+                guard fm.fileExists(atPath: sidecar) else { continue }
+                if (try? fm.moveItem(atPath: sidecar, toPath: backup + suffix)) == nil {
+                    // Never leave a stale WAL next to a fresh database file.
+                    try? fm.removeItem(atPath: sidecar)
+                }
+            }
             return backup
         } catch {
             return nil
@@ -397,12 +406,18 @@ final class DatabaseManager {
             try migrateMediaColumns()
             try execChecked("PRAGMA user_version=7;")
         } catch {
-            // A failed migration must never take the app down. Back up the
-            // failing file, swap in a fresh in-memory database, and surface
-            // the problem to the user instead of crashing at launch.
+            // A failed migration must never take the app down. Swap in a
+            // fresh in-memory database and surface the problem to the user
+            // instead of crashing at launch. Only genuine corruption moves
+            // the on-disk files aside; contention or other operational
+            // failures (busy, locked, read-only, I/O, disk full…) leave the
+            // original database and its WAL/SHM sidecars untouched.
+            let primaryCode = db.map { sqlite3_errcode($0) & 0xFF } ?? SQLITE_OK
+            let isCorruption = primaryCode == SQLITE_CORRUPT || primaryCode == SQLITE_NOTADB
+            let isContention = primaryCode == SQLITE_BUSY || primaryCode == SQLITE_LOCKED
             sqlite3_close(db)
             db = nil
-            let backupPath = Self.backupDatabase(at: dbPath)
+            let backupPath = isCorruption ? Self.backupDatabase(at: dbPath) : nil
             let openedFallback = sqlite3_open(":memory:", &db) == SQLITE_OK
             if openedFallback {
                 exec("PRAGMA journal_mode=WAL;")
@@ -411,8 +426,12 @@ final class DatabaseManager {
                 db = nil
             }
             launchFailure = DatabaseLaunchFailure(
-                title: "Database Migration Failed",
-                detail: backupPath != nil
+                title: isCorruption ? "Database Migration Failed" : "Database Unavailable",
+                detail: !isCorruption
+                    ? (isContention
+                        ? "ORB could not open its local database because another process is using it (\(error.localizedDescription)). Your existing data was left untouched. ORB is running with a temporary in-memory database; data will not persist for this session. Quit other ORB instances or tools using the database and relaunch."
+                        : "ORB could not upgrade its local database (\(error.localizedDescription)). Your existing data was left untouched. ORB is running with a temporary in-memory database; data will not persist for this session.")
+                    : backupPath != nil
                     ? "ORB could not upgrade its local database (\(error.localizedDescription)). The previous database was moved to \(backupPath!) and ORB is starting with a fresh, empty one."
                     : "ORB could not upgrade its local database (\(error.localizedDescription)). ORB is running with a temporary in-memory database; data will not persist for this session.",
                 backupPath: backupPath

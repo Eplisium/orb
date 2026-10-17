@@ -31,6 +31,9 @@ struct VideoView: View {
     // Finished jobs whose video was never saved (e.g. app quit mid-download).
     @StudioState("VideoView.downloadableRecords") private var downloadableRecords: [JobRecord] = []
 
+    /// Preset staged by Apply for a different model; consumed by the model-change reset.
+    @State private var pendingPreset: VideoPresetValues? = nil
+
     private let accent = ORBTheme.accent
 
     struct VideoJobRecord: Identifiable {
@@ -57,14 +60,16 @@ struct VideoView: View {
             refreshResumableRecords()
         }
         .onChange(of: selectedModelId) { _, _ in
-            aspectRatio = "auto"
-            resolution = "auto"
-            durationText = ""
-            size = "auto"
+            let o = PresetReset.videoOptions(afterChangingTo: selectedModelId, pending: pendingPreset)
+            pendingPreset = nil
+            aspectRatio = o.aspect
+            resolution = o.resolution
+            durationText = o.duration
+            size = o.size
             seedText = ""
             firstFrameURL = nil
             lastFrameURL = nil
-            generateAudio = false
+            generateAudio = o.generateAudio
         }
     }
 
@@ -89,6 +94,7 @@ struct VideoView: View {
                         },
                         apply: { preset in
                             let v = VideoPresetValues(preset)
+                            pendingPreset = PresetReset.stagedModel(presetModel: v.model, current: selectedModelId) ? v : nil
                             if !v.model.isEmpty { selectedModelId = v.model }
                             aspectRatio = v.aspect; resolution = v.resolution
                             durationText = v.duration; size = v.size; generateAudio = v.generateAudio
