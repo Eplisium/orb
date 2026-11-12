@@ -265,7 +265,7 @@ struct ImagesView: View {
                 Text(warning).font(.caption).foregroundStyle(.orange)
             }
             if let endpointError {
-                Text("Endpoint capabilities and prices unavailable: \(endpointError). Only default settings are available.")
+                Text("Endpoint capabilities and prices unavailable: \(ErrorCopy.fragment(endpointError)). Only default settings are available.")
                     .font(.caption2).foregroundStyle(.orange)
             }
             if let endpoint = selectedEndpoint, !endpoint.pricing.isEmpty {
@@ -280,33 +280,39 @@ struct ImagesView: View {
                     .font(.caption).foregroundStyle(.orange)
             }
 
-            if let errorMessage {
-                PlaygroundErrorBanner(message: errorMessage) { self.errorMessage = nil }
-            }
-            if let runSummary {
-                PlaygroundErrorBanner(message: runSummary) { self.runSummary = nil }
-            }
-
-            Spacer()
-
-            StudioPrimaryButton(title: "Generate", busyTitle: "Generating…", isBusy: pendingImages > 0,
-                                isEnabled: canGenerate, accent: accent, action: generate)
-                .keyboardShortcut(.return, modifiers: .command)
-            if pendingImages > 0 {
-                Button(role: .cancel) { cancelRun() } label: {
-                    Label("Cancel", systemImage: "stop.circle")
-                }
-                .keyboardShortcut(.escape, modifiers: [])
-                .help("Stop waiting for the images still generating. Requests already sent may still be billed.")
-            }
-
-            if totalCost > 0 {
-                Text("Reported spend (known charges): $\(totalCost, specifier: "%.4f")")
-                    .font(.caption.monospacedDigit())
-                    .foregroundStyle(.secondary)
-            }
             }
             .padding(18)
+        }
+        // Pinned footer, as in Video: the primary action and the outcome of
+        // the last run stay visible however tall the form grows. They used to
+        // sit at the end of the scroll content, below the fold at the default
+        // window size.
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+            StudioPinnedFooter {
+                if let errorMessage {
+                    PlaygroundErrorBanner(message: errorMessage) { self.errorMessage = nil }
+                }
+                if let runSummary {
+                    PlaygroundErrorBanner(message: runSummary) { self.runSummary = nil }
+                }
+
+                StudioPrimaryButton(title: "Generate", busyTitle: "Generating…", isBusy: pendingImages > 0,
+                                    isEnabled: canGenerate, accent: accent, action: generate)
+                    .keyboardShortcut(.return, modifiers: .command)
+                if pendingImages > 0 {
+                    Button(role: .cancel) { cancelRun() } label: {
+                        Label("Cancel", systemImage: "stop.circle")
+                    }
+                    .keyboardShortcut(.escape, modifiers: [])
+                    .help("Stop waiting for the images still generating. Requests already sent may still be billed.")
+                }
+
+                if totalCost > 0 {
+                    Text("Reported spend (known charges): $\(totalCost, specifier: "%.4f")")
+                        .font(.caption.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                }
+            }
         }
         .frame(width: 340)
         .background(.ultraThinMaterial.opacity(0.72))

@@ -28,16 +28,18 @@ struct LockScreenView: View {
                     }
                     .frame(width: 84, height: 84)
 
+                    // Semantic label colours: the gate sits on the window
+                    // background, which is light in the Light appearance.
                     Text("ORB is locked")
                         .orbFont(size: 22, weight: .semibold)
-                        .foregroundStyle(.white)
+                        .foregroundStyle(.primary)
 
                     VStack(spacing: 6) {
                         Text("Unlock with \(lock.biometricLabel) or your Mac password.")
-                            .foregroundStyle(.white.opacity(0.85))
+                            .foregroundStyle(.primary.opacity(0.85))
                         Text("Your API keys and sessions stay protected. ORB locks again when your Mac sleeps or locks, or after a period of inactivity.")
                             .orbFont(size: 12)
-                            .foregroundStyle(.white.opacity(0.6))
+                            .foregroundStyle(.secondary)
                     }
                     .orbFont(size: 13)
                     .multilineTextAlignment(.center)
@@ -109,7 +111,7 @@ struct LockScreenView: View {
                 } label: {
                     Text("Quit ORB")
                         .orbFont(size: 12, weight: .medium)
-                        .foregroundStyle(.white.opacity(0.72))
+                        .foregroundStyle(.secondary)
                         .padding(.horizontal, 14)
                         .padding(.vertical, 8)
                 }

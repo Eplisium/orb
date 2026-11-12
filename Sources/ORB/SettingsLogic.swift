@@ -396,18 +396,36 @@ struct AppearanceSettingsSection: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             Label("Appearance", systemImage: "paintpalette").font(.title3.weight(.semibold))
-            Picker("Theme", selection: $scheme) {
-                ForEach(AppearancePrefs.Scheme.allCases) { Text($0.title).tag($0.rawValue) }
-            }.pickerStyle(.segmented).frame(maxWidth: 320)
-            Picker("Text size", selection: $textSize) {
-                ForEach(AppearancePrefs.TextSize.allCases) { Text($0.title).tag($0.rawValue) }
-            }.frame(maxWidth: 320)
-            Picker("Density", selection: $density) {
-                ForEach(AppearancePrefs.Density.allCases) { Text($0.title).tag($0.rawValue) }
-            }.pickerStyle(.segmented).frame(maxWidth: 320)
-            Picker("Animations", selection: $motion) {
-                ForEach(AppearancePrefs.MotionOverride.allCases) { Text($0.title).tag($0.rawValue) }
-            }.frame(maxWidth: 320)
+            // One label column and one control column, so the four controls
+            // line up instead of each starting where its own label ends.
+            Grid(alignment: .leadingFirstTextBaseline, horizontalSpacing: 14, verticalSpacing: 12) {
+                GridRow {
+                    Text("Theme")
+                    Picker("Theme", selection: $scheme) {
+                        ForEach(AppearancePrefs.Scheme.allCases) { Text($0.title).tag($0.rawValue) }
+                    }.pickerStyle(.segmented)
+                }
+                GridRow {
+                    Text("Text size")
+                    Picker("Text size", selection: $textSize) {
+                        ForEach(AppearancePrefs.TextSize.allCases) { Text($0.title).tag($0.rawValue) }
+                    }
+                }
+                GridRow {
+                    Text("Density")
+                    Picker("Density", selection: $density) {
+                        ForEach(AppearancePrefs.Density.allCases) { Text($0.title).tag($0.rawValue) }
+                    }.pickerStyle(.segmented)
+                }
+                GridRow {
+                    Text("Animations")
+                    Picker("Animations", selection: $motion) {
+                        ForEach(AppearancePrefs.MotionOverride.allCases) { Text($0.title).tag($0.rawValue) }
+                    }
+                }
+            }
+            .labelsHidden()
+            .frame(maxWidth: 380, alignment: .leading)
             Text("ORB always follows your Mac's Reduce Motion setting. “Reduce” turns animations down even when the system hasn't.")
                 .font(.callout).foregroundStyle(.secondary)
         }

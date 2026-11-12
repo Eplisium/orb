@@ -70,6 +70,16 @@ struct SystemKeychainBackend: KeychainBackend {
     }
 }
 
+/// Backend for review mode (`-orb.reviewMode YES`): every item reads as
+/// absent and every write is refused, so a screenshot-review run can never
+/// read, prompt for, or change a stored credential.
+struct ReviewModeKeychainBackend: KeychainBackend {
+    func add(_ attributes: [String: Any]) -> OSStatus { errSecNotAvailable }
+    func update(_ query: [String: Any], _ attributes: [String: Any]) -> OSStatus { errSecNotAvailable }
+    func delete(_ query: [String: Any]) -> OSStatus { errSecNotAvailable }
+    func copyMatching(_ query: [String: Any]) -> (OSStatus, AnyObject?) { (errSecItemNotFound, nil) }
+}
+
 // MARK: - Legacy-read gate
 
 /// While the app is locked, nothing may attempt a legacy-item data read — it
@@ -111,7 +121,18 @@ enum KeychainSecrets {
         set { UserDefaults.standard.set(Array(newValue).sorted(), forKey: attemptedKey) }
     }
 
-    static func read(_ account: String, backend: KeychainBackend = SystemKeychainBackend()) -> String? {
+    /// Review-mode defaults key (mirrors `OnboardingGate.reviewModeKey`).
+    static let reviewModeKey = "orb.reviewMode"
+
+    /// The backend every default-argument call uses. Review mode gets a
+    /// backend that never reaches the Security framework, so the promise
+    /// "review mode never touches the Keychain" holds for every caller, not
+    /// only the ones that remember to check the flag.
+    static func defaultBackend(defaults: UserDefaults = .standard) -> KeychainBackend {
+        defaults.bool(forKey: reviewModeKey) ? ReviewModeKeychainBackend() : SystemKeychainBackend()
+    }
+
+    static func read(_ account: String, backend: KeychainBackend = KeychainSecrets.defaultBackend()) -> String? {
         if let (data, present) = readItem(service: currentService, account: account, backend: backend) {
             // Present-but-empty is a deletion tombstone; dormant copies must
             // never resurrect a deleted secret.
@@ -124,7 +145,7 @@ enum KeychainSecrets {
     /// Reads each dormant copy at most once (the only operation that can
     /// raise a system dialog — "Always Allow" once), then writes the value
     /// into v3. Dormant items are never modified or deleted.
-    private static func mirrorFromDormant(_ account: String, backend: KeychainBackend = SystemKeychainBackend()) -> String? {
+    private static func mirrorFromDormant(_ account: String, backend: KeychainBackend = KeychainSecrets.defaultBackend()) -> String? {
         var seen = attempted
         seen.insert(account)
         attempted = seen // record BEFORE the read: a crash/deny can't loop
@@ -177,7 +198,7 @@ enum KeychainSecrets {
 
     /// Save or replace in v3. Never touches dormant items. A failed save
     /// keeps the previous value.
-    static func save(_ account: String, _ value: String, backend: KeychainBackend = SystemKeychainBackend()) -> String? {
+    static func save(_ account: String, _ value: String, backend: KeychainBackend = KeychainSecrets.defaultBackend()) -> String? {
         guard let data = value.data(using: .utf8) else { return "Could not encode key as UTF-8." }
         guard !data.isEmpty else { return "Key is empty." } // empty data is the tombstone
         let status = write(account, data: data, backend: backend)
@@ -188,13 +209,15 @@ enum KeychainSecrets {
     /// resurrect it. Returns true only when the credential is verified gone
     /// (v3 item reads back empty); on any failure the previous value remains.
     @discardableResult
-    static func delete(_ account: String, backend: KeychainBackend = SystemKeychainBackend()) -> Bool {
+    static func delete(_ account: String, backend: KeychainBackend = KeychainSecrets.defaultBackend()) -> Bool {
         guard write(account, data: Data(), backend: backend) == errSecSuccess else { return false }
         return !exists(account, backend: backend)
     }
 
-    /// Prompt-free existence check (metadata-only; never reads secret data).
-    static func exists(_ account: String, backend: KeychainBackend = SystemKeychainBackend()) -> Bool {
+    /// Existence check. Prompt-free for ORB itself: the v3 item trusts this
+    /// app, and dormant items are matched by metadata only. The v3 lookup
+    /// does fetch the value, because an empty value is a deletion tombstone.
+    static func exists(_ account: String, backend: KeychainBackend = KeychainSecrets.defaultBackend()) -> Bool {
         if let (data, present) = readItem(service: currentService, account: account, backend: backend) {
             return present && !data.isEmpty
         }
@@ -213,7 +236,7 @@ enum KeychainSecrets {
     // MARK: One-shot migration
 
     /// Account names in dormant stores. Metadata-only — never prompts.
-    static func legacyAccounts() -> [String] {
+    static func legacyAccounts(backend: KeychainBackend = KeychainSecrets.defaultBackend()) -> [String] {
         var names = Set<String>()
         for service in dormantServices {
             let query: [String: Any] = [
@@ -222,8 +245,8 @@ enum KeychainSecrets {
                 kSecMatchLimit as String: kSecMatchLimitAll,
                 kSecReturnAttributes as String: true,
             ]
-            var result: AnyObject?
-            guard SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess,
+            let (status, result) = backend.copyMatching(query)
+            guard status == errSecSuccess,
                   let items = result as? [[String: Any]] else { continue }
             for item in items {
                 if let a = item[kSecAttrAccount as String] as? String { names.insert(a) }
@@ -255,7 +278,7 @@ enum KeychainSecrets {
 
     /// (data, itemPresent) — distinguishes "absent" from "present but empty".
     /// Any failure (including a denied read) reports as absent.
-    private static func readItem(service: String, account: String, backend: KeychainBackend = SystemKeychainBackend()) -> (Data, Bool)? {
+    private static func readItem(service: String, account: String, backend: KeychainBackend = KeychainSecrets.defaultBackend()) -> (Data, Bool)? {
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,

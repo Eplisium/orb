@@ -612,58 +612,21 @@ struct AgentView: View {
     }
 
     private var welcomeView: some View {
-        ScrollView {
-            VStack(spacing: 22) {
-                ZStack {
-                    Circle()
-                        .fill(accent.opacity(0.10))
-                        .frame(width: 104, height: 104)
-                    Circle()
-                        .stroke(accent.opacity(0.18), lineWidth: 1)
-                        .frame(width: 82, height: 82)
-                    Image(systemName: "wand.and.stars.inverse")
-                        .orbFont(size: 34, weight: .medium)
-                        .foregroundStyle(
-                            LinearGradient(
-                                colors: [accent, .blue],
-                                startPoint: .topLeading,
-                                endPoint: .bottomTrailing
-                            )
-                        )
-                }
-
-                VStack(spacing: 8) {
-                    Text("What should we accomplish?")
-                        .orbFont(size: 26, weight: .semibold, design: .rounded)
-                    Text("ORB runs its own agent loop and native functions. It can browse the web, work with files, run commands, automate Mac apps, and control your computer.")
-                        .orbFont(size: 13)
-                        .foregroundStyle(.secondary)
-                        .multilineTextAlignment(.center)
-                        .frame(maxWidth: 570)
-                        .lineSpacing(3)
-                }
-
-                HStack(spacing: 8) {
-                    CapabilityPill(title: "Files", icon: "doc.text")
-                    CapabilityPill(title: "Terminal", icon: "terminal")
-                    CapabilityPill(title: "Web", icon: "globe")
-                    CapabilityPill(title: "Computer", icon: "desktopcomputer")
-                }
-
-                LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 10) {
-                    ForEach(suggestions, id: \.title) { suggestion in
-                        SuggestionCard(suggestion: suggestion, accent: accent) {
-                            messageText = suggestion.prompt
-                            inputFocused = true
-                        }
-                    }
-                }
-                .frame(maxWidth: 650)
-            }
-            .padding(.horizontal, 30)
-            .padding(.top, 58)
-            .padding(.bottom, 30)
-            .frame(maxWidth: .infinity)
+        PlaygroundWelcome(
+            icon: "wand.and.stars.inverse",
+            title: "What should we accomplish?",
+            message: "ORB runs its own agent loop and native functions. It can browse the web, work with files, run commands, automate Mac apps, and control your computer.",
+            pills: [
+                .init(title: "Files", icon: "doc.text"),
+                .init(title: "Terminal", icon: "terminal"),
+                .init(title: "Web", icon: "globe"),
+                .init(title: "Computer", icon: "desktopcomputer"),
+            ],
+            suggestions: suggestions,
+            accent: accent
+        ) { suggestion in
+            messageText = suggestion.prompt
+            inputFocused = true
         }
     }
 

@@ -36,6 +36,18 @@ enum PlaygroundModelDefaults {
     static func initialSelection(activeModelId: String?, preferredModelId: String) -> String {
         activeModelId ?? preferredModelId
     }
+
+    /// Chat's model when nothing is pinned: the first favourite in catalog
+    /// order (what the picker promises and what Agent already does), then the
+    /// model selected in the browser, then the head of the catalog.
+    static func chatFallback(
+        catalogIds: [String],
+        favoriteIds: Set<String>,
+        selectedModelId: String?,
+        lastResort: String = "openai/gpt-4o"
+    ) -> String {
+        catalogIds.first(where: favoriteIds.contains) ?? selectedModelId ?? catalogIds.first ?? lastResort
+    }
 }
 
 struct MessageBottomOffsetKey: PreferenceKey {
@@ -130,7 +142,9 @@ struct SuggestionCard: View {
                 Spacer(minLength: 0)
             }
             .padding(12)
-            .frame(maxWidth: .infinity, minHeight: 64, alignment: .leading)
+            // Fills the row height so two cards side by side always match,
+            // even when only one subtitle wraps.
+            .frame(maxWidth: .infinity, minHeight: 64, maxHeight: .infinity, alignment: .topLeading)
             .background(.orbSurface(0.032))
             .overlay {
                 RoundedRectangle(cornerRadius: 10)
@@ -158,6 +172,101 @@ struct CapabilityPill: View {
             .background(.orbSurface(0.045))
             .clipShape(Capsule())
     }
+}
+
+// MARK: - Welcome
+
+/// Empty-state hero shared by Chat and Agent.
+///
+/// The largest layout that fits the space above the composer wins: the full
+/// hero, then the same content without the hero mark, then a scrolling
+/// fallback. Nothing is ever cut off by the composer, at any window size.
+struct PlaygroundWelcome: View {
+    let icon: String
+    let title: String
+    let message: String
+    let pills: [PlaygroundPill]
+    let suggestions: [PlaygroundSuggestion]
+    let accent: Color
+    let onPick: (PlaygroundSuggestion) -> Void
+
+    var body: some View {
+        ViewThatFits(in: .vertical) {
+            content(showsHero: true)
+            content(showsHero: false)
+            ScrollView { content(showsHero: false) }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    private func content(showsHero: Bool) -> some View {
+        VStack(spacing: 18) {
+            if showsHero { hero }
+
+            VStack(spacing: 8) {
+                Text(title)
+                    .orbFont(size: 26, weight: .semibold, design: .rounded)
+                    .multilineTextAlignment(.center)
+                    .accessibilityAddTraits(.isHeader)
+                Text(message)
+                    .orbFont(size: 13)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+                    .frame(maxWidth: 570)
+                    .lineSpacing(3)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            HStack(spacing: 8) {
+                ForEach(pills, id: \.title) { CapabilityPill(title: $0.title, icon: $0.icon) }
+            }
+
+            VStack(spacing: 10) {
+                ForEach(PlaygroundWelcome.rows(suggestions), id: \.first?.title) { row in
+                    HStack(alignment: .top, spacing: 10) {
+                        ForEach(row, id: \.title) { suggestion in
+                            SuggestionCard(suggestion: suggestion, accent: accent) { onPick(suggestion) }
+                        }
+                    }
+                    // Sizes the row to its tallest card; both cards then fill it.
+                    .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            .frame(maxWidth: 650)
+        }
+        .padding(.horizontal, 30)
+        .padding(.vertical, 20)
+        .frame(maxWidth: .infinity)
+    }
+
+    private var hero: some View {
+        ZStack {
+            Circle()
+                .fill(accent.opacity(0.10))
+                .frame(width: 84, height: 84)
+            Circle()
+                .stroke(accent.opacity(0.18), lineWidth: 1)
+                .frame(width: 66, height: 66)
+            Image(systemName: icon)
+                .orbFont(size: 28, weight: .medium)
+                .foregroundStyle(
+                    LinearGradient(colors: [accent, .blue], startPoint: .topLeading, endPoint: .bottomTrailing)
+                )
+        }
+        .accessibilityHidden(true)
+    }
+
+    /// Suggestions in rows of two, in order; a trailing odd one gets its own row.
+    static func rows(_ suggestions: [PlaygroundSuggestion]) -> [[PlaygroundSuggestion]] {
+        stride(from: 0, to: suggestions.count, by: 2).map {
+            Array(suggestions[$0..<min($0 + 2, suggestions.count)])
+        }
+    }
+}
+
+struct PlaygroundPill {
+    let title: String
+    let icon: String
 }
 
 // MARK: - Typing Indicator

@@ -611,9 +611,12 @@ struct ContentView: View {
             }
         }
         .onAppear {
+            // Record the launch section, but keep the override in force until
+            // the user picks a section: window-state restoration can rewrite
+            // `storedSection` after this first appearance, which used to
+            // silently discard `-orb.startSection` on every relaunch.
             if !launchOverrideApplied {
                 storedSection = selectedSection.rawValue
-                launchOverrideApplied = true
             }
             columnVisibility = sidebarHidden ? .detailOnly : .all
             applyFilterEffects(for: selectedSection)

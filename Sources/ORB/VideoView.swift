@@ -200,7 +200,7 @@ struct VideoView: View {
         // Pinned footer: the primary action stays fully visible however tall the form grows
         // (it used to sit at the end of the scroll content, half-clipped by the window edge).
         .safeAreaInset(edge: .bottom, spacing: 0) {
-            VStack(alignment: .leading, spacing: 8) {
+            StudioPinnedFooter {
             if !service.inFlightRemoteIDs.isEmpty {
                 HStack(spacing: 8) {
                     ProgressView().controlSize(.small)
@@ -225,9 +225,6 @@ struct VideoView: View {
                     .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
             }
             }
-            .padding(.horizontal, 18).padding(.vertical, 12)
-            .background(.bar)
-            .overlay(alignment: .top) { Divider() }
         }
         .frame(width: 340)
         .background(.ultraThinMaterial.opacity(0.72))

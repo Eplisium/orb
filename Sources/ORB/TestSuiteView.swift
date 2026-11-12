@@ -668,6 +668,9 @@ struct TestSuiteView: View {
                         Text(scenario.title)
                             .orbFont(size: 13, weight: .semibold)
                             .lineLimit(1)
+                            // Long titles truncate at the default width; the
+                            // full name stays one hover away.
+                            .help(scenario.title)
                         Text(scenario.category.rawValue)
                             .orbFont(size: 11, weight: .medium)
                             .foregroundStyle(.secondary)

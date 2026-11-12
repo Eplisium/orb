@@ -149,6 +149,26 @@ struct StudioPrimaryButton: View {
     }
 }
 
+/// Bottom bar holding a studio's primary action; attach it with
+/// `.safeAreaInset(edge: .bottom, spacing: 0)` so it stays visible however
+/// tall the form above it grows.
+struct StudioPinnedFooter<Content: View>: View {
+    @ViewBuilder var content: Content
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) { content }
+            .padding(.horizontal, 18).padding(.vertical, 12)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(.bar)
+            // A fixed-height rule rather than `Divider()`: inside a safe-area
+            // inset a Divider takes the vertical axis and draws a hairline
+            // straight down through the button.
+            .overlay(alignment: .top) {
+                Rectangle().fill(Color(nsColor: .separatorColor)).frame(height: 1)
+            }
+    }
+}
+
 /// Small pill button for secondary actions (Add, Choose, Export…).
 struct StudioChipButtonStyle: ButtonStyle {
     var isSelected = false

@@ -33,7 +33,9 @@ enum CatalogCapability: Equatable {
 
     var status: String? {
         if isLoading { return "Discovering models…" }
-        if let error { return "Model discovery unavailable: \(error). Enter a model ID manually." }
+        if let error {
+            return "Model discovery unavailable: \(ErrorCopy.fragment(error)). Enter a model ID manually."
+        }
         if models.isEmpty { return "No models listed for this modality. Enter a model ID manually." }
         return nil
     }
@@ -81,5 +83,19 @@ struct ModalityModelField: View {
                 Text(status).font(.caption2).foregroundStyle(choices.error == nil ? Color.secondary : Color.orange)
             }
         }
+    }
+}
+
+/// Wording helpers for error text embedded in a longer sentence.
+enum ErrorCopy {
+    /// Error text ready to be followed by ". Next sentence": surrounding
+    /// whitespace and its own trailing full stops are removed, so the result
+    /// never reads "…first.. Enter a model ID manually."
+    static func fragment(_ message: String) -> String {
+        var text = message.trimmingCharacters(in: .whitespacesAndNewlines)
+        while text.hasSuffix(".") {
+            text = String(text.dropLast()).trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        return text
     }
 }
