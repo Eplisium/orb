@@ -418,7 +418,10 @@ extension View {
     /// sees it: send, or insert the line break at the cursor.
     func composerReturnKey(requireCommand: Bool, send: @escaping () -> Void) -> some View {
         onKeyPress(.return, phases: .down) { press in
-            let editor = NSApp.keyWindow?.firstResponder
+            // The key window is the normal case; the fallbacks cover a window
+            // that receives keys without being key (accessibility, scripting).
+            let editor: NSResponder? = (NSApp.keyWindow ?? NSApp.mainWindow)?.firstResponder as? NSTextView
+                ?? NSApp.windows.lazy.compactMap { $0.firstResponder as? NSTextView }.first
             switch ComposerKeyPolicy.returnAction(
                 command: press.modifiers.contains(.command),
                 shift: press.modifiers.contains(.shift),
@@ -429,7 +432,10 @@ extension View {
             case .send:
                 send()
             case .newline:
-                _ = editor?.tryToPerform(#selector(NSResponder.insertNewlineIgnoringFieldEditor(_:)), with: nil)
+                // Never swallow the key without inserting the line break.
+                guard editor?.tryToPerform(#selector(NSResponder.insertNewlineIgnoringFieldEditor(_:)), with: nil) == true else {
+                    return .ignored
+                }
             case .passThrough:
                 return .ignored
             }
@@ -439,6 +445,23 @@ extension View {
         .onSubmit {
             let flags = NSEvent.modifierFlags
             if ComposerKeyPolicy.shouldSend(command: flags.contains(.command), shift: flags.contains(.shift), requireCommand: requireCommand) { send() }
+        }
+    }
+
+    /// Puts the caret at the end of a restored draft when the composer takes
+    /// focus. AppKit selects a field's whole text on focus, so without this
+    /// the first keystroke after returning to Chat or Agent replaces the draft.
+    func composerCaretAtEnd(whenFocused focused: Bool) -> some View {
+        onChange(of: focused) { _, isFocused in
+            guard isFocused else { return }
+            DispatchQueue.main.async {
+                guard let editor = (NSApp.keyWindow ?? NSApp.mainWindow)?.firstResponder as? NSTextView
+                        ?? NSApp.windows.lazy.compactMap({ $0.firstResponder as? NSTextView }).first else { return }
+                let length = editor.string.utf16.count
+                // Only undo the automatic select-all; a selection the user made stays.
+                guard length > 0, editor.selectedRange() == NSRange(location: 0, length: length) else { return }
+                editor.setSelectedRange(NSRange(location: length, length: 0))
+            }
         }
     }
 

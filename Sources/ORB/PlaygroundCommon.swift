@@ -46,7 +46,12 @@ enum PlaygroundModelDefaults {
         selectedModelId: String?,
         lastResort: String = "openai/gpt-4o"
     ) -> String {
-        catalogIds.first(where: favoriteIds.contains) ?? selectedModelId ?? catalogIds.first ?? lastResort
+        if let favorite = catalogIds.first(where: favoriteIds.contains) { return favorite }
+        if let selectedModelId { return selectedModelId }
+        // A first-run user gets a well-known model rather than whichever id
+        // happens to sort first in the catalog.
+        if catalogIds.contains(lastResort) { return lastResort }
+        return catalogIds.first ?? lastResort
     }
 }
 

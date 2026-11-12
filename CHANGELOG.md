@@ -29,6 +29,15 @@ All notable changes to ORB are listed here. The format is based on [Keep a Chang
 - Sortable Test Suite results with a verdict legend.
 - Design tokens, accent color choice, and shared components.
 
+### Fixed (bug audit and UI review, 2026-11-12)
+- **Chat and Agent:** Shift-Return inserts a new line (it used to do nothing and leave the draft selected, so the next key replaced it). A restored draft keeps the caret at its end. Editing a message no longer deletes the rest of the conversation until the edit is sent, and it can be cancelled at any time. Sessions open at the latest message. Chat sampling settings persist. Stop is recorded as interrupted, not as a finished answer. A missing API key is no longer reported as a rejected key. First-run Chat defaults to a well-known model.
+- **Agent and MCP:** startup race that orphaned server processes, crashed servers still being advertised, enabling a server not connecting it, arguments with spaces being split, tool results capped at 100 KB, tool-call ids reused across turns, and four crash paths.
+- **Generate:** a video job that was polling when ORB quit can be resumed, a rejected submission is recorded as failed rather than unconfirmed, a remote failure is no longer shown as a network error, split image requests get distinct seeds, Generate waits for the model's options, and `.mov` and `.gif` creations keep their extension.
+- **Model browser:** compare selections are pruned against the catalog, the detail pane refreshes with the catalog, loading state renders during a refresh, free endpoints rank first, uptime is rounded, and notes are flushed on quit.
+- **Settings and shell:** JSON Schema fields are saved, `orb://` links arriving while locked run after unlock, Open Compare moved to ⌃⌘C (⌥⌘C is Copy Last Reply), usage totals match the chart, and removing the inference key leaves management-key data alone.
+- **Core:** thread-safe database access, streamed events up to 32 MB (images), `Retry-After` honoured only up to the retry ceiling, string error codes in streams, and offline sends fail fast.
+- **Interface:** the Chat and Agent welcome fits above the composer, Generate is pinned in Images, the lock screen is readable in light mode, and Appearance controls are aligned.
+
 ### Fixed (hands-on UI audit, 2026-10-07)
 - Theme: switching Light → System no longer leaves black text and light controls on dark Settings surfaces. Appearance is applied once at the app level (`NSApp.appearance`) instead of per-window `preferredColorScheme`.
 - Favorites: the sidebar badge and the list header now count the same resolved favorites. Favorites missing from the current catalog show as "N unavailable" with an explanation; they are kept, not deleted.

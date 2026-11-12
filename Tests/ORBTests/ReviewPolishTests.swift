@@ -68,5 +68,7 @@ struct ReviewPolishTests {
             catalogIds: catalog, favoriteIds: ["gone/model"], selectedModelId: nil) == "a/first")
         #expect(PlaygroundModelDefaults.chatFallback(
             catalogIds: [], favoriteIds: [], selectedModelId: nil) == "openai/gpt-4o")
+        #expect(PlaygroundModelDefaults.chatFallback(
+            catalogIds: catalog + ["openai/gpt-4o"], favoriteIds: [], selectedModelId: nil) == "openai/gpt-4o")
     }
 }

@@ -702,6 +702,7 @@ struct ChatView: View {
                     .orbFont(size: 13)
                     .lineLimit(1...7)
                     .focused($inputFocused)
+                    .composerCaretAtEnd(whenFocused: inputFocused)
                     .padding(.horizontal, 14)
                     .padding(.top, 12)
                     .padding(.bottom, 9)
