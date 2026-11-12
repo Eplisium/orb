@@ -61,6 +61,7 @@ final class StudioServices {
     let speech = SpeechService()
     let embeddings = EmbeddingService()
     let files = FileService()
+    lazy var remoteFileList = RemoteFileList(service: files)
     let testRunner = TestRunner()
 }
 

@@ -9,11 +9,7 @@ import UniformTypeIdentifiers
 
 struct FilesView: View {
     @ObservedObject private var service = StudioServices.shared.files
-    @StudioState("FilesView.remoteFiles") private var remoteFiles: [WorkspaceFile] = []
-    @StudioState("FilesView.nextCursor") private var nextCursor: String? = nil
-    @StudioState("FilesView.hasMore") private var hasMore = false
-    @StudioState("FilesView.isFetchingPage") private var isFetchingPage = false
-    @StudioState("FilesView.pageError") private var pageError: String? = nil
+    @ObservedObject private var listing = StudioServices.shared.remoteFileList
     @StudioState("FilesView.errorMessage") private var errorMessage: String? = nil
     // Shared so "Show all in Library" from a studio can open the Library tab.
     @StudioState("FilesView.showingCreations") private var showingCreations = false
@@ -31,9 +27,9 @@ struct FilesView: View {
             Divider()
             if showingCreations {
                 SavedCreationsLibraryView()
-            } else if isFetchingPage && remoteFiles.isEmpty {
+            } else if listing.isFetchingPage && listing.files.isEmpty {
                 ProgressView().frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else if remoteFiles.isEmpty {
+            } else if listing.files.isEmpty {
                 emptyState
             } else {
                 fileList
@@ -41,9 +37,9 @@ struct FilesView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color(nsColor: .windowBackgroundColor))
-        .task { await refreshPages() }
+        .task { await listing.refresh() }
         .onChange(of: showingCreations) { _, selected in
-            if !selected { Task { await refreshPages() } }
+            if !selected { Task { await listing.refresh() } }
         }
         .confirmationDialog(
             "Delete “\(pendingDelete?.filename ?? pendingDelete?.id ?? "")”? This cannot be undone.",
@@ -74,10 +70,10 @@ struct FilesView: View {
             .pickerStyle(.segmented)
             .labelsHidden()
             .fixedSize()
-            if !showingCreations && isFetchingPage {
+            if !showingCreations && listing.isFetchingPage {
                 ProgressView().controlSize(.small)
             } else if !showingCreations {
-                Button { Task { await refreshPages() } } label: {
+                Button { Task { await listing.refresh() } } label: {
                     Image(systemName: "arrow.clockwise")
                 }
                 .buttonStyle(.plain)
@@ -104,13 +100,13 @@ struct FilesView: View {
             if let errorMessage {
                 PlaygroundErrorBanner(message: errorMessage) { self.errorMessage = nil }
                     .frame(maxWidth: 520)
-            } else if let error = pageError ?? service.lastError {
+            } else if let error = listing.pageError ?? service.lastError {
                 Text(error).font(.caption).foregroundStyle(.orange)
             }
-            if hasMore {
-                Button(isFetchingPage ? "Loading…" : "Load more") { Task { await loadMore() } }
+            if listing.hasMore {
+                Button(listing.isFetchingPage ? "Loading…" : "Load more") { Task { await listing.loadMore() } }
                     .buttonStyle(StudioChipButtonStyle())
-                    .disabled(isFetchingPage)
+                    .disabled(listing.isFetchingPage)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -122,18 +118,18 @@ struct FilesView: View {
                 Text("Showing loaded remote files. Uploads are chat references, not backups: uploaded content cannot be downloaded through the Files API. Keep your originals.")
                     .font(.caption).foregroundStyle(.secondary)
                     .frame(maxWidth: .infinity, alignment: .leading)
-                if let error = pageError ?? service.lastError {
-                    PlaygroundErrorBanner(message: error) { pageError = nil; service.lastError = nil }
+                if let error = listing.pageError ?? service.lastError {
+                    PlaygroundErrorBanner(message: error) { listing.pageError = nil; service.lastError = nil }
                 }
                 if let errorMessage {
                     PlaygroundErrorBanner(message: errorMessage) { self.errorMessage = nil }
                 }
-                ForEach(remoteFiles) { file in
+                ForEach(listing.files) { file in
                     fileRow(file)
                 }
-                if hasMore {
-                    Button(isFetchingPage ? "Loading…" : "Load more") { Task { await loadMore() } }
-                        .disabled(isFetchingPage)
+                if listing.hasMore {
+                    Button(listing.isFetchingPage ? "Loading…" : "Load more") { Task { await listing.loadMore() } }
+                        .disabled(listing.isFetchingPage)
                 }
             }
             .padding(16)
@@ -210,14 +206,13 @@ struct FilesView: View {
                         // Empty/oversized uploads are validated (and rejected
                         // with a clear message) by FileService before any
                         // request is sent.
-                        _ = try await service.upload(filename: url.lastPathComponent, mimeType: mime, data: data)
+                        _ = try await listing.upload(filename: url.lastPathComponent, mimeType: mime, data: data)
                     } catch is CancellationError {
                         break
                     } catch {
                         failures.append("\(url.lastPathComponent): \(error.localizedDescription)")
                     }
                 }
-                await refreshPages()
                 if !failures.isEmpty { errorMessage = failures.joined(separator: "\n") }
             }
         }
@@ -228,40 +223,10 @@ struct FilesView: View {
             do {
                 // Reached only through the confirmation dialog; the service
                 // refuses an unconfirmed delete outright.
-                _ = try await service.delete(id: file.id, confirming: true)
-                remoteFiles.removeAll { $0.id == file.id }
+                try await listing.delete(id: file.id, confirming: true)
             } catch {
                 errorMessage = error.localizedDescription
             }
         }
-    }
-
-    private func refreshPages() async {
-        guard !isFetchingPage else { return }
-        isFetchingPage = true
-        defer { isFetchingPage = false }
-        do {
-            let page = try await service.listPage()
-            remoteFiles = page.data
-            nextCursor = page.cursor
-            hasMore = page.hasMore == true && page.cursor != nil
-            pageError = page.hasMore == true && page.cursor == nil ? "More files reported without a cursor; cannot continue safely." : nil
-        } catch is CancellationError { }
-        catch { pageError = error.localizedDescription }
-    }
-
-    private func loadMore() async {
-        guard hasMore, let cursor = nextCursor, !isFetchingPage else { return }
-        isFetchingPage = true
-        defer { isFetchingPage = false }
-        do {
-            let page = try await service.listPage(cursor: cursor)
-            let known = Set(remoteFiles.map(\.id))
-            remoteFiles += page.data.filter { !known.contains($0.id) }
-            nextCursor = page.cursor
-            hasMore = page.hasMore == true && page.cursor != nil && page.cursor != cursor
-            pageError = page.hasMore == true && !hasMore ? "Pagination returned no new cursor; stopped to avoid a loop." : nil
-        } catch is CancellationError { }
-        catch { pageError = error.localizedDescription }
     }
 }

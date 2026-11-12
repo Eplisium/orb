@@ -85,6 +85,15 @@ Endpoint collision coverage uses decoded payloads and an injected `APIService` r
 
 Responses/Messages remain adapter-only; Chat and Agent still use chat completions. These regressions use synthetic offline payloads, not evidence of malformed live provider output.
 
+## Extended remote Files audit
+
+| ID | Repair | Primary regression suite |
+|---|---|---|
+| F01 | One shared, generation-guarded page owner: stale GETs cannot restore deleted rows or overwrite newer lists, and mutation refreshes cannot be dropped by a busy guard | RemoteFileListTests |
+| F02 | Malformed pages cannot duplicate rows; repeated/cyclic cursors stop pagination with a visible error | RemoteFileListTests |
+
+The owner is `RemoteFileList`; `FilesView` only renders it. Confirmed deletes and successful uploads invalidate any GET begun before the mutation and reconcile from a fresh first page, so pagination never appends a pre-mutation page onto post-mutation state. These regressions use held offline transports that ignore cancellation, so the identity guards—not task cancellation—carry the guarantee. The production Files API is not claimed to emit duplicate IDs or cyclic cursors; these are bounded malformed/unstable-response cases. Remote uploads remain non-downloadable chat references and are separate from the local Library.
+
 ## Verification commands
 
 ```bash

@@ -21,6 +21,7 @@ All notable changes to ORB are listed here. The format is based on [Keep a Chang
 - Video polls validate job identity before state changes and preserve known costs through sparse/resumed responses, including explicit zero.
 
 - Endpoint table identities reserve literal suffix-looking tags before assigning duplicate IDs, keeping decoded endpoint rows distinct.
+- Remote Files pagination is owned by one shared refresh task: stale in-flight pages cannot restore a deleted row or overwrite a newer list, successful uploads/deletes start a fresh first-page fetch instead of being dropped behind a busy guard, and duplicate IDs or repeating cursors stop pagination rather than duplicating rows or looping.
 - Cancelled MCP registry waiters leave lifecycle queues promptly without cancelling the startup owner or applying a late Stop. Cancelled initial startup remains retryable and is not shown as a server failure.
 - MCP startup rejects transport shutdown/replacement or server exit during discovery rather than reporting a dead connection as successful.
 - Cancelling MCP resource/prompt discovery aborts startup instead of publishing a partially initialized connection; ordinary optional-discovery RPC errors remain tolerated.
