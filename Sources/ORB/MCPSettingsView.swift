@@ -148,7 +148,13 @@ struct MCPSettingsView: View {
         .padding(10)
         .background(.orbSurface(0.03))
         .clipShape(RoundedRectangle(cornerRadius: 8))
-        .onChange(of: config.wrappedValue) { _, _ in persist() }
+        .onChange(of: config.wrappedValue) { oldValue, newValue in
+            persist()
+            // A toggle flip connects or disconnects the server right away.
+            if oldValue.isEnabled != newValue.isEnabled {
+                applyEnablement(of: newValue)
+            }
+        }
     }
 
     private var footer: some View {
@@ -209,6 +215,10 @@ struct MCPSettingsView: View {
                         configs.removeAll { names.contains($0.name) }
                         configs += imported
                         persist()
+                        // Imported servers connect immediately, like a toggle.
+                        for server in imported where server.isEnabled {
+                            applyEnablement(of: server)
+                        }
                         showImport = false
                     } catch {
                         importError = error.localizedDescription
@@ -349,6 +359,21 @@ struct MCPSettingsView: View {
         MCPRegistry.saveConfigs(configs)
     }
 
+    /// Keeps live connections in step with the row state: a just-enabled (or
+    /// just-imported) server connects now, and a just-disabled one is shut
+    /// down — "Enabled" must be true when the switch flips, not only after
+    /// Reconnect All or a relaunch.
+    private func applyEnablement(of config: MCPServerConfig) {
+        Task {
+            if config.isEnabled {
+                await MCPRegistry.shared.startServer(named: config.name)
+            } else {
+                await MCPRegistry.shared.stopServer(named: config.name)
+            }
+            await refreshStatus()
+        }
+    }
+
     private func probe(_ config: MCPServerConfig) {
         probing.insert(config.id)
         Task {
@@ -370,7 +395,13 @@ struct MCPSettingsView: View {
         let rows = await MCPRegistry.shared.status()
         await MainActor.run {
             for row in rows {
-                status[row.name] = row.error ?? "✓ Connected — \(row.toolCount) tool(s)"
+                if let error = row.error {
+                    status[row.name] = error
+                } else if row.connected {
+                    status[row.name] = "✓ Connected — \(row.toolCount) tool(s)"
+                } else {
+                    status[row.name] = "Off — not connected"
+                }
             }
         }
     }
@@ -385,7 +416,7 @@ enum MCPAgentAvailability {
 
     static func status(isEnabled: Bool) -> String {
         isEnabled
-            ? "Enabled: offered to the Agent with Computer Access, each call needs approval"
+            ? "Enabled: connected and offered to the Agent with Computer Access; each call needs approval. Command or argument changes apply after Reconnect All."
             : "Off: never offered to the Agent"
     }
 }

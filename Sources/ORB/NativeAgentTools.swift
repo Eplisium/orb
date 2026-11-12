@@ -268,6 +268,16 @@ enum NativeAgentTools {
         let url = constrained
             ? try WorkspacePathGuard.containedURL(forRawPath: rawPath, workspace: workspace)
             : resolvedPath(rawPath, workspace: workspace)
+        // Never load a huge file wholesale: whatever is read becomes a tool
+        // result replayed in every later prompt of the conversation.
+        let fileSize = (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
+        guard fileSize <= 2_000_000 else {
+            return .init(
+                content: "File is \(fileSize) bytes; read_file only loads files up to 2 MB. "
+                    + "Use run_command with sed -n 'START,ENDp' to read a window of it.",
+                isError: true
+            )
+        }
         let text = try String(contentsOf: url, encoding: .utf8)
         let lines = text.components(separatedBy: .newlines)
         let offset = max((arguments["offset"] as? Int ?? 1) - 1, 0)
@@ -395,19 +405,13 @@ enum NativeAgentTools {
             arguments: ["-lc", command],
             workingDirectory: workingDirectory
         )
-        let stdout = bounded(result.stdout)
-        let stderr = bounded(result.stderr)
+        // The pipe collectors already cap output once, at 60 KB per stream,
+        // with a correct omitted-size notice. Capping again here used to chop
+        // that notice off and report a 10 MB stream as "57 bytes omitted".
         return .init(
-            content: "exit_code: \(result.exitCode)\nstdout:\n\(stdout)\nstderr:\n\(stderr)",
+            content: "exit_code: \(result.exitCode)\nstdout:\n\(result.stdout)\nstderr:\n\(result.stderr)",
             isError: result.exitCode != 0
         )
-    }
-
-    private static func bounded(_ value: String, byteLimit: Int = 60_000) -> String {
-        let data = Data(value.utf8)
-        guard data.count > byteLimit else { return value }
-        return String(decoding: data.prefix(byteLimit), as: UTF8.self)
-            + "\n… output truncated (\(data.count - byteLimit) bytes omitted) …"
     }
 
     private static func runAppleScript(_ arguments: [String: Any]) async throws -> NativeAgentToolResult {
@@ -447,10 +451,13 @@ enum NativeAgentTools {
         let script: String
         switch action.lowercased() {
         case "click":
-            guard let x = number(arguments["x"]), let y = number(arguments["y"]) else {
+            guard let x = number(arguments["x"]), let y = number(arguments["y"]),
+                  // `Int(exactly:)`: a model-supplied 1e20 (or NaN) must fail
+                  // the call, not trap the app.
+                  let px = Int(exactly: x.rounded()), let py = Int(exactly: y.rounded()) else {
                 throw ToolError.message("click requires numeric x and y coordinates")
             }
-            script = "tell application \"System Events\" to click at {\(Int(x)), \(Int(y))}"
+            script = "tell application \"System Events\" to click at {\(px), \(py)}"
         case "type":
             guard let text = arguments["text"] as? String else { throw ToolError.missing("text") }
             script = "tell application \"System Events\" to keystroke \"\(appleScriptEscaped(text))\""
@@ -500,7 +507,19 @@ enum NativeAgentTools {
         let (data, response) = try await URLSession.shared.data(for: request)
         let status = (response as? HTTPURLResponse)?.statusCode ?? 0
         let capped = data.prefix(120_000)
-        let text = String(data: capped, encoding: .utf8) ?? "<binary response: \(data.count) bytes>"
+        // Text vs. binary is decided by strict decoding of the WHOLE body; the
+        // cap is decoded lossily so a multibyte character split by the cap
+        // cannot make a perfectly valid non-ASCII page look binary.
+        let text: String
+        if String(data: data, encoding: .utf8) != nil {
+            var body = String(decoding: capped, as: UTF8.self)
+            if data.count > capped.count {
+                body += "\n… [response truncated: \(data.count - capped.count) bytes omitted] …"
+            }
+            text = body
+        } else {
+            text = "<binary response: \(data.count) bytes>"
+        }
         return .init(content: "HTTP \(status)\n\(text)", isError: !(200..<400).contains(status))
     }
 
@@ -660,7 +679,7 @@ enum NativeAgentTools {
             lock.lock()
             defer { lock.unlock() }
             let value = String(decoding: data, as: UTF8.self)
-            return omitted == 0 ? value : value + "\n… output truncated (at least \(omitted) bytes omitted) …"
+            return omitted == 0 ? value : value + "\n… output truncated (\(omitted) bytes omitted) …"
         }
     }
 
@@ -692,11 +711,22 @@ enum NativeAgentTools {
         posix_spawn_file_actions_adddup2(&fileActions, errorWrite, STDERR_FILENO)
         posix_spawn_file_actions_addclose(&fileActions, outputWrite)
         posix_spawn_file_actions_addclose(&fileActions, errorWrite)
+        // stdin is /dev/null: a command must never share ORB's stdin.
+        let nullFD = open("/dev/null", O_RDONLY)
+        guard nullFD >= 0 else {
+            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+        }
+        defer { close(nullFD) }
+        posix_spawn_file_actions_adddup2(&fileActions, nullFD, STDIN_FILENO)
         if let workingDirectory {
             posix_spawn_file_actions_addchdir_np(&fileActions, workingDirectory)
         }
 
-        let flags = Int16(POSIX_SPAWN_SETPGROUP)
+        // Close every inherited descriptor the child does not explicitly map:
+        // without POSIX_SPAWN_CLOEXEC_DEFAULT a detached background child
+        // keeps ORB's MCP stdin write ends open (servers linger after quit)
+        // and concurrent commands can hold each other's pipe ends.
+        let flags = Int16(POSIX_SPAWN_SETPGROUP | POSIX_SPAWN_CLOEXEC_DEFAULT)
         guard posix_spawnattr_setflags(&attributes, flags) == 0,
               posix_spawnattr_setpgroup(&attributes, 0) == 0 else {
             throw POSIXError(.EINVAL)

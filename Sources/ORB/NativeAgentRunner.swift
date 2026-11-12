@@ -10,6 +10,25 @@ enum NativeAgentRunner {
 
     typealias ToolExecutor = @Sendable (AssembledAgentToolCall) async throws -> NativeAgentToolResult
 
+    /// Ceiling for any single tool result entering the conversation. Tool
+    /// history is replayed verbatim in every later prompt, so one unbounded
+    /// result (a big MCP resource, a huge command) would poison the run and
+    /// fail every subsequent request on context length.
+    static let toolResultByteLimit = 100_000
+
+    /// Bounds one tool result before it is stored or displayed, with an
+    /// explicit notice so the model knows content is missing.
+    static func capped(_ result: NativeAgentToolResult) -> NativeAgentToolResult {
+        let data = Data(result.content.utf8)
+        guard data.count > toolResultByteLimit else { return result }
+        let omitted = data.count - toolResultByteLimit
+        return NativeAgentToolResult(
+            content: String(decoding: data.prefix(toolResultByteLimit), as: UTF8.self)
+                + "\n… [tool result truncated: \(omitted) bytes omitted] …",
+            isError: result.isError
+        )
+    }
+
     static func run(
         prompt: String,
         modelId: String,
@@ -298,7 +317,7 @@ enum NativeAgentRunner {
                 await onEvent(.toolExecutionStarted(call))
                 // Fail closed immediately before execution: even a hallucinated
                 // or stale tool name cannot reach an executor.
-                let result: NativeAgentToolResult
+                let rawResult: NativeAgentToolResult
                 if effectivePolicy.allowsExecution(name: call.name) {
                     var approved = true
                     if let approvals, effectivePolicy.requiresApproval(name: call.name) {
@@ -311,20 +330,22 @@ enum NativeAgentRunner {
                         )
                     }
                     if approved {
-                        result = try await executor(call)
+                        rawResult = try await executor(call)
                     } else {
-                        result = NativeAgentToolResult(
+                        rawResult = NativeAgentToolResult(
                             content: "Denied: the user did not approve \"\(call.name)\" for this session.",
                             isError: true
                         )
                     }
                 } else {
-                    result = NativeAgentToolResult(
+                    rawResult = NativeAgentToolResult(
                         content: "Denied: tool \"\(call.name)\" is not permitted in this session's mode.",
                         isError: true
                     )
                 }
                 try Task.checkCancellation()
+                // Bound every result before it is stored or displayed.
+                let result = Self.capped(rawResult)
                 await onEvent(.toolResult(call, result))
                 if let index = displays.firstIndex(where: { $0.id == call.id }) {
                     displays[index].result = result.content
@@ -350,13 +371,19 @@ enum NativeAgentRunner {
             State clearly what you completed, what you found, and anything that remains unfinished.
             """
         ))
-        let finalRequest = OpenRouterRequest(
+        var finalRequest = OpenRouterRequest(
             apiKey: apiKey, model: modelId, messages: messages,
             tools: nil, toolChoice: nil, settings: settings
         )
         var finalText = ""
         var finalUsage: ChatUsage?
         var finalFinishReason: String?
+        // The final summary gets the same recovery as every other turn: one
+        // transient 429/5xx must not fail a run that already did all its work.
+        var finalTransientAttempts = 0
+        var finalStrippedAlready = false
+        finalAttempt: while true {
+        do {
         for try await timed in try await StreamArrivalRelay.stream(client, finalRequest) {
             try Task.checkCancellation()
             switch timed.event {
@@ -370,6 +397,30 @@ enum NativeAgentRunner {
             case .apiError(let error): throw NativeAgentError.api(error.message)
             default: break
             }
+        }
+        break finalAttempt
+        } catch {
+            let action = AgentTurnRecovery.action(
+                for: error, transientAttempts: finalTransientAttempts, strippedAlready: finalStrippedAlready,
+                canStrip: finalRequest.messages.contains { $0.reasoningDetails != nil },
+                hasVisibleOutput: !finalText.isEmpty)
+            switch action {
+            case .fail: throw error
+            case .stripReasoning:
+                finalStrippedAlready = true
+                messages = AgentTurnRecovery.strippingReasoning(messages)
+                finalRequest = OpenRouterRequest(
+                    apiKey: apiKey, model: finalRequest.model, messages: messages,
+                    tools: nil, toolChoice: nil, settings: settings)
+            case .retry(let delay):
+                finalTransientAttempts += 1
+                await onEvent(.retrying(AgentTurnRecovery.label(for: error, attempt: finalTransientAttempts)))
+                try await recoverySleep(delay)
+            }
+            // Discard whatever this failed attempt produced before re-sending.
+            finalText = ""; finalUsage = nil; finalFinishReason = nil
+            try Task.checkCancellation()
+        }
         }
         aggregateUsage = sum(aggregateUsage, finalUsage)
         guard !finalText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {

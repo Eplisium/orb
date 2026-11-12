@@ -227,6 +227,9 @@ actor MCPConnection {
     private(set) var supportsResources = false
     private(set) var supportsPrompts = false
     private(set) var serverInfo: String?
+    /// Why the connection is not usable, when a running server died on us.
+    /// Cleared by a successful `connect()`.
+    private(set) var lastError: String?
 
     /// Per-request ceiling. MCP tools can be slow (network, browsers), but an
     /// unbounded wait would hang the whole agent run.
@@ -269,6 +272,7 @@ actor MCPConnection {
 
     func connect() async throws {
         guard process == nil else { return }
+        lastError = nil
 
         let task = Process()
         // Resolve via a login shell so `npx`, `uvx`, and friends are found even
@@ -385,6 +389,15 @@ actor MCPConnection {
         }
         pending.removeAll()
         process = nil
+        stdinHandle?.closeFile()
+        stdinHandle = nil
+        // A dead server must stop advertising its surface: keeping the
+        // descriptors made every later run offer tools whose calls could only
+        // fail with "not connected".
+        tools = []
+        resources = []
+        prompts = []
+        lastError = "MCP server \"\(config.name)\" exited unexpectedly."
     }
 
     // MARK: Requests
@@ -630,19 +643,55 @@ actor MCPConnection {
     private func dispatch(_ line: String) {
         // Servers sometimes emit non-JSON banner text on stdout; ignore it.
         guard let message = JSONValue.parse(line)?.objectValue else { return }
-        guard let idValue = message["id"], case .number(let rawID) = idValue else { return }
-        let id = Int(rawID)
-        guard let continuation = pending.removeValue(forKey: id)?.continuation else { return }
+
+        // A message WITH a method is a server-initiated request or
+        // notification, never a response. Matching pending requests on any
+        // numeric id let a server keepalive ping carrying id 5 resolve ORB's
+        // own pending id 5 with an empty result — and the ping went unanswered,
+        // so servers with ping timeouts dropped the connection.
+        if let method = message["method"]?.stringValue {
+            handleServerMessage(method: method, message: message)
+            return
+        }
+
+        // Only method-less messages are responses. `Int(exactly:)` because a
+        // server-supplied id outside Int's range must be ignored, not trap.
+        guard let idValue = message["id"], case .number(let rawID) = idValue,
+              let id = Int(exactly: rawID),
+              let continuation = pending.removeValue(forKey: id)?.continuation else { return }
 
         if let error = message["error"]?.objectValue {
-            let code = Int(error["code"].flatMap { value -> Double? in
+            let rawCode = error["code"].flatMap { value -> Double? in
                 if case .number(let number) = value { return number }
                 return nil
-            } ?? 0)
+            }
+            let code = rawCode.flatMap { Int(exactly: $0) } ?? 0
             let text = error["message"]?.stringValue ?? "unknown error"
             continuation.resume(throwing: MCPError.server(code: code, message: text))
             return
         }
         continuation.resume(returning: message["result"] ?? .object([:]))
+    }
+
+    /// Answers a server-initiated JSON-RPC message. Requests carry an id and
+    /// get a reply (`ping` is answered with an empty result per the spec, any
+    /// other method with "method not found"); notifications (no id) are
+    /// informational only.
+    private func handleServerMessage(method: String, message: [String: JSONValue]) {
+        guard let id = message["id"], process?.isRunning == true else { return }
+        let reply: JSONValue
+        if method == "ping" {
+            reply = .object(["jsonrpc": .string("2.0"), "id": id, "result": .object([:])])
+        } else {
+            reply = .object([
+                "jsonrpc": .string("2.0"),
+                "id": id,
+                "error": .object([
+                    "code": .number(-32601),
+                    "message": .string("Method not found: \(method)")
+                ])
+            ])
+        }
+        try? write(reply)
     }
 }

@@ -176,11 +176,11 @@ enum ORBControlTools {
             }
 
         case "orb_search_sessions":
-            guard let query = string("query")?.lowercased(), !query.isEmpty else { return fail("Provide a query.") }
+            guard let query = string("query"), !query.isEmpty else { return fail("Provide a query.") }
             let limit = int("limit", default: 20, max: 100)
             var hits: [String] = []
             outer: for conversation in all {
-                for message in conversation.messages where message.content.lowercased().contains(query) {
+                for message in conversation.messages where message.content.range(of: query, options: .caseInsensitive) != nil {
                     hits.append("\(conversation.id.uuidString.prefix(8)) \"\(conversation.title)\" [\(message.role)]: \(snippet(message.content, around: query))")
                     if hits.count >= limit { break outer }
                 }
@@ -271,9 +271,13 @@ enum ORBControlTools {
         text.count > limit ? String(text.prefix(limit)) + "… [\(text.count - limit) more characters]" : text
     }
 
-    private static func snippet(_ text: String, around lowerQuery: String) -> String {
+    /// A window of `text` around the first case-insensitive match. The search
+    /// runs directly on the original string: a lowercased copy can change
+    /// length (Turkish dotted capital İ lowercases to two scalars), and its
+    /// indices then trap when applied to the original.
+    private static func snippet(_ text: String, around query: String) -> String {
         let flat = text.replacingOccurrences(of: "\n", with: " ")
-        guard let range = flat.lowercased().range(of: lowerQuery) else { return clip(flat, 160) }
+        guard let range = flat.range(of: query, options: .caseInsensitive) else { return clip(flat, 160) }
         let start = flat.index(range.lowerBound, offsetBy: -60, limitedBy: flat.startIndex) ?? flat.startIndex
         let end = flat.index(range.upperBound, offsetBy: 60, limitedBy: flat.endIndex) ?? flat.endIndex
         return String(flat[start..<end])

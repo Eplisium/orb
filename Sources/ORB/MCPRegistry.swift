@@ -234,35 +234,125 @@ actor MCPRegistry {
 
     // MARK: - Lifecycle
 
-    /// Connects every enabled server. Failures are recorded per server rather
-    /// than thrown, so one broken server cannot disable the whole agent.
-    func startEnabledServers() async {
-        didLoad = true
-        let configs = Self.loadConfigs().filter(\.isEnabled)
-        let active = Set(configs.map(\.name))
+    /// True while a startup pass or a targeted lifecycle change owns the
+    /// connection table. The actor is reentrant: without this gate a second
+    /// start (launch startup + first agent run, or Reconnect All mid-startup)
+    /// would race the first pass, create two connections for one config, and
+    /// orphan the earlier child process when the later assignment overwrote it.
+    private var workInFlight = false
+    private var workWaiters: [CheckedContinuation<Void, Never>] = []
 
-        for (name, connection) in connections where !active.contains(name) {
-            await connection.shutdown()
-            connections[name] = nil
+    /// Suspends until no lifecycle work owns the connection table, then owns it.
+    private func beginWork() async {
+        while workInFlight {
+            await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                workWaiters.append(continuation)
+            }
         }
+        workInFlight = true
+    }
 
-        for config in configs {
-            if let existing = connections[config.name], await existing.isRunning { continue }
-            let connection = MCPConnection(config: config)
-            do {
-                try await connection.connect()
-                connections[config.name] = connection
-                lastErrors[config.name] = nil
-            } catch {
-                await connection.shutdown()
-                lastErrors[config.name] = error.localizedDescription
+    /// Releases the table and wakes every waiter; each re-checks the gate, so
+    /// queued work serializes instead of overlapping.
+    private func endWork() {
+        workInFlight = false
+        let waiters = workWaiters
+        workWaiters = []
+        for waiter in waiters { waiter.resume() }
+    }
+
+    /// Waits for in-flight lifecycle work without taking ownership. Every
+    /// read and dispatch entry point joins an in-flight pass so a run that
+    /// starts during launch startup sees all of its servers, not just the
+    /// ones connected so far.
+    private func joinWork() async {
+        while workInFlight {
+            await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                workWaiters.append(continuation)
             }
         }
     }
 
+    private func ensureStarted() async {
+        if workInFlight {
+            await joinWork()
+        } else if !didLoad {
+            await startEnabledServers()
+        }
+    }
+
+    /// Connects every enabled server. Failures are recorded per server rather
+    /// than thrown, so one broken server cannot disable the whole agent.
+    /// Passes run one at a time (`beginWork` joins any pass already running),
+    /// and `didLoad` flips only after the loop completes — a caller arriving
+    /// mid-pass waits instead of observing a half-connected world.
+    func startEnabledServers() async {
+        await beginWork()
+        let configs = Self.loadConfigs().filter(\.isEnabled)
+        let active = Set(configs.map(\.name))
+
+        for (name, connection) in connections where !active.contains(name) {
+            connections[name] = nil
+            await connection.shutdown()
+        }
+
+        for config in configs {
+            await connectLocked(config)
+        }
+        didLoad = true
+        endWork()
+    }
+
+    /// Connects one config. Caller holds the lifecycle gate. A live connection
+    /// is kept as-is; a dead one is shut down before being replaced so its
+    /// child process can never leak, and an existing entry is never
+    /// overwritten without that shutdown.
+    private func connectLocked(_ config: MCPServerConfig) async {
+        if let existing = connections[config.name] {
+            if await existing.isRunning { return }
+            connections[config.name] = nil
+            await existing.shutdown()
+        }
+        let connection = MCPConnection(config: config)
+        do {
+            try await connection.connect()
+            connections[config.name] = connection
+            lastErrors[config.name] = nil
+        } catch {
+            await connection.shutdown()
+            lastErrors[config.name] = error.localizedDescription
+        }
+    }
+
+    /// Connects a single server right now (settings enable/add), so "Enabled"
+    /// is true the moment the user acts — not only after Reconnect All.
+    func startServer(named name: String) async {
+        await beginWork()
+        defer { endWork() }
+        guard let config = Self.loadConfigs().first(where: { $0.name == name }), config.isEnabled else { return }
+        guard !config.command.isEmpty else {
+            lastErrors[name] = "Command is empty."
+            return
+        }
+        await connectLocked(config)
+    }
+
+    /// Shuts down a single server's connection (settings disable/remove).
+    func stopServer(named name: String) async {
+        await beginWork()
+        defer { endWork() }
+        if let existing = connections.removeValue(forKey: name) {
+            await existing.shutdown()
+        }
+        lastErrors[name] = nil
+    }
+
     func shutdownAll() async {
-        for (_, connection) in connections { await connection.shutdown() }
+        await beginWork()
+        defer { endWork() }
+        let dying = connections
         connections.removeAll()
+        for (_, connection) in dying { await connection.shutdown() }
     }
 
     /// Verifies a single configuration by connecting and listing its tools.
@@ -288,9 +378,12 @@ actor MCPRegistry {
     // MARK: - Tools
 
     func availableTools() async -> [MCPToolDescriptor] {
-        if !didLoad { await startEnabledServers() }
+        await ensureStarted()
         var all: [MCPToolDescriptor] = []
         for (_, connection) in connections {
+            // A crashed server stops advertising its tools (its descriptors
+            // are cleared on termination); skip anything not running.
+            guard await connection.isRunning else { continue }
             all += await connection.tools
         }
         return all.sorted { $0.qualifiedName < $1.qualifiedName }
@@ -369,18 +462,20 @@ actor MCPRegistry {
     // MARK: - Resources and prompts
 
     func availableResources() async -> [MCPResourceDescriptor] {
-        if !didLoad { await startEnabledServers() }
+        await ensureStarted()
         var all: [MCPResourceDescriptor] = []
         for (_, connection) in connections {
+            guard await connection.isRunning else { continue }
             all += await connection.resources
         }
         return all.sorted { $0.id < $1.id }
     }
 
     func availablePrompts() async -> [MCPPromptDescriptor] {
-        if !didLoad { await startEnabledServers() }
+        await ensureStarted()
         var all: [MCPPromptDescriptor] = []
         for (_, connection) in connections {
+            guard await connection.isRunning else { continue }
             all += await connection.prompts
         }
         return all.sorted { $0.id < $1.id }
@@ -413,11 +508,15 @@ actor MCPRegistry {
         }
     }
 
-    func status() async -> [(name: String, toolCount: Int, error: String?)] {
-        var rows: [(String, Int, String?)] = []
+    func status() async -> [(name: String, toolCount: Int, connected: Bool, error: String?)] {
+        var rows: [(String, Int, Bool, String?)] = []
         for config in Self.loadConfigs() {
-            let tools = await connections[config.name]?.tools.count ?? 0
-            rows.append((config.name, tools, lastErrors[config.name]))
+            let connection = connections[config.name]
+            let connected = await connection?.isRunning ?? false
+            let tools = connected ? (await connection?.tools.count ?? 0) : 0
+            let terminationError = await connection?.lastError
+            let error = connected ? nil : (terminationError ?? lastErrors[config.name])
+            rows.append((config.name, tools, connected, error))
         }
         return rows
     }
@@ -431,6 +530,7 @@ actor MCPRegistry {
     }
 
     func call(qualifiedName: String, argumentsJSON: String) async -> NativeAgentToolResult {
+        await ensureStarted()
         guard let route = MCPToolNaming.resolve(qualifiedName) else {
             return .init(content: "Unknown MCP tool \(qualifiedName).", isError: true)
         }
@@ -443,9 +543,21 @@ actor MCPRegistry {
         }
         guard let connection = match?.value else {
             if let bridge, let invalid = Self.invalidBridgeArguments(bridge, parsed) { return invalid }
-            let detail = lastErrors[route.server].map { " (\($0))" } ?? ""
+            let detail = lastErrors
+                .first { MCPToolNaming.sanitize($0.key) == route.server }
+                .map { " (\($0.value))" } ?? ""
             return .init(
                 content: "MCP server \"\(route.server)\" is not connected\(detail).",
+                isError: true
+            )
+        }
+        // A crashed server must not receive calls (or advertise tools); say
+        // why the connection is gone instead of failing per call.
+        guard await connection.isRunning else {
+            let serverName = await connection.name
+            let detail = await connection.lastError ?? ""
+            return .init(
+                content: "MCP server \"\(serverName)\" is not connected.\(detail.isEmpty ? "" : " \(detail)")",
                 isError: true
             )
         }
@@ -466,9 +578,13 @@ actor MCPRegistry {
                     if let string = value.stringValue {
                         arguments[key] = string
                     } else if let number = value.doubleValue {
-                        arguments[key] = number == number.rounded()
-                            ? String(Int(number))
-                            : String(number)
+                        // `Int(exactly:)`: a whole number like 1e30 has no Int
+                        // representation and must not trap.
+                        if number == number.rounded(), let exact = Int(exactly: number) {
+                            arguments[key] = String(exact)
+                        } else {
+                            arguments[key] = String(number)
+                        }
                     } else if let flag = value.boolValue {
                         arguments[key] = String(flag)
                     }
