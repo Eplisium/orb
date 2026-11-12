@@ -73,6 +73,12 @@ final class DatabaseManager {
     private(set) var db: OpaquePointer?
     private let dbPath: String
     private let deletesDatabaseOnDeinit: Bool
+    /// Serializes every multi-statement operation. Asset saves and agent
+    /// memory runs reach this manager from background tasks while conversation
+    /// saves run on the main thread; without this lock a background statement
+    /// can interleave inside another thread's open transaction. Recursive so
+    /// the save helpers can call each other while holding it.
+    private let dbLock = NSRecursiveLock()
     /// Set when the on-disk database could not be opened or migrated; ORB then
     /// degrades to a non-persistent in-memory database instead of crashing.
     private(set) var launchFailure: DatabaseLaunchFailure?
@@ -125,14 +131,17 @@ final class DatabaseManager {
     }
 
     private func openDatabase() {
-        if sqlite3_open(dbPath, &db) != SQLITE_OK {
+        // FULLMUTEX: the connection is used from the main thread and from
+        // background tasks (AssetStore, agent memory), so the SQLite API
+        // itself must be serialized. System SQLite here is THREADSAFE=2.
+        if sqlite3_open_v2(dbPath, &db, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX, nil) != SQLITE_OK {
             let failed = db
             let msg = failed.map { String(cString: sqlite3_errmsg($0)) } ?? "unknown error"
             sqlite3_close(failed)
             db = nil
             // A failed open must never take the app down. Degrade to an
             // in-memory database so ORB still works (without persistence).
-            if sqlite3_open(":memory:", &db) == SQLITE_OK {
+            if sqlite3_open_v2(":memory:", &db, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX, nil) == SQLITE_OK {
                 launchFailure = DatabaseLaunchFailure(
                     title: "Database Unavailable",
                     detail: "ORB could not open its local database at \(dbPath) (\(msg)). ORB is running with a temporary in-memory database, so data will not persist for this session.",
@@ -418,7 +427,7 @@ final class DatabaseManager {
             sqlite3_close(db)
             db = nil
             let backupPath = isCorruption ? Self.backupDatabase(at: dbPath) : nil
-            let openedFallback = sqlite3_open(":memory:", &db) == SQLITE_OK
+            let openedFallback = sqlite3_open_v2(":memory:", &db, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX, nil) == SQLITE_OK
             if openedFallback {
                 exec("PRAGMA journal_mode=WAL;")
                 exec("PRAGMA foreign_keys=ON;")
@@ -432,7 +441,7 @@ final class DatabaseManager {
                         ? "ORB could not open its local database because another process is using it (\(error.localizedDescription)). Your existing data was left untouched. ORB is running with a temporary in-memory database; data will not persist for this session. Quit other ORB instances or tools using the database and relaunch."
                         : "ORB could not upgrade its local database (\(error.localizedDescription)). Your existing data was left untouched. ORB is running with a temporary in-memory database; data will not persist for this session.")
                     : backupPath != nil
-                    ? "ORB could not upgrade its local database (\(error.localizedDescription)). The previous database was moved to \(backupPath!) and ORB is starting with a fresh, empty one."
+                    ? "ORB could not upgrade its local database (\(error.localizedDescription)). The previous database was moved to \(backupPath!) and ORB is starting with a temporary in-memory database, so data will not persist for this session."
                     : "ORB could not upgrade its local database (\(error.localizedDescription)). ORB is running with a temporary in-memory database; data will not persist for this session.",
                 backupPath: backupPath
             )
@@ -471,6 +480,8 @@ final class DatabaseManager {
     /// re-delivered completion can never double count.
     @discardableResult
     func insertUsageEvent(_ event: UsageEvent) -> Bool {
+        dbLock.lock()
+        defer { dbLock.unlock() }
         let sql = """
         INSERT OR IGNORE INTO usage_events
         (id, timestamp, feature, model_id, cost, prompt_tokens, completion_tokens, total_tokens, requests)
@@ -598,6 +609,8 @@ final class DatabaseManager {
     // MARK: - Agent memories (remember/recall)
 
     func saveMemory(content: String) throws {
+        dbLock.lock()
+        defer { dbLock.unlock() }
         let sql = "INSERT INTO agent_memories (id, content, created_at) VALUES (?, ?, ?);"
         guard let stmt = prepare(sql) else { throw DatabaseManagerError.operationFailed(currentError()) }
         defer { sqlite3_finalize(stmt) }
@@ -611,6 +624,8 @@ final class DatabaseManager {
     /// Case-insensitive substring search, newest first. LIKE wildcards in
     /// the query are escaped so they match literally.
     func searchMemories(query: String, limit: Int = 8) -> [AgentMemory] {
+        dbLock.lock()
+        defer { dbLock.unlock() }
         let escaped = query
             .replacingOccurrences(of: "\\", with: "\\\\")
             .replacingOccurrences(of: "%", with: "\\%")
@@ -670,6 +685,8 @@ final class DatabaseManager {
     }
 
     func saveConversationRecordChecked(_ conv: ChatConversation, agentHistoryJSON: String) throws {
+        dbLock.lock()
+        defer { dbLock.unlock() }
         try execChecked("BEGIN IMMEDIATE;")
         do {
             try saveConversationChecked(conv, agentHistoryJSON: agentHistoryJSON)
@@ -690,6 +707,8 @@ final class DatabaseManager {
         _ conv: ChatConversation, agentHistoryJSON: String,
         messages: [(message: ChatMessage, sortOrder: Int)]
     ) throws {
+        dbLock.lock()
+        defer { dbLock.unlock() }
         try execChecked("BEGIN IMMEDIATE;")
         do {
             try saveConversationChecked(conv, agentHistoryJSON: agentHistoryJSON)
@@ -1051,6 +1070,8 @@ final class DatabaseManager {
     // MARK: - Assets (durable asset metadata)
 
     func saveAssetRecordChecked(_ record: AssetRecord) throws {
+        dbLock.lock()
+        defer { dbLock.unlock() }
         let sql = """
         INSERT INTO assets
         (id, relative_path, remote_reference, mime_type, size_bytes, checksum,
@@ -1111,6 +1132,8 @@ final class DatabaseManager {
     }
 
     func findAssetRecord(checksum: String) -> AssetRecord? {
+        dbLock.lock()
+        defer { dbLock.unlock() }
         let sql = """
         SELECT id, relative_path, remote_reference, mime_type, size_bytes, checksum,
                job_id, message_id, retention, created_at

@@ -55,7 +55,16 @@ struct ServerSentEventDecoder {
     private let maxEventBytes: Int
     private let diagnosticLimit: Int
 
-    init(maxEventBytes: Int = 1_048_576, diagnosticLimit: Int = 512) {
+    /// Cap on a single SSE event. Streamed images arrive as one base64 data
+    /// URL in one data line and routinely exceed a megabyte, so this must stay
+    /// generous.
+    static let defaultMaxEventBytes = 32 * 1024 * 1024
+    /// Keepalives and unknown fields never carry real content and must not
+    /// be able to grow a decoder without bound, whatever the event cap is.
+    static let commentByteCeiling = 1_048_576
+    private var commentByteLimit: Int { min(maxEventBytes, Self.commentByteCeiling) }
+
+    init(maxEventBytes: Int = ServerSentEventDecoder.defaultMaxEventBytes, diagnosticLimit: Int = 512) {
         self.maxEventBytes = maxEventBytes
         self.diagnosticLimit = diagnosticLimit
     }
@@ -97,10 +106,16 @@ struct ServerSentEventDecoder {
             return dataLines.isEmpty ? [] : try decodeCurrentEvent()
         }
         eventBytes += line.count + 1
+        if line.first == 0x3A {
+            // comment / keepalive: bounded by the smaller cap
+            guard eventBytes <= commentByteLimit else {
+                throw OpenRouterStreamError.eventTooLarge(limit: commentByteLimit)
+            }
+            return []
+        }
         guard eventBytes <= maxEventBytes else {
             throw OpenRouterStreamError.eventTooLarge(limit: maxEventBytes)
         }
-        if line.first == 0x3A { return [] } // comment / keepalive
         let prefix = Data("data:".utf8)
         guard line.starts(with: prefix) else { return [] }
         var value = Data(line.dropFirst(prefix.count))

@@ -213,6 +213,10 @@ enum NativeAgentRunner {
             }
             }
 
+            // A cancelled consumer ends the relay stream normally instead of
+            // throwing, so Stop must be caught here, before a cut-off turn is
+            // read as a finished answer (or as an invalid empty response).
+            try Task.checkCancellation()
             aggregateUsage = sum(aggregateUsage, turnUsage)
             if let aggregateUsage { await onEvent(.usage(turn: turn, cumulative: aggregateUsage)) }
             await emit(.turnFinished(reason: finishReason), lastArrival)
@@ -422,6 +426,9 @@ enum NativeAgentRunner {
             try Task.checkCancellation()
         }
         }
+        // Same as the turn loop: Stop during the summary must not be recorded
+        // as a completed (truncated) answer.
+        try Task.checkCancellation()
         aggregateUsage = sum(aggregateUsage, finalUsage)
         guard !finalText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             throw NativeAgentError.exhausted

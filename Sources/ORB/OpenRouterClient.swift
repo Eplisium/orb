@@ -314,7 +314,8 @@ final class OpenRouterClient: OpenRouterClientProtocol, @unchecked Sendable {
                     if terminal {
                         continuation.finish()
                     } else if sawPrimaryFinish {
-                        _ = try decoder.finish()
+                        // A trailing usage event cut off by the grace deadline
+                        // must not turn a complete answer into an error.
                         continuation.finish()
                     } else {
                         _ = try decoder.finish()
@@ -384,7 +385,7 @@ final class OpenRouterClient: OpenRouterClientProtocol, @unchecked Sendable {
                 throw CancellationError()
             } catch {
                 if retry < retryPolicy.maxRetries, isTransientTransport(error) {
-                    try await sleeper(backoff(for: retry, retryAfter: nil))
+                    try await sleeper(try backoff(for: retry, retryAfter: nil))
                     retry += 1
                     continue
                 }
@@ -414,7 +415,7 @@ final class OpenRouterClient: OpenRouterClientProtocol, @unchecked Sendable {
                 retryAfter: retryAfter
             )
             if retry < retryPolicy.maxRetries, isTransientStatus(response.statusCode) {
-                try await sleeper(backoff(for: retry, retryAfter: retryAfter))
+                try await sleeper(try backoff(for: retry, retryAfter: retryAfter))
                 retry += 1
                 continue
             }
@@ -434,8 +435,18 @@ final class OpenRouterClient: OpenRouterClientProtocol, @unchecked Sendable {
         ].contains(urlError.code)
     }
 
-    private func backoff(for retry: Int, retryAfter: TimeInterval?) -> Duration {
-        if let retryAfter { return .seconds(max(0, retryAfter)) }
+    private func backoff(for retry: Int, retryAfter: TimeInterval?) throws -> Duration {
+        // A server-supplied Retry-After is a hint, not an instruction: honour
+        // it up to maxDelay, and fail immediately rather than parking the run
+        // behind an unbounded server-side number.
+        if let retryAfter {
+            guard retryAfter.isFinite, retryAfter <= retryPolicy.maxDelay.timeInterval else {
+                // A non-finite or absurdly large hint must not park the run
+                // (or trap building a Duration); surface the limit instead.
+                throw OpenRouterClientError.http(status: 429, message: "Rate limited; the requested retry delay is longer than ORB will wait for.", retryAfter: nil)
+            }
+            return .seconds(max(0, retryAfter))
+        }
         let base = retryPolicy.baseDelay.timeInterval * pow(2, Double(retry))
         let capped = min(base, retryPolicy.maxDelay.timeInterval)
         let spread = capped * min(max(retryPolicy.jitter, 0), 1)
@@ -445,7 +456,10 @@ final class OpenRouterClient: OpenRouterClientProtocol, @unchecked Sendable {
 
     private func parseRetryAfter(_ value: String?) -> TimeInterval? {
         guard let value else { return nil }
-        if let seconds = TimeInterval(value) { return max(0, seconds) }
+        if let seconds = TimeInterval(value) {
+            guard seconds.isFinite else { return nil }
+            return max(0, seconds)
+        }
         let formatter = DateFormatter()
         formatter.locale = Locale(identifier: "en_US_POSIX")
         formatter.timeZone = TimeZone(secondsFromGMT: 0)

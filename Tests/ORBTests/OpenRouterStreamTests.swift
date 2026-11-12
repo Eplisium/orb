@@ -53,6 +53,30 @@ struct OpenRouterStreamTests {
         #expect(try decoder.consume(Data(packed.utf8)).count == 50)
     }
 
+    @Test("a single streamed event larger than 1 MiB still decodes (images arrive as one data URL)")
+    func largeSingleEventWithinBudget() throws {
+        let big = String(repeating: "a", count: 2 * 1024 * 1024)
+        let payload = "data: {\"choices\":[{\"delta\":{\"content\":\"" + big + "\"}}]}\n\n"
+        var decoder = ServerSentEventDecoder()
+        let events = try decoder.consume(Data(payload.utf8))
+        #expect(events.count == 1)
+        if case .contentDelta(_, let text) = events.first {
+            #expect(text.count == big.count)
+        } else {
+            Issue.record("expected a content delta")
+        }
+        #expect(try decoder.finish().isEmpty)
+    }
+
+    @Test("comments stay bounded even when the event budget is generous")
+    func commentBoundIndependentOfEventBudget() throws {
+        var decoder = ServerSentEventDecoder()
+        // A keepalive far past the comment ceiling never emits and must fail.
+        #expect(throws: OpenRouterStreamError.self) {
+            _ = try decoder.consume(Data((":" + String(repeating: "x", count: 1_100_000) + "\n").utf8))
+        }
+    }
+
     @Test("an oversized comment is bounded even when no data is emitted")
     func oversizedComment() throws {
         var decoder = ServerSentEventDecoder(maxEventBytes: 32)

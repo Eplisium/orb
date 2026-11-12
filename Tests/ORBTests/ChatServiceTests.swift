@@ -898,6 +898,27 @@ struct ChatServiceTests {
         #expect(assistant?.finishReason == "cancelled")
     }
 
+    @Test("Stop during an agent turn is interrupted, not a finished answer")
+    func agentStopBetweenTokensIsInterrupted() async throws {
+        let store = MemoryConversationStore()
+        let client = HangingOpenRouterClient(events: [.contentDelta(choiceIndex: 0, text: "partial")])
+        let service = ChatService(client: client, store: store, apiKeyProvider: { "fixture-key" })
+        await service.sendAgentMessage(
+            "hello", modelId: "test/model",
+            workspace: FileManager.default.temporaryDirectory.path, fullComputerAccess: false)
+        // The runner is suspended in next() of the never-finishing stream once
+        // the first delta has been published.
+        for _ in 0..<500 where !service.streamingContent.contains("partial") { try await Task.sleep(for: .milliseconds(2)) }
+        #expect(service.streamingContent.contains("partial"))
+
+        service.stopStreaming()
+        try await waitUntilIdle(service)
+
+        let assistant = service.activeConversation?.messages.last
+        #expect(assistant?.role == "assistant")
+        #expect(assistant?.status == .interrupted)
+    }
+
     @Test("Stop between tokens is interrupted, not complete")
     func stopBetweenTokensIsInterrupted() async throws {
         let store = MemoryConversationStore()

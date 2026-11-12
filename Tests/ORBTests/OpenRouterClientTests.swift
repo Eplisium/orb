@@ -183,6 +183,51 @@ struct OpenRouterClientTests {
         #expect(await delays.values == [.seconds(2)])
     }
 
+    @Test("a Retry-After beyond maxDelay fails immediately instead of parking the run")
+    func retryAfterBeyondMaxDelayFailsFast() async throws {
+        let error = Data("{\"error\":{\"message\":\"busy\"}}".utf8)
+        let transport = FixtureHTTPTransport([
+            .init(response: response(status: 429, headers: ["Retry-After": "120"]), chunks: [.success(error)])
+        ])
+        let delays = DelayRecorder()
+        let client = OpenRouterClient(
+            transport: transport,
+            retryPolicy: .init(maxRetries: 2, baseDelay: .milliseconds(10), maxDelay: .seconds(5), jitter: 0),
+            sleeper: { try await delays.sleep($0) }
+        )
+
+        await #expect(throws: OpenRouterClientError.self) { _ = try await client.stream(self.request()) }
+        #expect(await transport.requestCount == 1)
+        #expect(await delays.values.isEmpty)
+    }
+
+    @Test("a non-finite Retry-After is treated as absent and the run retries normally")
+    func nonFiniteRetryAfterIsIgnored() async throws {
+        let error = Data("{\"error\":{\"message\":\"busy\"}}".utf8)
+        // One reply per attempt: an unparseable hint must not throw early,
+        // so the client takes the normal capped-backoff path and retries.
+        let transport = FixtureHTTPTransport([
+            .init(response: response(status: 429, headers: ["Retry-After": "inf"]), chunks: [.success(error)]),
+            .init(response: response(status: 429, headers: ["Retry-After": "inf"]), chunks: [.success(error)]),
+            .init(response: response(status: 429, headers: ["Retry-After": "inf"]), chunks: [.success(error)])
+        ])
+        let delays = DelayRecorder()
+        let client = OpenRouterClient(
+            transport: transport,
+            retryPolicy: .init(maxRetries: 2, baseDelay: .milliseconds(10), maxDelay: .seconds(5), jitter: 0),
+            sleeper: { try await delays.sleep($0) }
+        )
+
+        await #expect(throws: OpenRouterClientError.self) { _ = try await client.stream(self.request()) }
+        // Two retries were attempted, each on the ordinary base backoff —
+        // the infinite hint never parked the run and never trapped.
+        #expect(await transport.requestCount == 3)
+        #expect(await delays.values.count == 2)
+        for value in await delays.values {
+            #expect(value <= .seconds(5))
+        }
+    }
+
     @Test("non-transient HTTP failures do not retry")
     func doesNotRetryAuthenticationFailure() async throws {
         let error = Data("{\"error\":{\"message\":\"bad key\"}}".utf8)
