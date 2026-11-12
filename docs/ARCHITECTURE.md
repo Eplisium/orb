@@ -65,6 +65,7 @@ There are no third-party dependencies. The app uses only Apple frameworks: Swift
 - `MediaServices` has clients for images, video, audio, files, and embeddings/rerank. `MediaEndpointURL` validates every polling URL against `https://openrouter.ai/api/…` before attaching credentials.
 - `Core/Jobs/JobController` keeps a durable record of each video job before polling starts, so jobs can resume after relaunch without being submitted (and paid for) again.
 - `Core/Assets/AssetStore` provides content-addressed (SHA-256) atomic writes. `SavedCreations` indexes outputs for the Library. Streamed input files are consumed only after both metadata and Library index commits; failures retain the service-owned download for retry/export. Video polling validates the expected job ID before updating state and merges absent cost from the previous/durable job.
+- Library pending removals are store-owned so separate windows cannot purge each other's Undo bytes. Attachment-read failures stop deletion. Single-item Library/Video/Speech and generated Image/Speech exports share managed-destination validation (including filesystem aliases and SQLite sidecars), stage beside the destination, and atomically rename only after a successful copy/write. Bulk export retains its separate no-overwrite behavior.
 
 ### Credentials
 

@@ -74,6 +74,7 @@ final class AssetStore {
     }
 
     let baseDirectory: URL
+    var metadataFileURLs: [URL] { database.storageFileURLs }
     private let database: DatabaseManager
 
     /// - Parameters:
@@ -318,7 +319,7 @@ final class AssetStore {
     /// references it. Returns whether anything was removed. Missing files are fine.
     @discardableResult
     func removeUnattached(checksum: String) throws -> Bool {
-        if database.hasAttachedAssetRecord(checksum: checksum) { return false }
+        if try database.hasAttachedAssetRecord(checksum: checksum) { return false }
         let records = database.loadAssetRecords().filter { $0.checksum == checksum }
         for record in records {
             let url = try resolvedURL(forRelativePath: record.relativePath)

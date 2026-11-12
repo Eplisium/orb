@@ -15,6 +15,10 @@ All notable changes to ORB are listed here. The format is based on [Keep a Chang
 - Failed asset/Library saves preserve retry inputs; remote file deletion requires confirmation for the requested file. Shared Image/Video catalog refreshes survive departing callers.
 - Video polls validate job identity before state changes and preserve known costs through sparse/resumed responses, including explicit zero.
 
+### Library data protection
+- Keep shared asset bytes while another window still offers Undo. Attachment lookup failures stop cleanup rather than authorizing deletion.
+- Single-item Library/Video/Speech and generated Image/Speech exports reject managed assets, manifests, SQLite files and sidecars, including filesystem aliases. Failed replacements preserve existing destinations; recovery export works before the first successful Library save.
+
 ### Repository and packaging
 - GitHub Actions CI on macOS: build, unique-warning count in the job summary, test, ad-hoc packaged `ORB.app` artifact, and uploaded logs.
 - `build_app.sh` hardening: strict mode, `swift build --show-bin-path` instead of searching `.build`, and `--release`, `--build`, `--adhoc` (automatic under `CI`), and `--output` options.

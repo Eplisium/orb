@@ -113,6 +113,12 @@ final class DatabaseManager {
         }
     }
 
+    /// Files owned by this connection, including SQLite's transient sidecars.
+    var storageFileURLs: [URL] {
+        guard dbPath != ":memory:" else { return [] }
+        return ["", "-wal", "-shm", "-journal"].map { URL(fileURLWithPath: dbPath + $0) }
+    }
+
     var testDatabasePath: String? {
         deletesDatabaseOnDeinit ? dbPath : nil
     }
@@ -1126,12 +1132,19 @@ final class DatabaseManager {
         try requireDone(stmt)
     }
 
-    func hasAttachedAssetRecord(checksum: String) -> Bool {
+    /// An unreadable attachment state is not evidence that deletion is safe.
+    func hasAttachedAssetRecord(checksum: String) throws -> Bool {
+        dbLock.lock()
+        defer { dbLock.unlock() }
         let sql = "SELECT 1 FROM assets WHERE checksum = ? AND (job_id IS NOT NULL OR message_id IS NOT NULL) LIMIT 1;"
-        guard let stmt = prepare(sql) else { return false }
+        guard let stmt = prepare(sql) else { throw DatabaseManagerError.operationFailed(currentError()) }
         defer { sqlite3_finalize(stmt) }
         Self.bindText(stmt, 1, checksum)
-        return sqlite3_step(stmt) == SQLITE_ROW
+        switch sqlite3_step(stmt) {
+        case SQLITE_ROW: return true
+        case SQLITE_DONE: return false
+        default: throw DatabaseManagerError.operationFailed(currentError())
+        }
     }
 
     func loadAssetRecords() -> [AssetRecord] {

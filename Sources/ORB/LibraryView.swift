@@ -11,12 +11,12 @@ func creationExtension(_ creation: SavedCreation) -> String {
 }
 
 @MainActor
-func exportCreation(_ data: Data, creation: SavedCreation) throws {
+func exportCreation(_ creation: SavedCreation, store: SavedCreationsStore) throws {
     let panel = NSSavePanel()
     panel.title = "Export Saved Creation"
     panel.nameFieldStringValue = "orb-\(creation.id.uuidString).\(creationExtension(creation))"
     if panel.runModal() == .OK, let url = panel.url {
-        try data.write(to: url, options: .atomic)
+        try store.export(creation, to: url)
     }
 }
 

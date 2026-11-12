@@ -28,6 +28,16 @@ The backend audit identified 21 defects. This map connects each repair to its re
 
 Approval lifetime coverage additionally delays a UI handler until after cancellation and checks that it cannot enqueue a stale prompt. Test Suite presentation hosts have stable identities: removing a non-owning window must not deny the active window's request.
 
+## Extended Library audit
+
+| ID | Repair | Primary regression suite |
+|---|---|---|
+| E01 | Store-owned pending removals protect shared bytes across window Undo lifetimes | LibraryExtendedAuditTests |
+| E02 | Failed attachment lookup denies asset deletion | LibraryExtendedAuditTests |
+| E03 | Stage-and-rename export preserves old destinations and refuses managed files/aliases; Image/Speech recovery bytes use the same checks | LibraryExtendedAuditTests, SavedCreationFileURLTests |
+
+Export protection here covers single-item Library/Video/Speech and generated Image/Speech actions, not every app exporter. Bulk export retains no-overwrite naming/copy behavior. Filesystem identities must be readable; unsupported destination filesystems fail closed. The distributed metadata/file deletion sequence is not a cross-store transaction.
+
 ## Verification commands
 
 ```bash

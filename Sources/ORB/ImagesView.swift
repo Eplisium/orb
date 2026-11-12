@@ -806,7 +806,7 @@ struct ImagesView: View {
         panel.nameFieldStringValue = "orb-image.\(result.attachment.fileExtension)"
         if panel.runModal() == .OK, let url = panel.url {
             Task {
-                do { try await Task.detached { try data.write(to: url, options: .atomic) }.value }
+                do { try saved.export(data: data, to: url) }
                 catch { errorMessage = "Export failed: \(error.localizedDescription)" }
             }
         }

@@ -420,7 +420,7 @@ struct SpeechView: View {
             prompt: nil, mimeType: mimeType, createdAt: Date(), assetPath: "", checksum: ""))
         panel.nameFieldStringValue = "orb-speech.\(extensionName)"
         if panel.runModal() == .OK, let url = panel.url {
-            do { try data.write(to: url, options: .atomic) }
+            do { try creations.export(data: data, to: url) }
             catch { errorMessage = "Audio export failed: \(error.localizedDescription)" }
         }
     }
@@ -441,8 +441,7 @@ struct SpeechView: View {
     private func export(_ creation: SavedCreation) {
         Task {
             do {
-                let data = try await creations.data(for: creation)
-                try exportCreation(data, creation: creation)
+                try exportCreation(creation, store: creations)
             } catch { errorMessage = error.localizedDescription }
         }
     }
