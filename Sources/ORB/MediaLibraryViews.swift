@@ -19,16 +19,35 @@ enum CatalogCapability: Equatable {
     private(set) var isLoading = false
     private(set) var error: String?
     private let catalog: GenerateModelCatalog
+    /// Discovery belongs to this model, not to a transient SwiftUI task.
+    private var loadTask: Task<Void, Never>?
+    private var loadingModality: String?
     init(catalog: GenerateModelCatalog? = nil) { self.catalog = catalog ?? GenerateModelCatalog() }
 
     func load(_ modality: String) async {
-        guard !isLoading else { return }
+        // Each view uses a dedicated instance per modality. If another caller
+        // requests a different modality, serialize it rather than sharing the
+        // wrong catalog or allowing an older response to overwrite it.
+        while let task = loadTask {
+            let sameModality = loadingModality == modality
+            await task.value
+            if sameModality { return }
+        }
         isLoading = true
+        loadingModality = modality
         error = nil
-        defer { isLoading = false }
-        do { models = try await catalog.fetch(outputModalities: [modality]) }
-        catch is CancellationError { }
-        catch { self.error = error.localizedDescription }
+        let task = Task { @MainActor in
+            defer {
+                isLoading = false
+                loadingModality = nil
+                loadTask = nil
+            }
+            do { models = try await catalog.fetch(outputModalities: [modality]) }
+            catch is CancellationError { }
+            catch { self.error = error.localizedDescription }
+        }
+        loadTask = task
+        await task.value
     }
 
     var status: String? {

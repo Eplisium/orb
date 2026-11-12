@@ -373,7 +373,6 @@ final class JobController {
     private func persist(_ record: JobRecord) {
         do {
             try database.saveJobRecordChecked(record)
-            try database.saveJobMediaFieldsChecked(record)
             lastPersistenceError = nil
         } catch {
             // Storage-first: a failed write is surfaced, never fatal.

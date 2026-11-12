@@ -5,6 +5,8 @@ All notable changes to ORB are listed here. The format is based on [Keep a Chang
 ## [Unreleased] — 1.1.0
 
 ### Backend reliability and safety
+- Job core state and recovery fields now commit in one statement; failed parameter bindings cannot silently clear persisted values.
+- Speech/transcription/embedding/rerank discovery is model-owned, so replacement views await the shared refresh despite the first caller's cancellation.
 - Failed/partial job reads and malformed persisted identities stop lifecycle mutations with a visible persistence error instead of erasing prompts/links or creating duplicate remote-job records.
 - Fail-closed missing approvals, explicit Agent OP Mode opt-in, and per-run Test Suite command approvals with safe cancellation/navigation handling.
 - Checked conversation reads, transactional edit truncation, and lossless SQLite text/streaming Unicode handling.

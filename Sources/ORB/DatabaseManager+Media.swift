@@ -18,16 +18,20 @@ extension DatabaseManager {
 
     // MARK: Job media fields
 
-    /// Writes the media-only fields of a job record. Run after
-    /// `saveJobRecordChecked`, which persists the core columns.
+    /// Compatibility helper for media-only updates. Full lifecycle writes use
+    /// `saveJobRecordChecked`, which commits core and media fields together.
     func saveJobMediaFieldsChecked(_ record: JobRecord) throws {
         guard let stmt = prepare("UPDATE jobs SET prompt = ?, saved_creation_id = ? WHERE id = ?;") else {
             throw DatabaseManagerError.operationFailed(currentError())
         }
         defer { sqlite3_finalize(stmt) }
-        if let prompt = record.prompt { Self.bindText(stmt, 1, prompt) } else { sqlite3_bind_null(stmt, 1) }
-        if let saved = record.savedCreationID { Self.bindText(stmt, 2, saved.uuidString) } else { sqlite3_bind_null(stmt, 2) }
-        Self.bindText(stmt, 3, record.id.uuidString)
+        let textFields: [(Int32, String?)] = [
+            (1, record.prompt), (2, record.savedCreationID?.uuidString), (3, record.id.uuidString)
+        ]
+        for (index, value) in textFields {
+            let result = value.map { Self.bindText(stmt, index, $0) } ?? sqlite3_bind_null(stmt, index)
+            guard result == SQLITE_OK else { throw DatabaseManagerError.operationFailed(currentError()) }
+        }
         try requireDone(stmt)
     }
 

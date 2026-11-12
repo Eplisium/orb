@@ -988,36 +988,43 @@ final class DatabaseManager {
 
     // MARK: - Jobs (durable media job records)
 
+    /// Commit core state and recovery metadata as one SQLite statement. A
+    /// failed media field write must not leave an irreversible terminal row.
     func saveJobRecordChecked(_ record: JobRecord) throws {
         let sql = """
         INSERT INTO jobs
         (id, remote_id, kind, submission_state, polling_state, remote_status,
          conversation_id, message_id, model_id, usage_cost, recoverable_error,
-         created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         created_at, updated_at, prompt, saved_creation_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
             remote_id=excluded.remote_id, kind=excluded.kind,
             submission_state=excluded.submission_state,
             polling_state=excluded.polling_state, remote_status=excluded.remote_status,
             conversation_id=excluded.conversation_id, message_id=excluded.message_id,
             model_id=excluded.model_id, usage_cost=excluded.usage_cost,
-            recoverable_error=excluded.recoverable_error, updated_at=excluded.updated_at;
+            recoverable_error=excluded.recoverable_error, updated_at=excluded.updated_at,
+            prompt=excluded.prompt, saved_creation_id=excluded.saved_creation_id;
         """
         guard let stmt = prepare(sql) else { throw DatabaseManagerError.operationFailed(currentError()) }
         defer { sqlite3_finalize(stmt) }
-        Self.bindText(stmt, 1, record.id.uuidString)
-        if let remoteID = record.remoteID { Self.bindText(stmt, 2, remoteID) } else { sqlite3_bind_null(stmt, 2) }
-        Self.bindText(stmt, 3, record.kind)
-        Self.bindText(stmt, 4, record.submissionState.rawValue)
-        Self.bindText(stmt, 5, record.pollingState.rawValue)
-        if let status = record.lastRemoteStatus { Self.bindText(stmt, 6, status) } else { sqlite3_bind_null(stmt, 6) }
-        if let conversationID = record.conversationID { Self.bindText(stmt, 7, conversationID.uuidString) } else { sqlite3_bind_null(stmt, 7) }
-        if let messageID = record.messageID { Self.bindText(stmt, 8, messageID.uuidString) } else { sqlite3_bind_null(stmt, 8) }
-        if let modelID = record.modelID { Self.bindText(stmt, 9, modelID) } else { sqlite3_bind_null(stmt, 9) }
-        if let cost = record.usageCost { sqlite3_bind_double(stmt, 10, cost) } else { sqlite3_bind_null(stmt, 10) }
-        if let error = record.recoverableError { Self.bindText(stmt, 11, error) } else { sqlite3_bind_null(stmt, 11) }
-        sqlite3_bind_double(stmt, 12, record.createdAt.timeIntervalSince1970)
-        sqlite3_bind_double(stmt, 13, record.updatedAt.timeIntervalSince1970)
+        let textFields: [(Int32, String?)] = [
+            (1, record.id.uuidString), (2, record.remoteID), (3, record.kind),
+            (4, record.submissionState.rawValue), (5, record.pollingState.rawValue),
+            (6, record.lastRemoteStatus), (7, record.conversationID?.uuidString),
+            (8, record.messageID?.uuidString), (9, record.modelID),
+            (11, record.recoverableError), (14, record.prompt), (15, record.savedCreationID?.uuidString)
+        ]
+        for (index, value) in textFields {
+            let result = value.map { Self.bindText(stmt, index, $0) } ?? sqlite3_bind_null(stmt, index)
+            guard result == SQLITE_OK else { throw DatabaseManagerError.operationFailed(currentError()) }
+        }
+        let costResult = record.usageCost.map { sqlite3_bind_double(stmt, 10, $0) } ?? sqlite3_bind_null(stmt, 10)
+        guard costResult == SQLITE_OK,
+              sqlite3_bind_double(stmt, 12, record.createdAt.timeIntervalSince1970) == SQLITE_OK,
+              sqlite3_bind_double(stmt, 13, record.updatedAt.timeIntervalSince1970) == SQLITE_OK else {
+            throw DatabaseManagerError.operationFailed(currentError())
+        }
         try requireDone(stmt)
     }
 

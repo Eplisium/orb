@@ -52,8 +52,10 @@ The identity is optional for legacy compatibility. It protects newly saved video
 | ID | Repair | Primary regression suite |
 |---|---|---|
 | J01 | Checked complete core/media reads prevent failed lookups from erasing recovery fields or duplicating jobs; invalid optional identities and partial inventories fail closed | JobReadFailureTests |
+| J03 | Core and media fields commit atomically, so failed recovery-field writes cannot leave a terminal or partial record | JobWriteFailureTests |
+| J04 | Failed parameter binding aborts full/legacy media writes instead of clearing persisted fields | JobWriteFailureTests |
 
-Controller errors remain visible and no mutation follows a failed read. Core/media writes remain separate commits, and failed initial submissions do not yet have a durable retry queue.
+Controller errors remain visible and no mutation follows a failed read. Core/media writes use one upsert; failed initial submissions still do not have a durable retry queue. The Library manifest and job saved-link update remain separate commits.
 
 ## Extended MCP audit
 
@@ -70,6 +72,7 @@ The fixtures hold actual discovery, initialize and tool/resource/prompt response
 | ID | Repair | Primary regression suite |
 |---|---|---|
 | C01 | Generated endpoint identity suffixes reserve literal tags/fallback IDs and all assigned identities | EndpointIdentityCollisionTests |
+| C02 | Replacement Speech/transcription/embedding/rerank callers await model-owned discovery despite departing-view cancellation | ModalityCatalogLifecycleTests |
 
 Endpoint collision coverage uses decoded payloads and an injected `APIService` response; it does not claim the production catalog currently contains a colliding tag.
 
