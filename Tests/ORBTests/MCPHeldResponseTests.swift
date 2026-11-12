@@ -111,6 +111,92 @@ struct MCPHeldResponseTests {
         }
     }
 
+    @Test("Cancelled registry waiters finish without waiting for held initialize or mutating its result",
+          .enabled(if: Self.node != nil, "requires Node"), arguments: ["inventory", "definitions", "resources", "prompts", "status", "start", "targeted-start", "stop", "shutdown", "call"])
+    func cancelledLifecycleWaiter(operation: String) async throws {
+        let original = try config(holding: "initialize")
+        let old = MCPConnection(config: original, secretStore: InMemoryCredentialStore(), requestTimeout: .seconds(8))
+        let registry = MCPRegistry(configProvider: { [original] }, connectionFactory: { _ in old })
+        let startup = Task { await registry.startEnabledServers() }
+        let signal = MCPHeldWaiterSignal()
+        var pendingWaiter: Task<Void, Never>?
+        do {
+            try await waitForHeld("initialize", on: old)
+            let waiter = Task {
+                await signal.markStarted()
+                switch operation {
+                case "definitions": #expect(await registry.toolDefinitions().isEmpty)
+                case "resources": #expect(await registry.availableResources().isEmpty)
+                case "prompts": #expect(await registry.availablePrompts().isEmpty)
+                case "status": #expect(await registry.status().isEmpty)
+                case "start": await registry.startEnabledServers()
+                case "targeted-start": await registry.startServer(named: original.name)
+                case "shutdown": await registry.shutdownAll()
+                case "stop": await registry.stopServer(named: original.name)
+                case "call":
+                    let result = await registry.call(qualifiedName: MCPToolNaming.qualify(server: original.name, tool: "identity"), argumentsJSON: "{}")
+                    #expect(result.isError)
+                default: #expect(await registry.availableTools().isEmpty)
+                }
+                await signal.markFinished()
+            }
+            pendingWaiter = waiter
+            while !(await signal.started) { await Task.yield() }
+            // Exercise a suspended waiter, not only a task cancelled before entry.
+            try await Task.sleep(for: .milliseconds(30))
+            waiter.cancel()
+            let deadline = ContinuousClock.now + .seconds(1)
+            while !(await signal.finished) && ContinuousClock.now < deadline {
+                try await Task.sleep(for: .milliseconds(10))
+            }
+            #expect(await signal.finished, "Cancelled caller must finish before initialize is released")
+            _ = try await old.callTool(name: "release", arguments: .object([:]))
+            await startup.value
+            await waiter.value
+            #expect(await registry.status().allSatisfy { $0.connected && $0.error == nil })
+            await registry.shutdownAll()
+        } catch {
+            pendingWaiter?.cancel()
+            startup.cancel()
+            await old.shutdown()
+            await startup.value
+            await pendingWaiter?.value
+            await registry.shutdownAll()
+            throw error
+        }
+    }
+
+    @Test("Cancelled initial startup remains retryable without publishing a server error",
+          .enabled(if: Self.node != nil, "requires Node"))
+    func cancelledFirstStartupRetries() async throws {
+        let original = try config(holding: "initialize")
+        let source = MCPHeldConfigSource(original)
+        let old = MCPConnection(config: original, secretStore: InMemoryCredentialStore(), requestTimeout: .seconds(8))
+        let registry = MCPRegistry(configProvider: { source.load() }, connectionFactory: { config in
+            config == original ? old : MCPConnection(config: config, secretStore: InMemoryCredentialStore(), requestTimeout: .seconds(8))
+        })
+        let startup = Task { await registry.startEnabledServers() }
+        do {
+            try await waitForHeld("initialize", on: old)
+            startup.cancel()
+            await startup.value
+            #expect(await old.isRunning == false)
+            #expect(await registry.status().allSatisfy { !$0.connected && $0.error == nil })
+            var ready = original
+            ready.args[1] = "none"
+            source.replace(ready)
+            #expect(await registry.availableTools().count == 1)
+            #expect(await registry.status().allSatisfy { $0.connected && $0.error == nil })
+            await registry.shutdownAll()
+        } catch {
+            startup.cancel()
+            await old.shutdown()
+            await startup.value
+            await registry.shutdownAll()
+            throw error
+        }
+    }
+
     @Test("Literal computed compact keys cannot impersonate their original server or tool")
     func compactLiteralImpersonation() {
         let server = String(repeating: "long-server-", count: 10)
@@ -129,4 +215,11 @@ struct MCPHeldResponseTests {
         #expect(!policy.allowsDefinition(name: impersonator))
         #expect(MCPToolNaming.qualify(server: server, tool: toolKey) != own)
     }
+}
+
+private actor MCPHeldWaiterSignal {
+    var started = false
+    var finished = false
+    func markStarted() { started = true }
+    func markFinished() { finished = true }
 }

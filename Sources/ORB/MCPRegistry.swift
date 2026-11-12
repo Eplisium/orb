@@ -257,16 +257,34 @@ actor MCPRegistry {
     /// would race the first pass, create two connections for one config, and
     /// orphan the earlier child process when the later assignment overwrote it.
     private var workInFlight = false
-    private var workWaiters: [CheckedContinuation<Void, Never>] = []
+    private var workWaiters: [UUID: CheckedContinuation<Void, Never>] = [:]
 
     /// Suspends until no lifecycle work owns the connection table, then owns it.
-    private func beginWork() async {
+    /// Cancellation only releases this caller; it never cancels the owner.
+    private func beginWork() async -> Bool {
         while workInFlight {
-            await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
-                workWaiters.append(continuation)
-            }
+            guard !Task.isCancelled else { return false }
+            await waitForWork()
         }
+        guard !Task.isCancelled else { return false }
         workInFlight = true
+        return true
+    }
+
+    private func waitForWork() async {
+        let id = UUID()
+        await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                if Task.isCancelled { continuation.resume() }
+                else { workWaiters[id] = continuation }
+            }
+        } onCancel: {
+            Task { await self.cancelWorkWaiter(id) }
+        }
+    }
+
+    private func cancelWorkWaiter(_ id: UUID) {
+        workWaiters.removeValue(forKey: id)?.resume()
     }
 
     /// Releases the table and wakes every waiter; each re-checks the gate, so
@@ -274,38 +292,38 @@ actor MCPRegistry {
     private func endWork() {
         workInFlight = false
         let waiters = workWaiters
-        workWaiters = []
-        for waiter in waiters { waiter.resume() }
+        workWaiters = [:]
+        for waiter in waiters.values { waiter.resume() }
     }
 
     /// Waits for in-flight lifecycle work without taking ownership. Every
     /// read and dispatch entry point joins an in-flight pass so a run that
     /// starts during launch startup sees all of its servers, not just the
     /// ones connected so far.
-    private func joinWork() async {
+    private func joinWork() async -> Bool {
         while workInFlight {
-            await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
-                workWaiters.append(continuation)
-            }
+            guard !Task.isCancelled else { return false }
+            await waitForWork()
         }
+        return !Task.isCancelled
     }
 
-    private func ensureStarted() async {
-        if workInFlight {
-            await joinWork()
-        } else if !didLoad {
-            await startEnabledServers()
-        }
+    private func ensureStarted() async -> Bool {
+        guard await joinWork() else { return false }
+        // A joined initial pass may have been cancelled by its owner. A fresh
+        // caller must retry rather than accepting that partial pass as loaded.
+        if !didLoad { await startEnabledServers() }
+        return !Task.isCancelled
     }
 
     /// Reconciles every enabled server under the existing lifecycle gate.
     /// Reload after suspension: persistence can change independently of this
     /// actor while a process is handshaking or shutting down.
     func startEnabledServers() async {
-        await beginWork()
+        guard await beginWork() else { return }
         defer { endWork() }
         await reconcileLocked()
-        didLoad = true
+        if !Task.isCancelled { didLoad = true }
     }
 
     /// A targeted start also reconciles already-live rows, including a renamed
@@ -314,7 +332,7 @@ actor MCPRegistry {
         let previouslyLiveNames = Set(connections.keys)
         let previouslyLiveIDs = Set(connectedConfigs.values.map(\.id))
         var requestedID: UUID?
-        while true {
+        while !Task.isCancelled {
             let snapshot = configProvider()
             if requestedID == nil, let name {
                 requestedID = snapshot.first { $0.name == name }?.id
@@ -367,7 +385,7 @@ actor MCPRegistry {
     /// Caller holds the lifecycle gate. Equality includes command, ordered args,
     /// environment values, secret references, enabled state, name and UUID.
     private func connectLocked(_ config: MCPServerConfig) async {
-        guard isDesired(config) else { return }
+        guard !Task.isCancelled, isDesired(config) else { return }
         if let existing = connections[config.name] {
             let running = await existing.isRunning
             if running && connectedConfigs[config.name] == config && isDesired(config) { return }
@@ -375,14 +393,14 @@ actor MCPRegistry {
             connectedConfigs[config.name] = nil
             await existing.shutdown()
         }
-        guard isDesired(config) else { return }
+        guard !Task.isCancelled, isDesired(config) else { return }
         guard !config.command.isEmpty else {
             lastErrors[config.name] = "Command is empty."
             failedConfigs[config.name] = config
             return
         }
         let connection = await connectionFactory(config)
-        guard isDesired(config) else {
+        guard !Task.isCancelled, isDesired(config) else {
             await connection.shutdown()
             return
         }
@@ -400,7 +418,7 @@ actor MCPRegistry {
         } catch {
             await connection.shutdown()
             // A failed OLD handshake must not become the new row's error.
-            if isDesired(config) {
+            if !Task.isCancelled, isDesired(config) {
                 lastErrors[config.name] = error.localizedDescription
                 failedConfigs[config.name] = config
             }
@@ -410,14 +428,14 @@ actor MCPRegistry {
     /// Settings enable/add/import takes effect without a relaunch. Missing or
     /// disabled targets also reconcile, instead of leaving the old process live.
     func startServer(named name: String) async {
-        await beginWork()
+        guard await beginWork() else { return }
         defer { endWork() }
         await reconcileLocked(named: name)
     }
 
     /// Shuts down a single server's connection (settings disable/remove).
     func stopServer(named name: String) async {
-        await beginWork()
+        guard await beginWork() else { return }
         defer { endWork() }
         connectedConfigs[name] = nil
         if let existing = connections.removeValue(forKey: name) {
@@ -428,7 +446,7 @@ actor MCPRegistry {
     }
 
     func shutdownAll() async {
-        await beginWork()
+        guard await beginWork() else { return }
         defer { endWork() }
         let dying = connections
         connections.removeAll()
@@ -459,7 +477,7 @@ actor MCPRegistry {
     // MARK: - Tools
 
     func availableTools() async -> [MCPToolDescriptor] {
-        await ensureStarted()
+        guard await ensureStarted() else { return [] }
         let snapshot = connections
         var all: [MCPToolDescriptor] = []
         for (_, connection) in snapshot {
@@ -479,7 +497,7 @@ actor MCPRegistry {
     /// chat model can only call tools — without this bridge the agent could see
     /// a server's resources but never read one.
     func toolDefinitions() async -> [AgentToolDefinition] {
-        await ensureStarted()
+        guard await ensureStarted() else { return [] }
         let snapshot = connections
         var definitions = await availableTools().map { descriptor in
             AgentToolDefinition(function: .init(
@@ -553,7 +571,7 @@ actor MCPRegistry {
     // MARK: - Resources and prompts
 
     func availableResources() async -> [MCPResourceDescriptor] {
-        await ensureStarted()
+        guard await ensureStarted() else { return [] }
         let snapshot = connections
         var all: [MCPResourceDescriptor] = []
         for (_, connection) in snapshot {
@@ -567,7 +585,7 @@ actor MCPRegistry {
     }
 
     func availablePrompts() async -> [MCPPromptDescriptor] {
-        await ensureStarted()
+        guard await ensureStarted() else { return [] }
         let snapshot = connections
         var all: [MCPPromptDescriptor] = []
         for (_, connection) in snapshot {
@@ -612,7 +630,7 @@ actor MCPRegistry {
     }
 
     func status() async -> [(name: String, toolCount: Int, connected: Bool, error: String?)] {
-        await joinWork()
+        guard await joinWork() else { return [] }
         var rows: [(String, Int, Bool, String?)] = []
         for config in configProvider() {
             let connection = connections[config.name]
@@ -637,7 +655,9 @@ actor MCPRegistry {
     }
 
     func call(qualifiedName: String, argumentsJSON: String) async -> NativeAgentToolResult {
-        await ensureStarted()
+        guard await ensureStarted() else {
+            return .init(content: "MCP call cancelled.", isError: true)
+        }
         guard let route = MCPToolNaming.resolve(qualifiedName) else {
             return .init(content: "Unknown MCP tool \(qualifiedName).", isError: true)
         }

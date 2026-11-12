@@ -59,8 +59,10 @@ struct MCPDiscoveryCancellationTests {
             startup.cancel()
             await startup.value
             #expect(await connection.isRunning == false)
-            #expect(await registry.status().allSatisfy { !$0.connected })
-            #expect(await registry.availableTools().isEmpty)
+            #expect(await registry.status().allSatisfy { !$0.connected && $0.error == nil })
+            // A fresh inventory request now retries cancelled first startup.
+            // Inspect the cancelled connection itself without initiating retry.
+            #expect(await connection.tools.isEmpty)
             await registry.shutdownAll()
         } catch {
             startup.cancel()

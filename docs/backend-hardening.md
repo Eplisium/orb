@@ -42,10 +42,11 @@ Export protection here covers single-item Library/Video/Speech and generated Ima
 
 | ID | Repair | Primary regression suite |
 |---|---|---|
+| M01 | Cancelled lifecycle waiters unregister promptly without late side effects; cancelled initial startup stays retryable without a false server failure | MCPHeldResponseTests, MCPDiscoveryCancellationTests |
 | M02 | Cancellation during optional resource/prompt discovery escapes startup and prevents partial registry publication; ordinary RPC errors remain optional | MCPDiscoveryCancellationTests |
 | M04 | Startup checks original transport identity/liveness after awaits; shutdown and child exit during optional discovery cannot report success | MCPDiscoveryCancellationTests |
 
-The fixtures hold actual discovery, initialize and tool/resource/prompt responses and expose receipt state through an offline RPC. `MCPHeldResponseTests` verifies late initialize success/error and RPC results after config replacement, plus literal impersonation of computed compact names. Registry lifecycle wait cancellation and direct concurrent `connect()` behavior are separate follow-up audit scopes.
+The fixtures hold actual discovery, initialize and tool/resource/prompt responses and expose receipt state through an offline RPC. `MCPHeldResponseTests` verifies late initialize success/error and RPC results after config replacement, plus literal impersonation of computed compact names. Direct concurrent `MCPConnection.connect()` behavior remains a separate follow-up audit scope.
 
 ## Extended catalog audit
 
