@@ -8,16 +8,19 @@ struct ChatView: View {
     @ObservedObject var viewModel: BrowserViewModel
     @ObservedObject var chatService: ChatService
 
-    @State private var messageText = ""
+    // Composer drafts and edit state live in the app-lifetime StudioStore:
+    // leaving the section rebuilds ContentView, which would otherwise destroy
+    // a half-written message, its attachments, and any in-progress edit.
+    @StudioState("ChatView.messageText") private var messageText = ""
     @State private var isSelectingSessions = false
     @State private var sessionQuery = ""
     @State private var unread = UnreadTracker()
     @AppStorage("playground.requireCommandToSend") private var requireCommandToSend = false
-    @State private var undoSnapshot: [StoredConversation]?
+    @StudioState("ChatView.undoSnapshot") private var undoSnapshot: UndoToastItem<[StoredConversation]>? = nil
     /// Last edit, for Undo and to carry its attachments into the resend.
-    @State private var pendingEdit: ChatService.ConversationEdit?
+    @StudioState("ChatView.pendingEdit") private var pendingEdit: UndoToastItem<ChatService.ConversationEdit>? = nil
     /// Attachments of the message being edited; resent unless removed.
-    @State private var carriedParts: [MessageContentPart]?
+    @StudioState("ChatView.carriedParts") private var carriedParts: [MessageContentPart]? = nil
     @State private var dropTargeted = false
     @State private var temperatureIsModelDefault = false
     @StateObject private var pins = ConversationPinStore(key: "orb.pinned.chat")
@@ -32,8 +35,8 @@ struct ChatView: View {
     @State private var showModelPicker = false
     @State private var modelSearchText = ""
     @State private var followsLatest = true
-    @State private var attachmentDrafts: [ChatAttachmentDraft] = []
-    @State private var attachmentWarnings: [String] = []
+    @StudioState("ChatView.attachmentDrafts") private var attachmentDrafts: [ChatAttachmentDraft] = []
+    @StudioState("ChatView.attachmentWarnings") private var attachmentWarnings: [String] = []
     @State private var isPreparingAttachments = false
     /// Latest sentinel maxY in the scroll coordinate space. Updated by
     /// onPreferenceChange; read by the scroll decision in onChange.
@@ -91,7 +94,19 @@ struct ChatView: View {
                 chatService.switchModel(newValue, for: id)
             }
         }
-        .onChange(of: chatService.activeConversation?.id) { _, _ in resetFollowState() }
+        .onChange(of: chatService.activeConversation?.id) { _, _ in
+            resetFollowState()
+            // Session switches (sidebar select, delete, branch, activate) must
+            // bring the composer's model along; otherwise the next send hands
+            // the stale model to prepareActiveConversation, which overwrites
+            // the newly active conversation's model with it.
+            if let modelId = chatService.activeConversation?.modelId { selectedModelId = modelId }
+        }
+        .onChange(of: sessionQuery) { _, _ in
+            // Selection only ever covers what the filter shows: a hidden
+            // session must not ride along into Select All or bulk delete.
+            selectedSessionIDs.formIntersection(visibleSessionIDs)
+        }
     }
 
     // MARK: - Layout
@@ -111,19 +126,21 @@ struct ChatView: View {
         }
         .inspector(isPresented: $showSettings) { settingsPopover.inspectorColumnWidth(min: 280, ideal: 320, max: 420) }
         .overlay(alignment: .bottom) {
-            if let snapshot = undoSnapshot {
+            if let toast = undoSnapshot {
                 UndoToastView(
-                    message: UndoToast.message(deleted: snapshot.count),
-                    undo: { chatService.restore(snapshot); undoSnapshot = nil },
+                    message: UndoToast.message(deleted: toast.payload.count),
+                    token: toast.id,
+                    undo: { chatService.restore(toast.payload); undoSnapshot = nil },
                     dismiss: { undoSnapshot = nil }
                 )
                 .padding(.bottom, 80)
                 .transition(.move(edge: .bottom).combined(with: .opacity))
-            } else if let edit = pendingEdit {
+            } else if let toast = pendingEdit {
                 UndoToastView(
-                    message: UndoToast.editMessage(removed: edit.removedCount),
+                    message: UndoToast.editMessage(removed: toast.payload.removedCount),
                     symbol: "pencil",
-                    undo: { undoEdit(edit) },
+                    token: toast.id,
+                    undo: { undoEdit(toast.payload) },
                     dismiss: { pendingEdit = nil }
                 )
                 .padding(.bottom, 80)
@@ -190,7 +207,7 @@ struct ChatView: View {
 
             Spacer(minLength: 0)
             if isSelectingSessions {
-                let allIDs = Set(chatService.conversations.filter { $0.mode == .chat }.map(\.id))
+                let allIDs = visibleSessionIDs
                 ConversationSelectionBar(
                     selectedCount: selectedSessionIDs.count,
                     totalCount: allIDs.count,
@@ -198,7 +215,7 @@ struct ChatView: View {
                     onSelectAll: { selectedSessionIDs = allIDs },
                     onClear: { selectedSessionIDs.removeAll() },
                     onDelete: {
-                        undoSnapshot = chatService.deleteConversationsUndoable(ids: selectedSessionIDs)
+                        undoSnapshot = chatService.deleteConversationsUndoable(ids: selectedSessionIDs).map { UndoToastItem($0) }
                         selectedSessionIDs.removeAll()
                         isSelectingSessions = false
                     }
@@ -280,7 +297,7 @@ struct ChatView: View {
                         .disabled(chatService.isStreaming)
                     Divider()
                     Button(role: .destructive) {
-                        undoSnapshot = chatService.deleteConversationsUndoable(ids: [conversation.id])
+                        undoSnapshot = chatService.deleteConversationsUndoable(ids: [conversation.id]).map { UndoToastItem($0) }
                     } label: { Label("Delete Session", systemImage: "trash") }
                         .disabled(chatService.isRunning(conversationID: conversation.id))
                 } label: {
@@ -748,6 +765,16 @@ struct ChatView: View {
         selectedModelId.isEmpty ? preferredModelId : selectedModelId
     }
 
+    /// Sessions the sidebar is currently showing (search-filtered). Select All
+    /// and the selection count must match the visible list, never every stored
+    /// session of the mode.
+    private var visibleSessionIDs: Set<UUID> {
+        Set(ConversationListModel.filter(
+            chatService.conversations.filter { $0.mode == .chat },
+            query: sessionQuery
+        ).map(\.id))
+    }
+
     private var currentSessionRunning: Bool {
         guard let id = chatService.activeConversation?.id else { return false }
         return chatService.isRunning(conversationID: id)
@@ -875,7 +902,7 @@ struct ChatView: View {
 
     private func beginEdit(_ messageID: UUID, in conversationID: UUID) {
         guard let edit = chatService.beginEdit(from: messageID, in: conversationID) else { return }
-        pendingEdit = edit
+        pendingEdit = UndoToastItem(edit)
         messageText = edit.text
         carriedParts = edit.parts
         inputFocused = true

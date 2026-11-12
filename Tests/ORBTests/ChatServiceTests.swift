@@ -73,6 +73,32 @@ private final class MemoryConversationStore: ConversationStore {
     func recoverInterruptedRecords() throws {}
 }
 
+/// A plain client (NOT `TimedOpenRouterStreaming`), so ChatService consumes it
+/// through `StreamArrivalRelay` exactly like production. The stream yields its
+/// events and then hangs without finishing: cancelling the consumer while it
+/// is suspended in `next()` ends iteration normally (nil) rather than throwing,
+/// which is the shape behind the wrong-terminal-path-on-Stop bug.
+private actor HangingOpenRouterClient: OpenRouterClientProtocol {
+    let events: [OpenRouterStreamEvent]
+
+    init(events: [OpenRouterStreamEvent]) { self.events = events }
+
+    func stream(_ request: OpenRouterRequest) async throws -> AsyncThrowingStream<OpenRouterStreamEvent, Error> {
+        let events = self.events
+        return AsyncThrowingStream { continuation in
+            let task = Task {
+                for event in events {
+                    try? await Task.sleep(for: .milliseconds(5))
+                    continuation.yield(event)
+                }
+                // Deliberately never finishes: the consumer stays suspended
+                // in next() like a stream between provider tokens.
+            }
+            continuation.onTermination = { _ in task.cancel() }
+        }
+    }
+}
+
 @Suite("ChatService streaming lifecycle")
 @MainActor
 struct ChatServiceTests {
@@ -850,5 +876,84 @@ struct ChatServiceTests {
         // Bounded polling: a fixed sleep flaked when the suite loaded the main actor.
         try await waitUntilIdle(service)
         #expect(service.activeConversation?.messages.filter { $0.role == "user" }.count == 1)
+    }
+
+    @Test("Stop before the first token is interrupted, not a failed run")
+    func stopBeforeFirstTokenIsInterrupted() async throws {
+        let store = MemoryConversationStore()
+        let client = HangingOpenRouterClient(events: [])
+        let service = ChatService(client: client, store: store, apiKeyProvider: { "fixture-key" })
+        await service.sendMessage("hello", modelId: "test/model")
+        // Once the run reports .streaming the consumer is suspended in next()
+        // of the never-finishing stream — the exact cancellation window.
+        for _ in 0..<500 where service.runState.phase != .streaming { try await Task.sleep(for: .milliseconds(2)) }
+        #expect(service.runState.phase == .streaming)
+
+        service.stopStreaming()
+        try await waitUntilIdle(service)
+
+        let assistant = service.activeConversation?.messages.last
+        #expect(assistant?.role == "assistant")
+        #expect(assistant?.status == .interrupted)
+        #expect(assistant?.finishReason == "cancelled")
+    }
+
+    @Test("Stop between tokens is interrupted, not complete")
+    func stopBetweenTokensIsInterrupted() async throws {
+        let store = MemoryConversationStore()
+        let client = HangingOpenRouterClient(events: [.contentDelta(choiceIndex: 0, text: "partial")])
+        let service = ChatService(client: client, store: store, apiKeyProvider: { "fixture-key" })
+        await service.sendMessage("hello", modelId: "test/model")
+        // The coalescer only publishes "partial" while the consumer is already
+        // suspended again in next(), waiting for the next token.
+        for _ in 0..<500 where service.streamingContent != "partial" { try await Task.sleep(for: .milliseconds(2)) }
+        #expect(service.streamingContent == "partial")
+
+        service.stopStreaming()
+        try await waitUntilIdle(service)
+
+        let assistant = service.activeConversation?.messages.last
+        #expect(assistant?.content == "partial")
+        #expect(assistant?.status == .interrupted)
+        #expect(assistant?.finishReason == "cancelled")
+    }
+
+    @Test("A regeneration that ends with no text still applies its reported usage")
+    func emptyRegenerationKeepsUsage() async throws {
+        let usage = ChatUsage(promptTokens: 2, completionTokens: 4, totalTokens: 6, cost: 0.02)
+        let (service, _, _) = service(scripts: [
+            .init(events: [.contentDelta(choiceIndex: 0, text: "original answer"), .usage(usage), .done]),
+            .init(events: [.usage(usage), .done]),
+        ])
+        await service.sendMessage("hello", modelId: "test/model")
+        try await waitUntilIdle(service)
+        #expect(service.activeConversation?.totalCost == 0.02)
+
+        await service.regenerateLastResponse(modelId: "test/model")
+        try await waitUntilIdle(service)
+
+        // The previous answer is restored…
+        #expect(service.activeConversation?.messages.last?.content == "original answer")
+        #expect(service.activeConversation?.messages.last?.status == .complete)
+        #expect(service.lastError == "The model returned no supported output.")
+        // …but the failed attempt's spend still reaches the totals.
+        #expect(service.activeConversation?.totalCost == 0.04)
+        #expect(service.activeConversation?.totalTokens == 12)
+    }
+
+    @Test("A run with no usage block still records one unpriced ledger row")
+    func missingUsageStillRecordsLedgerRow() async throws {
+        func chatBucket() -> UsageBucket? {
+            UsageLedger.shared.buckets(.feature).first { $0.key == UsageFeature.chat.rawValue }
+        }
+        let before = chatBucket()
+        let (service, _, _) = service(scripts: [.init(events: [.contentDelta(choiceIndex: 0, text: "hi"), .done])])
+        await service.sendMessage("hello", modelId: "test/model")
+        try await waitUntilIdle(service)
+        let after = chatBucket()
+        // Exactly one row per run id, with unknown ("unpriced") spend — never
+        // zero and never missing.
+        #expect((after?.requests ?? 0) == (before?.requests ?? 0) + 1)
+        #expect((after?.unpricedRequests ?? 0) == (before?.unpricedRequests ?? 0) + 1)
     }
 }

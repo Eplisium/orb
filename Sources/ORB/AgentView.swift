@@ -10,14 +10,17 @@ struct AgentView: View {
     @ObservedObject var viewModel: BrowserViewModel
     @ObservedObject var chatService: ChatService
 
-    @State private var messageText = ""
+    // Composer drafts and edit state live in the app-lifetime StudioStore:
+    // leaving the section rebuilds ContentView, which would otherwise destroy
+    // a half-written message, its attachments, and any in-progress edit.
+    @StudioState("AgentView.messageText") private var messageText = ""
     @State private var isSelectingSessions = false
     @State private var sessionQuery = ""
     @State private var unread = UnreadTracker()
     @AppStorage("playground.requireCommandToSend") private var requireCommandToSend = false
-    @State private var undoSnapshot: [StoredConversation]?
+    @StudioState("AgentView.undoSnapshot") private var undoSnapshot: UndoToastItem<[StoredConversation]>? = nil
     /// Last edit, for Undo and to carry its attachments into the resend.
-    @State private var pendingEdit: ChatService.ConversationEdit?
+    @StudioState("AgentView.pendingEdit") private var pendingEdit: UndoToastItem<ChatService.ConversationEdit>? = nil
     @State private var dropTargeted = false
     @StateObject private var pins = ConversationPinStore(key: "orb.pinned.agent")
     @State private var selectedSessionIDs = Set<UUID>()
@@ -29,10 +32,10 @@ struct AgentView: View {
     @AppStorage("playground.agentTemperature") private var agentTemperature = 0.7
     @AppStorage("playground.agentReasoningEffort") private var agentReasoningEffort = ""
     @AppStorage("playground.agentWorkspace") private var workspace = FileManager.default.homeDirectoryForCurrentUser.path
-    @State private var attachments: [URL] = []
+    @StudioState("AgentView.attachments") private var attachments: [URL] = []
     @State private var isPreparingAttachments = false
-    @State private var attachmentWarnings: [String] = []
-    @State private var attachmentContextSummary: String?
+    @StudioState("AgentView.attachmentWarnings") private var attachmentWarnings: [String] = []
+    @StudioState("AgentView.attachmentContextSummary") private var attachmentContextSummary: String? = nil
     @State private var showSettings = false
     @State private var showMCPSettings = false
     @State private var showModelPicker = false
@@ -87,7 +90,19 @@ struct AgentView: View {
                 chatService.switchModel(newValue, for: id)
             }
         }
-        .onChange(of: chatService.activeConversation?.id) { _, _ in resetFollowState() }
+        .onChange(of: chatService.activeConversation?.id) { _, _ in
+            resetFollowState()
+            // Session switches (sidebar select, delete, branch, activate) must
+            // bring the composer's model along; otherwise the next send hands
+            // the stale model to prepareActiveConversation, which overwrites
+            // the newly active conversation's model with it.
+            if let modelId = chatService.activeConversation?.modelId { selectedModelId = modelId }
+        }
+        .onChange(of: sessionQuery) { _, _ in
+            // Selection only ever covers what the filter shows: a hidden
+            // session must not ride along into Select All or bulk delete.
+            selectedSessionIDs.formIntersection(visibleSessionIDs)
+        }
     }
 
     // MARK: - Layout
@@ -118,19 +133,21 @@ struct AgentView: View {
         .inspector(isPresented: $showSettings) { settingsPopover.inspectorColumnWidth(min: 280, ideal: 320, max: 420) }
         .modifier(ApprovalSheetModifier(presenter: chatService.approvalPresenter))
         .overlay(alignment: .bottom) {
-            if let snapshot = undoSnapshot {
+            if let toast = undoSnapshot {
                 UndoToastView(
-                    message: UndoToast.message(deleted: snapshot.count),
-                    undo: { chatService.restore(snapshot); undoSnapshot = nil },
+                    message: UndoToast.message(deleted: toast.payload.count),
+                    token: toast.id,
+                    undo: { chatService.restore(toast.payload); undoSnapshot = nil },
                     dismiss: { undoSnapshot = nil }
                 )
                 .padding(.bottom, 80)
                 .transition(.move(edge: .bottom).combined(with: .opacity))
-            } else if let edit = pendingEdit {
+            } else if let toast = pendingEdit {
                 UndoToastView(
-                    message: UndoToast.editMessage(removed: edit.removedCount),
+                    message: UndoToast.editMessage(removed: toast.payload.removedCount),
                     symbol: "pencil",
-                    undo: { undoEdit(edit) },
+                    token: toast.id,
+                    undo: { undoEdit(toast.payload) },
                     dismiss: { pendingEdit = nil }
                 )
                 .padding(.bottom, 80)
@@ -197,7 +214,7 @@ struct AgentView: View {
 
             Spacer(minLength: 0)
             if isSelectingSessions {
-                let allIDs = Set(chatService.conversations.filter { $0.mode == .agent }.map(\.id))
+                let allIDs = visibleSessionIDs
                 ConversationSelectionBar(
                     selectedCount: selectedSessionIDs.count,
                     totalCount: allIDs.count,
@@ -205,7 +222,7 @@ struct AgentView: View {
                     onSelectAll: { selectedSessionIDs = allIDs },
                     onClear: { selectedSessionIDs.removeAll() },
                     onDelete: {
-                        undoSnapshot = chatService.deleteConversationsUndoable(ids: selectedSessionIDs)
+                        undoSnapshot = chatService.deleteConversationsUndoable(ids: selectedSessionIDs).map { UndoToastItem($0) }
                         selectedSessionIDs.removeAll()
                         isSelectingSessions = false
                     }
@@ -285,7 +302,7 @@ struct AgentView: View {
                         .disabled(chatService.isStreaming)
                     Divider()
                     Button(role: .destructive) {
-                        undoSnapshot = chatService.deleteConversationsUndoable(ids: [conversation.id])
+                        undoSnapshot = chatService.deleteConversationsUndoable(ids: [conversation.id]).map { UndoToastItem($0) }
                     } label: { Label("Delete Session", systemImage: "trash") }
                         .disabled(chatService.isRunning(conversationID: conversation.id))
                 } label: {
@@ -833,6 +850,16 @@ struct AgentView: View {
         selectedModelId.isEmpty ? preferredModelId : selectedModelId
     }
 
+    /// Sessions the sidebar is currently showing (search-filtered). Select All
+    /// and the selection count must match the visible list, never every stored
+    /// session of the mode.
+    private var visibleSessionIDs: Set<UUID> {
+        Set(ConversationListModel.filter(
+            chatService.conversations.filter { $0.mode == .agent },
+            query: sessionQuery
+        ).map(\.id))
+    }
+
     private var currentSessionRunning: Bool {
         guard let id = chatService.activeConversation?.id else { return false }
         return chatService.isRunning(conversationID: id)
@@ -1027,7 +1054,7 @@ struct AgentView: View {
         // Agent attachments are inlined into the prompt text, so the edited
         // text already carries them.
         guard let edit = chatService.beginEdit(from: messageID, in: conversationID) else { return }
-        pendingEdit = edit
+        pendingEdit = UndoToastItem(edit)
         messageText = edit.text
         inputFocused = true
     }

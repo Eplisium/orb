@@ -351,6 +351,11 @@ struct EditableTitle: View {
 struct UndoToastView: View {
     let message: String
     var symbol: String = "trash"
+    /// Identity of this showing; keys the auto-dismiss timer. Falls back to
+    /// the message for callers without per-toast identity — pass a fresh id
+    /// (e.g. `UndoToastItem.id`) so a replacement toast restarts its own
+    /// countdown even when the message text is identical.
+    var token: UUID? = nil
     let undo: () -> Void
     let dismiss: () -> Void
 
@@ -358,7 +363,9 @@ struct UndoToastView: View {
         HStack(spacing: 12) {
             Image(systemName: symbol).accessibilityHidden(true)
             Text(message).font(ORBFont.footnote.weight(.medium))
-            Button("Undo", action: undo).buttonStyle(.link).keyboardShortcut("z", modifiers: .command)
+            // No ⌘Z keyboard shortcut: while the toast is up it would hijack
+            // Undo inside the composer's text field.
+            Button("Undo", action: undo).buttonStyle(.link)
             Button { dismiss() } label: { Image(systemName: "xmark") }
                 .buttonStyle(.plain).accessibilityLabel("Dismiss")
         }
@@ -367,8 +374,10 @@ struct UndoToastView: View {
         .overlay { Capsule().stroke(Color.primary.opacity(0.12)) }
         .shadow(color: .black.opacity(0.15), radius: 8, y: 3)
         .padding(.bottom, 16)
-        .task(id: message) {
-            try? await Task.sleep(for: .seconds(UndoToast.visibleDuration))
+        .task(id: token?.uuidString ?? message) {
+            // Returning on cancellation matters: a superseded toast's timer
+            // must not dismiss the toast that replaced it and wipe its undo.
+            do { try await Task.sleep(for: .seconds(UndoToast.visibleDuration)) } catch { return }
             dismiss()
         }
         .accessibilityElement(children: .combine)

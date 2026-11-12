@@ -415,12 +415,50 @@ struct TestSuiteView: View {
                 .fill(.orbSurface(0.07))
                 .frame(height: 1)
 
+            // A running batch keeps spending after the user navigates away
+            // from its scenario detail; outside the detail (which carries its
+            // own Cancel row) this banner is the only way to stop it.
+            if testRunner.isRunning, selectedScenario == nil {
+                runBanner
+            }
+
             if let scenario = selectedScenario {
                 scenarioDetail(scenario)
             } else {
                 scenarioGrid
             }
         }
+    }
+
+    /// Persistent status and Cancel for a run the user has navigated away from.
+    private var runBanner: some View {
+        HStack(spacing: 10) {
+            ProgressView().controlSize(.small)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(testRunner.activityLabel.isEmpty ? "Running test…" : testRunner.activityLabel)
+                    .orbFont(size: 11, weight: .semibold)
+                    .lineLimit(1)
+                if testRunner.batchTotal > 0 {
+                    Text("\(testRunner.batchCompleted)/\(testRunner.batchTotal) finished · \(testRunner.runningModelId ?? "")")
+                        .orbFont(size: 11, design: .monospaced)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+            }
+            CostCeilingBar(progress: CostCeilingProgress(
+                spent: testRunner.batchSpent, ceiling: testRunner.batchCeilingUSD,
+                unreportedRuns: testRunner.batchUnreportedRuns))
+                .frame(maxWidth: 220)
+            Spacer(minLength: 8)
+            Button("Cancel", role: .destructive) { testRunner.cancel() }
+                .controlSize(.small)
+                .help("Cancel the running test (it keeps spending until stopped)")
+        }
+        .padding(.horizontal, 18)
+        .padding(.vertical, 8)
+        .background(ORBTheme.accentSubtle)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("Test run in progress. \(testRunner.activityLabel)")
     }
 
     private var testHeader: some View {

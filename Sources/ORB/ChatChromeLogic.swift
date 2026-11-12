@@ -358,6 +358,17 @@ struct UnreadTracker: Equatable {
 
 // MARK: Undo toast
 
+/// One showing of an undo toast: the payload plus the identity of the showing.
+/// The id keys the auto-dismiss timer (`.task(id:)`), because the message text
+/// is not unique — two "Deleted 1 session" toasts must each get their own
+/// countdown, and the second must not die on the first one's timer.
+struct UndoToastItem<Payload> {
+    let id = UUID()
+    let payload: Payload
+
+    init(_ payload: Payload) { self.payload = payload }
+}
+
 enum UndoToast {
     static let visibleDuration: TimeInterval = 8
 

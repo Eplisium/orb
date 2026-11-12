@@ -578,12 +578,17 @@ final class ChatService: ObservableObject {
                     contentCoalescer.flush()
                     reasoningCoalescer.flush()
                     detailCoalescer.flush()
-                    if fullContent.isEmpty, restoreRegeneration(context, message: error.message) { return }
+                    if fullContent.isEmpty, restoreRegeneration(context, message: error.message, usage: latestUsage) { return }
                     fail(context: context, message: error.message, status: .failed, finishReason: finishReason, usage: latestUsage)
                     return
                 default: break
                 }
             }
+            // A cancelled consumer ends the stream normally (next() returns
+            // nil), so without this check Stop between tokens fell through to
+            // the finishing logic below and recorded a completed (or failed)
+            // run instead of an interruption.
+            try Task.checkCancellation()
             freezeReasoningDuration(context, at: lastArrival)
             contentCoalescer.flush()
             reasoningCoalescer.flush()
@@ -594,7 +599,7 @@ final class ChatService: ObservableObject {
             if fullContent.isEmpty, !streamedImages.isEmpty {
                 finish(context: context, status: .complete, finishReason: finishReason, usage: latestUsage)
             } else if fullContent.isEmpty {
-                if restoreRegeneration(context, message: "The model returned no supported output.") { return }
+                if restoreRegeneration(context, message: "The model returned no supported output.", usage: latestUsage) { return }
                 fail(context: context, message: "The model returned no supported output.", status: .failed, finishReason: finishReason, usage: latestUsage)
             } else {
                 let status: ChatMessageStatus = finishReason == "length" ? .truncated : .complete
@@ -605,14 +610,14 @@ final class ChatService: ObservableObject {
             contentCoalescer.flush()
             reasoningCoalescer.flush()
             detailCoalescer.flush()
-            if fullContent.isEmpty, restoreRegeneration(context, message: "Regeneration was cancelled.") { return }
+            if fullContent.isEmpty, restoreRegeneration(context, message: "Regeneration was cancelled.", usage: latestUsage) { return }
             finish(context: context, status: .interrupted, finishReason: "cancelled", usage: latestUsage)
         } catch {
             guard owns(context.runID) else { return }
             contentCoalescer.flush()
             reasoningCoalescer.flush()
             detailCoalescer.flush()
-            if fullContent.isEmpty, restoreRegeneration(context, message: error.localizedDescription) { return }
+            if fullContent.isEmpty, restoreRegeneration(context, message: error.localizedDescription, usage: latestUsage) { return }
             fail(context: context, message: error.localizedDescription, status: .interrupted, finishReason: finishReason, usage: latestUsage)
         }
     }
@@ -722,23 +727,33 @@ final class ChatService: ObservableObject {
         terminalCleanup(context)
     }
 
+    /// Restores the replaced assistant message of a failed regeneration. The
+    /// attempt still consumed tokens, so its reported usage is applied before
+    /// cleanup — a regeneration that ends with no text must not silently drop
+    /// the spend from the totals and the ledger.
     @discardableResult
-    private func restoreRegeneration(_ context: PlaygroundRunContext, message: String) -> Bool {
+    private func restoreRegeneration(_ context: PlaygroundRunContext, message: String, usage: ChatUsage?) -> Bool {
         guard let backup = regenerationBackups.removeValue(forKey: context.runID),
               mutateMessage(context, mutation: { $0 = backup }) else { return false }
         lastError = message
         lastErrorConversationID = context.conversationID
+        apply(usage: usage, to: context)
         runState.phase = .failed(message)
         terminalCleanup(context)
         return true
     }
 
     private func apply(usage: ChatUsage?, to context: PlaygroundRunContext) {
-        guard let usage, let index = conversations.firstIndex(where: { $0.id == context.conversationID }) else { return }
-        lastUsage = usage
+        let index = conversations.firstIndex(where: { $0.id == context.conversationID })
+        // Every run gets exactly one ledger row keyed by its run id — even a
+        // run whose provider sent no usage block happened, and its spend is
+        // unknown ("unpriced"), never zero.
         UsageLedger.shared.record(context.mode == .agent ? .agent : .chat,
-                                  model: conversations[index].modelId, usage: usage,
+                                  model: index.map { conversations[$0].modelId } ?? "",
+                                  usage: usage,
                                   eventID: context.runID.uuidString)
+        guard let usage, let index else { return }
+        lastUsage = usage
         conversations[index].totalCost += usage.cost ?? 0
         conversations[index].totalTokens += usage.totalTokens ?? 0
         let elapsed = max(Date().timeIntervalSince(context.startedAt), 0.001)
@@ -1100,10 +1115,34 @@ final class ChatService: ObservableObject {
             activityLabel = "Wrapping up — summarizing results…"
         case .retrying(let label):
             flushAgentStreams()
+            dropAbandonedToolCards(context)
             activityLabel = label
             if runState.phase != .connecting { runState.phase = .connecting }
         default: break
         }
+    }
+
+    /// A retried turn re-emits its tool calls under new call ids, so the aborted
+    /// attempt's cards would linger in the saved message with no result. Drops
+    /// only cards whose execution never started — completed calls keep their
+    /// results and their wire tool pairs — along with their transcript segments.
+    private func dropAbandonedToolCards(_ context: PlaygroundRunContext) {
+        // Stale partial previews must not be re-published with the next submit.
+        agentToolPreviews.removeAll(keepingCapacity: true)
+        var removedIDs = Set<String>()
+        _ = mutateMessage(context) { message in
+            guard let cards = message.toolCalls else { return }
+            let abandoned = cards.filter { $0.result == nil && !$0.isExecuting }
+            guard !abandoned.isEmpty else { return }
+            removedIDs = Set(abandoned.map(\.id))
+            message.toolCalls = cards.filter { !removedIDs.contains($0.id) }
+            message.transcript?.removeAll { segment in
+                segment.kind == .tool && segment.toolCallID.map { removedIDs.contains($0) } == true
+            }
+        }
+        guard !removedIDs.isEmpty else { return }
+        synchronizeActive(context.conversationID)
+        checkpoint(context, force: true)
     }
 
     private func publishAgentToolPreviews(_ previews: [AssembledAgentToolCall], context: PlaygroundRunContext) {
