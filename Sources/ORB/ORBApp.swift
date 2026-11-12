@@ -22,7 +22,6 @@ struct ORBApp: App {
                     minHeight: ORBShell.minimumWindowSize.height
                 )
                 .background(WindowChromeConfigurator(hideTitleBar: ORBShell.useHiddenTitleBar))
-                .onOpenURL { shell.open($0) }
         }
         .windowToolbarStyle(.unified)
         .handlesExternalEvents(matching: [DeepLink.scheme])
@@ -40,7 +39,8 @@ struct ORBApp: App {
 }
 
 /// Menu bar commands. Shortcuts are routed through `ShellController`;
-/// `ContentView` performs them (and ignores them while locked).
+/// `ContentView` performs them (and ignores them while locked). `orb://`
+/// links are handled by `ContentView.onOpenURL`, which holds them until unlock.
 struct ShellCommands: Commands {
     @ObservedObject var shell: ShellController
     let focusManager: FocusManager

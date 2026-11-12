@@ -127,15 +127,7 @@ struct MCPSettingsView: View {
                 .textFieldStyle(.roundedBorder)
                 .orbFont(size: 11, design: .monospaced)
 
-            TextField(
-                "Arguments (space separated)",
-                text: Binding(
-                    get: { config.wrappedValue.args.joined(separator: " ") },
-                    set: { config.wrappedValue.args = $0.split(separator: " ").map(String.init) }
-                )
-            )
-            .textFieldStyle(.roundedBorder)
-            .orbFont(size: 11, design: .monospaced)
+            MCPArgumentsField(args: config.args)
 
             secretConsentSection(config.wrappedValue)
 
@@ -404,6 +396,104 @@ struct MCPSettingsView: View {
                 }
             }
         }
+    }
+}
+
+/// The Arguments field of a server row. It edits its own text and writes the
+/// parsed list back only when the list really changes. Joining the list with
+/// spaces and splitting on every space, as the row once did, broke a path
+/// containing a space into two arguments and saved it that way.
+private struct MCPArgumentsField: View {
+    @Binding var args: [String]
+    @State private var text: String
+
+    init(args: Binding<[String]>) {
+        _args = args
+        _text = State(initialValue: MCPArguments.render(args.wrappedValue))
+    }
+
+    var body: some View {
+        TextField("Arguments (space separated; quote values that contain spaces)", text: $text)
+            .textFieldStyle(.roundedBorder)
+            .orbFont(size: 11, design: .monospaced)
+            .onChange(of: text) { _, newText in
+                let parsed = MCPArguments.parse(newText)
+                if parsed != args { args = parsed }
+            }
+            .onChange(of: args) { _, newArgs in
+                // Changed elsewhere (import, secret migration): show the new
+                // list, unless the text being typed already means the same.
+                if MCPArguments.parse(text) != newArgs { text = MCPArguments.render(newArgs) }
+            }
+    }
+}
+
+/// Shell-style quoting for the Arguments field, so a value with spaces
+/// survives a round trip: `parse(render(args)) == args` for every list.
+enum MCPArguments {
+    /// Splits on unquoted whitespace. Single quotes are literal; inside
+    /// double quotes a backslash escapes `"` and `\`; elsewhere a backslash
+    /// escapes the next character. An unclosed quote runs to the end, so a
+    /// half-typed value is never dropped.
+    static func parse(_ text: String) -> [String] {
+        var args: [String] = []
+        var current = ""
+        var hasCurrent = false
+        var quote: Character?
+        var index = text.startIndex
+
+        func next() -> Character? {
+            let after = text.index(after: index)
+            return after < text.endIndex ? text[after] : nil
+        }
+
+        while index < text.endIndex {
+            let character = text[index]
+            if let open = quote {
+                if character == open {
+                    quote = nil
+                } else if open == "\"", character == "\\", let escaped = next(), escaped == "\"" || escaped == "\\" {
+                    current.append(escaped)
+                    index = text.index(after: index)
+                } else {
+                    current.append(character)
+                }
+            } else if character == "'" || character == "\"" {
+                quote = character
+                hasCurrent = true
+            } else if character == "\\", let escaped = next() {
+                current.append(escaped)
+                hasCurrent = true
+                index = text.index(after: index)
+            } else if character.isWhitespace {
+                if hasCurrent { args.append(current) }
+                current = ""
+                hasCurrent = false
+            } else {
+                current.append(character)
+                hasCurrent = true
+            }
+            index = text.index(after: index)
+        }
+        if hasCurrent { args.append(current) }
+        return args
+    }
+
+    /// Joins with spaces, double-quoting any argument that is empty or
+    /// contains whitespace, a quote or a backslash.
+    static func render(_ args: [String]) -> String {
+        args.map(quoted).joined(separator: " ")
+    }
+
+    private static func quoted(_ argument: String) -> String {
+        let needsQuoting = argument.isEmpty || argument.contains { character in
+            character.isWhitespace || character == "\"" || character == "'" || character == "\\"
+        }
+        guard needsQuoting else { return argument }
+        let escaped = argument
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "\"", with: "\\\"")
+        return "\"" + escaped + "\""
     }
 }
 

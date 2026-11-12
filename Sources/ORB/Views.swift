@@ -35,24 +35,25 @@ struct ModelRowView: View {
     @AppStorage(PriceUnit.defaultsKey) private var priceUnit: PriceUnit = .perMillion
     @State private var isHovered = false
 
-    private var facts: ModelRowFacts { ModelRowFacts.make(model, unit: priceUnit) }
-
-    private func factsLine(price: String, elo: Bool, icons: Bool) -> some View {
+    private func factsLine(_ facts: ModelRowFacts, price: String, elo: Bool, icons: Bool) -> some View {
         HStack(spacing: 10) {
             Text(facts.context + " ctx").monospacedDigit()
             Text(price)
                 .monospacedDigit()
                 .foregroundStyle(model.isFree ? ORBTheme.success : Color.secondary)
             if elo, let value = model.bestDesignElo { Text("Elo \(Int(value))") }
-            if icons { capabilityIcons }
+            if icons { capabilityIcons(facts.capabilities) }
         }
         .lineLimit(1)
         .fixedSize()
     }
 
     var body: some View {
+        // Built once per render and passed down. As a computed property it
+        // was rebuilt (regex cleaning included) at every one of ~16 reads.
+        let facts = ModelRowFacts.make(model, unit: priceUnit)
         HStack(spacing: 10) {
-            avatar
+            avatar(facts.avatarLetter)
 
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 5) {
@@ -83,10 +84,10 @@ struct ModelRowView: View {
                 }
                 // Drop the least important facts first instead of truncating every one ("1.0M c…", "$0.10…").
                 ViewThatFits(in: .horizontal) {
-                    factsLine(price: facts.price, elo: true, icons: true)
-                    factsLine(price: facts.compactPrice, elo: true, icons: true)
-                    factsLine(price: facts.compactPrice, elo: false, icons: true)
-                    factsLine(price: facts.compactPrice, elo: false, icons: false)
+                    factsLine(facts, price: facts.price, elo: true, icons: true)
+                    factsLine(facts, price: facts.compactPrice, elo: true, icons: true)
+                    factsLine(facts, price: facts.compactPrice, elo: false, icons: true)
+                    factsLine(facts, price: facts.compactPrice, elo: false, icons: false)
                 }
                 .font(ORBFont.caption)
                 .foregroundStyle(.secondary)
@@ -143,8 +144,8 @@ struct ModelRowView: View {
         }
     }
 
-    private var avatar: some View {
-        Text(facts.avatarLetter)
+    private func avatar(_ letter: String) -> some View {
+        Text(letter)
             .orbFont(size: 13, weight: .bold, design: .rounded)
             .foregroundStyle(providerColor)
             .frame(width: 30, height: 30)
@@ -195,8 +196,7 @@ struct ModelRowView: View {
 
     /// Neutral glyphs, capped, with the full list in the tooltip.
     @ViewBuilder
-    private var capabilityIcons: some View {
-        let caps = facts.capabilities
+    private func capabilityIcons(_ caps: [ModelRowFacts.Badge]) -> some View {
         if !caps.isEmpty {
             HStack(spacing: 5) {
                 ForEach(Array(caps.prefix(Self.maxCapabilityIcons).enumerated()), id: \.offset) { _, cap in
@@ -416,7 +416,7 @@ struct ModelDetailView: View {
     private var endpointComparison: some View {
         let eps = viewModel.endpoints
         if eps.count > 1 {
-            let cheapest = eps.compactMap(\.promptCostPer1M).min()
+            let cheapest = ModelEndpoint.cheapestInputPrice(in: eps)
             let unit = priceUnit
             let fastest = eps.compactMap(\.latencyLast30m).min()
             VStack(alignment: .leading, spacing: 6) {
@@ -431,7 +431,7 @@ struct ModelDetailView: View {
                             Text(ep.displayName).lineLimit(1)
                             HStack(spacing: 3) {
                                 Text(PriceDisplay.perToken(ep.pricing?.prompt).map { PriceDisplay.amount(perToken: $0, unit: unit) } ?? "—")
-                                if let c = ep.promptCostPer1M, c == cheapest {
+                                if let c = ep.rankingInputPrice, c == cheapest {
                                     Image(systemName: "checkmark.seal.fill").foregroundStyle(ORBTheme.success)
                                         .help("Cheapest input").accessibilityLabel("Cheapest input")
                                 }
@@ -458,7 +458,10 @@ struct ModelDetailView: View {
     private var notesTab: some View { notesSection }
 
     private func flushNotes(_ modelID: String) {
-        guard notes != savedNotes else { return }
+        guard notes != savedNotes else {
+            viewModel.stageNotes(nil, for: modelID)
+            return
+        }
         viewModel.saveNotes(notes, for: modelID)
         savedNotes = notes
     }
@@ -687,6 +690,9 @@ struct ModelDetailView: View {
                 .onChange(of: notes) { _, newValue in
                     notesDebounceTask?.cancel()
                     let modelID = model.id
+                    // Staged on the view model, which writes it if the app
+                    // quits before the pause below ends.
+                    viewModel.stageNotes(newValue == savedNotes ? nil : newValue, for: modelID)
                     notesDebounceTask = Task {
                         try? await Task.sleep(nanoseconds: 800_000_000)
                         guard !Task.isCancelled, modelID == model.id, newValue != savedNotes else { return }
@@ -725,8 +731,8 @@ struct ProviderRow: View {
                             .orbFont(size: 11, weight: .bold, design: .monospaced)
                             .foregroundStyle(.teal)
                     }
-                    if let up = endpoint.uptimeLast1d {
-                        Text("Uptime \(Int(up))%")
+                    if let uptime = endpoint.uptimeLast1d.flatMap(EndpointUptime.label) {
+                        Text(uptime)
                             .foregroundStyle(.secondary)
                     }
                     if endpoint.supportsImplicitCaching == true {

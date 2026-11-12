@@ -11,7 +11,10 @@ final class BrowserViewModel: ObservableObject {
     /// `defaults` enables persistence of filters, sort and the compare
     /// selection. nil (the default, and what tests use) keeps everything in
     /// memory.
-    init(api: APIService? = nil, db: DatabaseManager = DatabaseManager.shared, defaults: UserDefaults? = nil) {
+    init(
+        api: APIService? = nil, db: DatabaseManager = DatabaseManager.shared, defaults: UserDefaults? = nil,
+        notifications: NotificationCenter = .default
+    ) {
         self.api = api ?? APIService()
         self.db = db
         self.defaults = defaults
@@ -29,11 +32,26 @@ final class BrowserViewModel: ObservableObject {
         catalogSubscription = self.api.$models.dropFirst().sink { [weak self] models in
             MainActor.assumeIsolated { self?.catalogChanged(models) }
         }
+        // Views observe this view model, not the service, so the service's
+        // loading and error state must republish here to render (a refresh
+        // spinner, the offline banner). One-way, so it cannot loop.
+        apiSubscription = self.api.objectWillChange.sink { [weak self] _ in
+            self?.objectWillChange.send()
+        }
+        // Notes are saved after a typing pause; quitting inside that pause
+        // must not lose them.
+        terminationSubscription = notifications
+            .publisher(for: NSApplication.willTerminateNotification)
+            .sink { [weak self] _ in
+                MainActor.assumeIsolated { self?.flushPendingNotes() }
+            }
     }
 
     private let defaults: UserDefaults?
     private var restoringPrefs = true
     private var catalogSubscription: AnyCancellable?
+    private var apiSubscription: AnyCancellable?
+    private var terminationSubscription: AnyCancellable?
 
     private func persistPrefs() {
         guard let defaults, !restoringPrefs else { return }
@@ -187,10 +205,16 @@ final class BrowserViewModel: ObservableObject {
         compareLimitNotice = nil
     }
 
-    /// Replaces the selection (deep links), de-duplicated and capped.
+    /// Replaces the selection (deep links), de-duplicated and capped. With a
+    /// loaded catalog, ids it doesn't contain are dropped before the cap so
+    /// they neither count as selected nor crowd out real models.
     func setCompare(_ ids: [String]) {
         var seen = Set<String>()
-        let unique = ids.filter { seen.insert($0).inserted }
+        var unique = ids.filter { seen.insert($0).inserted }
+        if !api.models.isEmpty {
+            let known = Set(api.models.map(\.id))
+            unique.removeAll { !known.contains($0) }
+        }
         compareIDs = Array(unique.prefix(TestBatchSelection.maximumModels))
         compareLimitNotice = unique.count > compareIDs.count
             ? "You can compare up to \(TestBatchSelection.maximumModels) models." : nil
@@ -205,6 +229,7 @@ final class BrowserViewModel: ObservableObject {
     func pruneCompare() {
         guard !api.models.isEmpty else { return }
         let known = Set(api.models.map(\.id))
+        guard compareIDs.contains(where: { !known.contains($0) }) else { return }
         compareIDs.removeAll { !known.contains($0) }
     }
 
@@ -268,8 +293,28 @@ final class BrowserViewModel: ObservableObject {
         loadFavorites()
     }
 
+    /// Notes typed but not yet written (the detail view saves after a typing
+    /// pause). Not published: it changes on every keystroke.
+    private(set) var pendingNotes: (modelID: String, text: String)?
+
+    /// Records the unsaved text for `modelID`; nil means nothing is unsaved.
+    func stageNotes(_ text: String?, for modelID: String) {
+        if let text {
+            pendingNotes = (modelID, text)
+        } else if pendingNotes?.modelID == modelID {
+            pendingNotes = nil
+        }
+    }
+
+    /// Writes staged notes now. Runs when the app is about to quit.
+    func flushPendingNotes() {
+        guard let pending = pendingNotes else { return }
+        saveNotes(pending.text, for: pending.modelID)
+    }
+
     /// Persists notes for any model, favorite or not.
     func saveNotes(_ notes: String, for modelId: String) {
+        if pendingNotes?.modelID == modelId { pendingNotes = nil }
         do {
             try db.saveNotes(modelId, notes: notes)
             lastStorageError = nil
@@ -328,11 +373,22 @@ final class BrowserViewModel: ObservableObject {
         selectedModel = model
         endpoints = []
         isLoadingEndpoints = true
+        api.endpointsError = nil
         endpointTask = Task { [weak self] in
             guard let api = self?.api else { return }
-            let eps = await api.fetchEndpoints(for: model)
+            // The side-effect-free load: the shared error is written below,
+            // behind the same guard as the endpoints, so a cancelled or late
+            // request for A can never show its failure under B.
+            let result = await api.loadEndpoints(for: model.endpointsModelID)
             guard let self, !Task.isCancelled, self.selectedModelId == model.id else { return }
-            self.endpoints = eps
+            switch result {
+            case .success(let list):
+                self.endpoints = list
+                api.endpointsError = nil
+            case .failure(let error):
+                self.endpoints = []
+                api.endpointsError = error.message
+            }
             self.isLoadingEndpoints = false
         }
     }
@@ -365,14 +421,44 @@ final class BrowserViewModel: ObservableObject {
         newThisWeekCount = api.models.filter { isNewThisWeek($0) }.count
         // Refetch the selected model's endpoints explicitly; routing through
         // selectModel would be suppressed by the same-model equality guard.
-        if let m = selectedModel {
-            beginEndpointTransition(m)
+        // ModelInfo equality is id-only, so take the refreshed value from the
+        // catalog or the detail pane keeps the old price, context and expiry.
+        if let current = selectedModel {
+            beginEndpointTransition(api.models.first { $0.id == current.id } ?? current)
         }
+        // Restored or deep-linked compare ids the catalog no longer has would
+        // otherwise count as selected with no column and no row to remove them.
+        pruneCompare()
     }
 
     func isNewThisWeek(_ model: ModelInfo) -> Bool {
         guard let d = model.createdDate else { return false }
         return d > Date().addingTimeInterval(-7 * 86400)
+    }
+}
+
+// MARK: - Deep links while locked
+
+/// Keeps an `orb://` link that arrives while ORB is locked (the default
+/// state at launch) so it can run right after unlock instead of being lost.
+/// Only the newest link is kept, and it is handed out once.
+struct LockedDeepLinkInbox: Equatable {
+    private(set) var held: ShellAction?
+
+    /// Returns the action to perform now, or nil when it was held for unlock.
+    mutating func receive(_ action: ShellAction, isUnlocked: Bool) -> ShellAction? {
+        guard !isUnlocked else {
+            held = nil
+            return action
+        }
+        held = action
+        return nil
+    }
+
+    /// The held link, if any. Call when the app unlocks.
+    mutating func takeAfterUnlock() -> ShellAction? {
+        defer { held = nil }
+        return held
     }
 }
 
@@ -450,6 +536,7 @@ struct ContentView: View {
     @State private var startedPostUnlockWork = false
     @State private var showOnboarding = false
     @State private var showFilters = false
+    @State private var linkInbox = LockedDeepLinkInbox()
     /// `-orb.reviewMode YES`: screenshot review — never touch legacy Keychain items.
     private static let reviewMode = UserDefaults.standard.bool(forKey: "orb.reviewMode")
 
@@ -482,7 +569,12 @@ struct ContentView: View {
                 LockScreenView(
                     lock: appLock,
                     accent: ORBTheme.accent,
-                    onOpenSettings: { openSettings() }
+                    onOpenSettings: {
+                        // Security lives in General; without this the window
+                        // reopens on whichever pane was used last.
+                        SettingsPane.lockSettings.store()
+                        openSettings()
+                    }
                 )
             } else {
                 shellView
@@ -521,6 +613,15 @@ struct ContentView: View {
             if unlocked { AppLockMonitor.shared.noteActivity() }
             if unlocked {
                 Task { await startPostUnlockWorkIfNeeded() }
+                // A link opened while locked runs now, through the normal
+                // request path, once the shell is back on screen.
+                if let action = linkInbox.takeAfterUnlock() { shell.send(action) }
+            }
+        }
+        .onOpenURL { url in
+            guard let link = DeepLink.parse(url) else { return }
+            if let action = linkInbox.receive(link.shellAction, isUnlocked: appLock.isUnlocked) {
+                shell.send(action)
             }
         }
         .alert(
@@ -554,6 +655,8 @@ struct ContentView: View {
         .onChange(of: shell.pending) { _, request in
             guard let request else { return }
             shell.pending = nil
+            // Menu commands are ignored while locked; orb:// links are held
+            // by `linkInbox` instead and replayed after unlock.
             guard appLock.isUnlocked else { return }
             perform(request.action)
         }

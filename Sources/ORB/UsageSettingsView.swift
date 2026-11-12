@@ -18,14 +18,20 @@ struct UsageSettingsView: View {
     enum Range: String, CaseIterable, Identifiable {
         case today = "Today", week = "7 Days", month = "30 Days", allTime = "All Time"
         var id: String { rawValue }
-        var start: Date? {
-            let cal = Calendar.current
+        /// Calendar days the range covers, today included; nil for all time.
+        var days: Int? {
             switch self {
-            case .today: return cal.startOfDay(for: Date())
-            case .week: return cal.date(byAdding: .day, value: -7, to: Date())
-            case .month: return cal.date(byAdding: .day, value: -30, to: Date())
+            case .today: return 1
+            case .week: return 7
+            case .month: return 30
             case .allTime: return nil
             }
+        }
+
+        /// Start of the first calendar day in the range, so the totals, the
+        /// day list and the chart all cover the same days.
+        func start(now: Date = Date(), calendar: Calendar = .current) -> Date? {
+            days.map { UsageSeries.windowStart(days: $0, endingAt: now, calendar: calendar) }
         }
     }
 
@@ -78,13 +84,8 @@ struct UsageSettingsView: View {
         .onChange(of: ledger.revision) { _, _ in reload() }
     }
 
-    private var chartDays: Int {
-        switch range {
-        case .today: return 1
-        case .week: return 7
-        case .month, .allTime: return 30
-        }
-    }
+    /// All time still charts the last 30 days (see `UsageSeries.chartTitle`).
+    private var chartDays: Int { range.days ?? 30 }
 
     @ViewBuilder
     private var charts: some View {
@@ -147,7 +148,7 @@ struct UsageSettingsView: View {
     }
 
     private func reload() {
-        let since = range.start
+        let since = range.start()
         features = ledger.buckets(.feature, since: since)
         models = ledger.buckets(.model, since: since)
         days = ledger.buckets(.day, since: since)

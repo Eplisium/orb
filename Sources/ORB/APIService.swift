@@ -143,8 +143,10 @@ final class APIService: ObservableObject {
                 return .failure(.http((response as? HTTPURLResponse)?.statusCode ?? 0))
             }
             let decoded = try JSONDecoder().decode(EndpointResponse.self, from: data)
+            // Cheapest input first. A real $0 ranks first; variable and
+            // unknown prices have no ranking price and go last.
             let sorted = decoded.data.endpoints.sorted {
-                ($0.promptCostPer1M ?? .infinity, $0.baseID) < ($1.promptCostPer1M ?? .infinity, $1.baseID)
+                ($0.rankingInputPrice ?? .infinity, $0.baseID) < ($1.rankingInputPrice ?? .infinity, $1.baseID)
             }
             return .success(ModelEndpoint.uniquified(sorted))
         } catch {
@@ -157,7 +159,9 @@ final class APIService: ObservableObject {
         switch await loadEndpoints(for: modelId) {
         case .success(let list): return list
         case .failure(let error):
-            endpointsError = error.message
+            // A cancelled request belongs to a selection the user already
+            // left; reporting it would show an error under another model.
+            if !Task.isCancelled { endpointsError = error.message }
             return []
         }
     }

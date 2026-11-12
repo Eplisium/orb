@@ -42,6 +42,21 @@ struct KeyCombo: Hashable, Sendable {
     static func shiftCmd(_ key: String) -> KeyCombo { KeyCombo(key: key, modifiers: [.command, .shift]) }
 }
 
+extension KeyCombo {
+    /// The same chord as a SwiftUI shortcut, so tables that store
+    /// `KeyboardShortcut` (the Conversation menu) can be checked against this
+    /// one. In an extension so the memberwise initializer stays available.
+    init(_ shortcut: KeyboardShortcut) {
+        let isReturn = shortcut.key.character == KeyEquivalent.return.character
+        var modifiers: Modifiers = []
+        if shortcut.modifiers.contains(.command) { modifiers.insert(.command) }
+        if shortcut.modifiers.contains(.shift) { modifiers.insert(.shift) }
+        if shortcut.modifiers.contains(.option) { modifiers.insert(.option) }
+        if shortcut.modifiers.contains(.control) { modifiers.insert(.control) }
+        self.init(key: isReturn ? "↩" : String(shortcut.key.character).lowercased(), modifiers: modifiers)
+    }
+}
+
 /// Every menu command with a key equivalent.
 enum ShortcutCommand: String, CaseIterable, Sendable {
     case palette, refresh, newChat, newAgent, find, shortcuts, settings, toggleSidebar
@@ -62,7 +77,8 @@ enum ShortcutCommand: String, CaseIterable, Sendable {
         case .toggleFavorite: return .cmd("d")
         case .copyModelID: return .shiftCmd("c")
         case .chatWithModel: return .cmd("↩")
-        case .openCompare: return KeyCombo(key: "c", modifiers: [.command, .option])
+        // ⌃⌘C: ⌥⌘C belongs to Conversation > Copy Last Reply.
+        case .openCompare: return KeyCombo(key: "c", modifiers: [.command, .control])
         case .sectionEmbeddings: return .cmd("0")
         case .sectionTestSuite: return .shiftCmd("e")
         }
@@ -101,10 +117,17 @@ extension ShellShortcuts {
         return extraSectionCommands.first { $0.0 == section }?.1.combo.display
     }
 
-    /// Every key combo the menus bind (digits included). Must be unique.
+    /// Every key combo the shell and Model menus bind (digits included).
     static var allMenuCombos: [KeyCombo] {
         ShortcutCommand.allCases.map(\.combo)
             + (1...numberedSections.count).map { KeyCombo.cmd(String($0)) }
+    }
+
+    /// Every key combo any menu binds: `allMenuCombos` plus the Conversation
+    /// menu, which keeps its own table. Must be unique, or one of two
+    /// commands sharing a chord can never be reached from the keyboard.
+    static var allBoundCombos: [KeyCombo] {
+        allMenuCombos + ConversationShortcuts.all.map(KeyCombo.init)
     }
 }
 

@@ -49,6 +49,7 @@ final class ToastCenter {
     private(set) var toasts: [ORBToastItem] = []
     let maxVisible: Int
     @ObservationIgnored private var timers: [UUID: Task<Void, Never>] = [:]
+    @ObservationIgnored private var announcedIDs: Set<UUID> = []
 
     init(maxVisible: Int = 3) {
         self.maxVisible = max(1, maxVisible)
@@ -78,6 +79,14 @@ final class ToastCenter {
     func dismissAll() {
         for id in toasts.map(\.id) { dismiss(id) }
     }
+
+    /// Visible toasts VoiceOver has not been told about, oldest first. Each
+    /// toast is returned once: when a newer toast expires before an older
+    /// one, the older one becomes the last again but is not read a second time.
+    func takeUnannounced() -> [ORBToastItem] {
+        announcedIDs.formIntersection(toasts.map(\.id))
+        return toasts.filter { announcedIDs.insert($0.id).inserted }
+    }
 }
 
 private struct ORBToastHost: ViewModifier {
@@ -95,12 +104,13 @@ private struct ORBToastHost: ViewModifier {
             .padding(ORBMetrics.spacingMD)
             .orbAnimation(.standard, value: center.toasts)
         }
-        .onChange(of: center.toasts.last) { _, new in
-            guard let new else { return }
+        .onChange(of: center.toasts) { _, _ in
             // Announce to VoiceOver; toasts vanish before they can be focused.
-            if let app = NSApp {
-                NSAccessibility.post(element: app, notification: .announcementRequested,
-                                     userInfo: [.announcement: "\(new.kind.label): \(new.message)"])
+            for toast in center.takeUnannounced() {
+                if let app = NSApp {
+                    NSAccessibility.post(element: app, notification: .announcementRequested,
+                                         userInfo: [.announcement: "\(toast.kind.label): \(toast.message)"])
+                }
             }
         }
     }

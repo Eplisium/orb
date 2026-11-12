@@ -575,10 +575,7 @@ struct ModelRowFacts: Equatable {
     static func make(_ model: ModelInfo, unit: PriceUnit = .perMillion) -> ModelRowFacts {
         let provider = model.provider.trimmingCharacters(in: CharacterSet(charactersIn: "~"))
         let letter = provider.first.map { String($0).uppercased() } ?? "?"
-        let line = model.description?
-            .split(whereSeparator: \.isNewline)
-            .map { CatalogDescriptionText.plain(String($0)) }
-            .first { !$0.isEmpty }
+        let line = firstLine(of: model.description)
 
         let price: String
         let compactPrice: String
@@ -607,5 +604,49 @@ struct ModelRowFacts: Equatable {
             compactPrice: compactPrice,
             capabilities: badges
         )
+    }
+
+    /// First line with visible text once Markdown is stripped. Lazy: cleaning
+    /// is several regex passes, so it stops at the first line that has text
+    /// instead of cleaning the whole description for every row.
+    static func firstLine(of description: String?) -> String? {
+        description?
+            .split(whereSeparator: \.isNewline)
+            .lazy
+            .map { CatalogDescriptionText.plain(String($0)) }
+            .first { !$0.isEmpty }
+    }
+}
+
+// MARK: Endpoint facts
+
+extension ModelEndpoint {
+    /// Per-token input price used to rank providers. A real $0 is 0, so a
+    /// free endpoint is the cheapest; variable ("-1") and missing prices are
+    /// nil and rank last. (`promptCostPer1M` is nil for $0 as well.)
+    var rankingInputPrice: Double? { PriceDisplay.perToken(pricing?.prompt) }
+
+    /// The lowest input price in `endpoints`, for the "Cheapest input" seal.
+    static func cheapestInputPrice(in endpoints: [ModelEndpoint]) -> Double? {
+        endpoints.compactMap(\.rankingInputPrice).min()
+    }
+}
+
+enum EndpointUptime {
+    /// Uptime as a percentage in 0...100. The API reports a percentage
+    /// (99.89); a fraction (0.997) is accepted too. Values at or below 1 are
+    /// read as fractions, since a real uptime that low is not plausible.
+    static func percent(_ raw: Double) -> Double? {
+        guard raw.isFinite, raw >= 0 else { return nil }
+        return min(raw <= 1 ? raw * 100 : raw, 100)
+    }
+
+    /// "Uptime 99.9%". One decimal place, and never rounded up to 100:
+    /// 99.997 reads "99.9%", not "100%" (and not the truncated "99%").
+    static func label(_ raw: Double) -> String? {
+        guard let percent = percent(raw) else { return nil }
+        if percent >= 100 { return "Uptime 100%" }
+        let shown = min((percent * 10).rounded() / 10, 99.9)
+        return "Uptime " + String(format: "%.1f", shown) + "%"
     }
 }

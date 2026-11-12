@@ -67,8 +67,10 @@ struct SettingsView: View {
                 if KeychainManager.deleteAPIKey() {
                     keyActionError = nil
                     showKeyDeleted = true
-                    account.credits = nil
-                    account.activity = []
+                    // Only the inference key's own panel is cleared. Credits
+                    // and activity belong to the management key, which is
+                    // still configured.
+                    directory.keyInfo = nil
                     DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
                         showKeyDeleted = false
                     }
@@ -78,7 +80,7 @@ struct SettingsView: View {
             }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text("Chat, Agent, credits, and activity will be unavailable until another key is saved.")
+            Text(ManagementKeyPanel.removeInferenceMessage)
         }
         .confirmationDialog(
             ManagementKeyPanel.removeTitle,
@@ -465,7 +467,7 @@ struct SettingsView: View {
                     .padding(.top, 4)
                 }
             } else {
-                Text("Pull to refresh or tap the arrow to check your credits.")
+                Text(ManagementKeyPanel.creditsEmptyMessage)
                     .foregroundStyle(.secondary)
             }
         }
@@ -648,7 +650,7 @@ struct SettingsView: View {
                 }
                 .padding(.top, 4)
             } else {
-                Text("Tap the arrow to load key limits and usage.")
+                Text(ManagementKeyPanel.keyInfoEmptyMessage)
                     .foregroundStyle(.secondary)
             }
         }
@@ -733,6 +735,14 @@ struct ManagementKeyPanel {
     static let removeMessage = "Credits, activity, and administration will be unavailable until another management key is saved. Chat keeps working with your inference key."
 
     static let removeButtonLabel = "Remove Management Key"
+
+    /// Removing the inference key leaves the management key, and with it
+    /// credits and activity, untouched; the confirmation says so.
+    static let removeInferenceMessage = "Chat, Agent, and Generate will be unavailable until another inference key is saved. Credits and activity use the management key and are not affected."
+
+    static let creditsEmptyMessage = "Click the refresh button to load your credits."
+
+    static let keyInfoEmptyMessage = "Click the refresh button to load key limits and usage."
 
     var canSave: Bool { !normalizedDraft.isEmpty }
     private var normalizedDraft: String {

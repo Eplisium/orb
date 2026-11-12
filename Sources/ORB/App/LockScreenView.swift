@@ -6,7 +6,8 @@ import SwiftUI
 struct LockScreenView: View {
     @ObservedObject var lock: AppLock
     let accent: Color
-    /// Jump straight to Account so the preference is one click away.
+    /// Opens Settings on the pane that holds the lock preference (the caller
+    /// stores `SettingsPane.lockSettings` first), so it is one click away.
     var onOpenSettings: (() -> Void)? = nil
 
     /// Deepened accent for the primary button: white on the raw accent is only

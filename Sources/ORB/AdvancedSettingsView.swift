@@ -15,11 +15,7 @@ struct AdvancedSettingsView: View {
     @State private var orderEntry = ""
     @State private var ignoreEntry = ""
     @State private var fallbackEntry = ""
-    @State private var jsonSchemaName = "response"
-    @State private var jsonSchemaText = """
-        {"type":"object","properties":{"answer":{"type":"string"}},"required":["answer"]}
-        """
-    @State private var jsonSchemaStrict = true
+    @State private var schemaDraft = JSONSchemaDraft()
 
     var body: some View {
         VStack(spacing: 0) {
@@ -47,6 +43,17 @@ struct AdvancedSettingsView: View {
             footer
         }
         .frame(width: 560, height: 640)
+        .onAppear {
+            // Show the schema that is actually stored, not the example.
+            if let stored = JSONSchemaDraft(stored: settings.responseFormat) { schemaDraft = stored }
+        }
+        .onChange(of: schemaDraft) { _, draft in
+            // Typing in the schema fields must reach the request; before,
+            // only moving the picker committed them.
+            var format = settings.responseFormat
+            draft.commit(into: &format)
+            if format != settings.responseFormat { settings.responseFormat = format }
+        }
     }
 
     private var header: some View {
@@ -234,18 +241,18 @@ struct AdvancedSettingsView: View {
             if responseFormatSelection.wrappedValue == 2 {
                 VStack(alignment: .leading, spacing: 6) {
                     Text("Schema name").font(.callout)
-                    TextField("e.g. answer", text: $jsonSchemaName)
+                    TextField("e.g. answer", text: $schemaDraft.name)
                         .textFieldStyle(.roundedBorder)
                     Text("JSON Schema (object)").font(.callout)
-                    TextEditor(text: $jsonSchemaText)
+                    TextEditor(text: $schemaDraft.text)
                         .orbFont(size: 11, design: .monospaced)
                         .frame(minHeight: 90)
                         .overlay {
                             RoundedRectangle(cornerRadius: 6)
                                 .stroke(Color.primary.opacity(0.10), lineWidth: 1)
                         }
-                    Toggle("Strict mode", isOn: $jsonSchemaStrict)
-                    if let schemaError {
+                    Toggle("Strict mode", isOn: $schemaDraft.strict)
+                    if let schemaError = schemaDraft.error {
                         Label(schemaError, systemImage: "exclamationmark.triangle")
                             .font(.caption).foregroundStyle(.orange)
                     }
@@ -322,8 +329,9 @@ struct AdvancedSettingsView: View {
 
     // MARK: - Output-shape bindings
     //
-    // ResponseFormatSettings is an enum, so the picker drives transient
-    // @State that is committed back into settings on change.
+    // ResponseFormatSettings is an enum, so the schema fields are edited in
+    // a `JSONSchemaDraft` that is seeded from settings when the sheet opens
+    // and committed back whenever a field or the picker changes.
 
     private var responseFormatSelection: Binding<Int> {
         Binding(
@@ -343,35 +351,10 @@ struct AdvancedSettingsView: View {
         case 1:
             settings.responseFormat = .jsonObject
         case 2:
-            let schema = parseSchemaText(jsonSchemaText) ?? .object([:])
-            settings.responseFormat = .jsonSchema(
-                name: jsonSchemaName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                    ? "response" : jsonSchemaName.trimmingCharacters(in: .whitespacesAndNewlines),
-                schema: schema,
-                strict: jsonSchemaStrict
-            )
+            settings.responseFormat = schemaDraft.responseFormat(keeping: nil)
         default:
             settings.responseFormat = .off
         }
-    }
-
-    private func parseSchemaText(_ text: String) -> JSONValue? {
-        guard let data = text.data(using: .utf8),
-              let object = try? JSONSerialization.jsonObject(with: data),
-              let dict = object as? [String: Any] else { return nil }
-        return JSONValue(any: dict)
-    }
-
-    private var schemaError: String? {
-        guard responseFormatSelection.wrappedValue == 2 else { return nil }
-        if jsonSchemaName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            return "Give the schema a name."
-        }
-        guard let value = parseSchemaText(jsonSchemaText) else {
-            return "Schema must be a valid JSON object."
-        }
-        guard value.objectValue != nil else { return "Schema must be a JSON object." }
-        return nil
     }
 
     private func modalityBinding(_ modality: OutputModality) -> Binding<Bool> {
@@ -563,6 +546,73 @@ struct AdvancedSettingsView: View {
 
     private func defaultValue(in range: ClosedRange<Double>) -> Double {
         range.contains(1) ? 1 : range.lowerBound
+    }
+}
+
+/// The editable JSON Schema fields of Request Parameters. Kept apart from the
+/// view so seeding from the stored format and committing edits can be tested.
+struct JSONSchemaDraft: Equatable {
+    static let defaultName = "response"
+    static let exampleText = """
+        {"type":"object","properties":{"answer":{"type":"string"}},"required":["answer"]}
+        """
+
+    var name = JSONSchemaDraft.defaultName
+    var text = JSONSchemaDraft.exampleText
+    var strict = true
+
+    init() {}
+
+    /// The draft for a stored JSON Schema format; nil for any other format,
+    /// so the caller keeps what it has (the example, on first use).
+    init?(stored format: ResponseFormatSettings) {
+        guard case .jsonSchema(let name, let schema, let strict) = format else { return nil }
+        self.name = name
+        self.text = Self.render(schema)
+        self.strict = strict
+    }
+
+    /// The schema text as a JSON object; nil while it does not parse.
+    var parsedSchema: JSONValue? {
+        guard let data = text.data(using: .utf8),
+              let object = try? JSONSerialization.jsonObject(with: data),
+              let dict = object as? [String: Any] else { return nil }
+        return JSONValue(any: dict)
+    }
+
+    var error: String? {
+        if name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return "Give the schema a name." }
+        if parsedSchema == nil { return "Schema must be a valid JSON object." }
+        return nil
+    }
+
+    /// The format these fields describe. While the text does not parse, the
+    /// schema falls back to `previous` (the last valid one) and then to an
+    /// empty object, so a half-typed edit never replaces a working schema.
+    func responseFormat(keeping previous: JSONValue?) -> ResponseFormatSettings {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        return .jsonSchema(
+            name: trimmed.isEmpty ? Self.defaultName : trimmed,
+            schema: parsedSchema ?? previous ?? .object([:]),
+            strict: strict
+        )
+    }
+
+    /// Writes the fields into `format` when it is a JSON Schema format.
+    /// Other formats are left alone: editing the hidden fields must not
+    /// switch the response format on.
+    func commit(into format: inout ResponseFormatSettings) {
+        guard case .jsonSchema(_, let stored, _) = format else { return }
+        format = responseFormat(keeping: stored)
+    }
+
+    private static func render(_ schema: JSONValue) -> String {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
+        guard let data = try? encoder.encode(schema), let text = String(data: data, encoding: .utf8) else {
+            return exampleText
+        }
+        return text
     }
 }
 

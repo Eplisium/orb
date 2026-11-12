@@ -1,16 +1,35 @@
 import Testing
 import Foundation
+import SwiftUI
 @testable import ORB
 
 @Suite("Wave 1 shell: shortcut table")
 struct ShortcutTableTests {
-    @Test("No two menu commands share a key combination")
+    @Test("No two menu commands share a key combination, across the shell, Model and Conversation menus")
     func noDuplicates() {
-        let combos = ShellShortcuts.allMenuCombos
+        let combos = ShellShortcuts.allBoundCombos
         var seen: [KeyCombo: Int] = [:]
         for c in combos { seen[c, default: 0] += 1 }
         let dupes = seen.filter { $0.value > 1 }.map(\.key.display)
         #expect(dupes.isEmpty, "duplicate shortcuts: \(dupes)")
+    }
+
+    @Test("The duplicate check covers every Conversation shortcut")
+    func conversationTableIsCovered() {
+        let bound = Set(ShellShortcuts.allBoundCombos)
+        #expect(ConversationShortcuts.all.count == 5)
+        for shortcut in ConversationShortcuts.all {
+            #expect(bound.contains(KeyCombo(shortcut)))
+        }
+        #expect(KeyCombo(ConversationShortcuts.copyLastReply).display == "⌥⌘C")
+        #expect(KeyCombo(ConversationShortcuts.stop).display == "⌘.")
+        #expect(KeyCombo(KeyboardShortcut(.return, modifiers: .command)) == ShortcutCommand.chatWithModel.combo)
+    }
+
+    @Test("Open Compare and Copy Last Reply have different chords")
+    func compareDoesNotShadowCopyLastReply() {
+        #expect(ShortcutCommand.openCompare.combo.display == "⌃⌘C")
+        #expect(ShortcutCommand.openCompare.combo != KeyCombo(ConversationShortcuts.copyLastReply))
     }
 
     @Test("System-reserved and text-editing combos are not claimed")

@@ -23,14 +23,17 @@ extension FocusedValues {
 }
 
 /// Shortcuts for the Conversation menu. Chosen to avoid the existing shell
-/// shortcuts (⌘N, ⇧⌘N, ⌘F, ⌘K, ⌘R, ⌘/, ⌘1…9, ⇧⌘C) and the Model menu
-/// (⌘D, ⇧⌘C, ⌘↩, ⌘K).
+/// shortcuts (⌘N, ⇧⌘N, ⌘F, ⌘K, ⌘R, ⌘/, ⌘0…9, ⇧⌘E) and the Model menu
+/// (⌘D, ⇧⌘C, ⌃⌘C, ⌘↩). `ShellShortcuts.allBoundCombos` checks both tables.
 enum ConversationShortcuts {
     static let stop = KeyboardShortcut(".", modifiers: .command)
     static let regenerate = KeyboardShortcut("r", modifiers: [.command, .shift])
     static let copyLastReply = KeyboardShortcut("c", modifiers: [.command, .option])
     static let export = KeyboardShortcut("e", modifiers: .command)
     static let searchSessions = KeyboardShortcut("f", modifiers: [.command, .option])
+
+    /// Every shortcut above, for the duplicate check.
+    static let all = [stop, regenerate, copyLastReply, export, searchSessions]
 }
 
 struct ConversationCommands: Commands {

@@ -186,6 +186,10 @@ enum SettingsPane: String, CaseIterable, Identifiable {
 
     static let storageKey = "orb.settings.pane"
 
+    /// The pane that holds the Security section (app lock). Entry points that
+    /// promise lock settings store this before opening the window.
+    static let lockSettings: SettingsPane = .general
+
     /// Maps the old single-row tab names so existing deep links keep working.
     static func fromLegacy(_ name: String) -> SettingsPane {
         switch name {
@@ -232,6 +236,14 @@ enum UsageSeries {
                 return UsagePoint(label: label, cost: byDay[label] ?? 0, date: date)
             }
         }
+    }
+
+    /// First instant of a `days`-day window that ends on `end`'s calendar
+    /// day: the same days `daily` plots. Totals queried from here match the
+    /// chart; a rolling "now minus N days" start adds part of one more day.
+    static func windowStart(days: Int, endingAt end: Date, calendar: Calendar = .current) -> Date {
+        let endDay = calendar.startOfDay(for: end)
+        return calendar.date(byAdding: .day, value: -(max(days, 1) - 1), to: endDay) ?? endDay
     }
 
     /// Top `limit` spenders; the rest roll into "Other" so totals are preserved.
