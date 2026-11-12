@@ -16,6 +16,9 @@ struct SavedCreation: Identifiable, Codable, Equatable, Sendable {
     /// Relative to AssetStore.baseDirectory; never a user-supplied filename.
     var assetPath: String
     var checksum: String
+    /// Recovery identity committed with the Library entry before the separate job link.
+    /// Optional so existing manifests remain readable.
+    var videoRemoteID: String? = nil
 }
 
 enum SavedCreationsError: Error, LocalizedError {
@@ -105,11 +108,11 @@ final class SavedCreationsStore: ObservableObject {
     /// Saves a file already on disk (a streamed download) without loading it
     /// into memory. The source is consumed only after asset metadata AND the
     /// manifest commit, and left in place on failure for retry or export.
-    func save(fileAt source: URL, mimeType: String, kind: SavedCreation.Kind, modelID: String, prompt: String?) async throws -> SavedCreation {
+    func save(fileAt source: URL, mimeType: String, kind: SavedCreation.Kind, modelID: String, prompt: String?, videoRemoteID: String? = nil) async throws -> SavedCreation {
         try await serialized { [self] in
             if let loadError { throw loadError }
             let asset = try await assetStore.store(fileAt: source, mimeType: mimeType, consumeSource: false)
-            let creation = try indexNewCreation(asset: asset, mimeType: mimeType, kind: kind, modelID: modelID, prompt: prompt)
+            let creation = try indexNewCreation(asset: asset, mimeType: mimeType, kind: kind, modelID: modelID, prompt: prompt, videoRemoteID: videoRemoteID)
             assetStore.consumeSourceFile(source, afterStoring: asset)
             return creation
         }
@@ -121,7 +124,7 @@ final class SavedCreationsStore: ObservableObject {
         return try indexNewCreation(asset: asset, mimeType: mimeType, kind: kind, modelID: modelID, prompt: prompt)
     }
 
-    private func indexNewCreation(asset: AssetRecord, mimeType: String, kind: SavedCreation.Kind, modelID: String, prompt: String?) throws -> SavedCreation {
+    private func indexNewCreation(asset: AssetRecord, mimeType: String, kind: SavedCreation.Kind, modelID: String, prompt: String?, videoRemoteID: String? = nil) throws -> SavedCreation {
         // AssetStore may return an existing record for these bytes, including its original path.
         guard Self.isValidAssetPath(asset.relativePath, checksum: asset.checksum) else {
             throw SavedCreationsError.unavailable("asset metadata has an untrusted path")
@@ -131,7 +134,7 @@ final class SavedCreationsStore: ObservableObject {
         _ = try validatedFileURL(path: asset.relativePath, checksum: asset.checksum)
         let item = SavedCreation(id: UUID(), kind: kind, modelID: modelID, prompt: prompt,
                                  mimeType: mimeType, createdAt: Date(), assetPath: asset.relativePath,
-                                 checksum: asset.checksum)
+                                 checksum: asset.checksum, videoRemoteID: videoRemoteID)
         let updated = [item] + creations
         let payload = try JSONEncoder().encode(CreationsManifest(version: 1, creations: updated))
         try FileManager.default.createDirectory(at: indexURL.deletingLastPathComponent(), withIntermediateDirectories: true)

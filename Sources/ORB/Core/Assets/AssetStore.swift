@@ -320,7 +320,7 @@ final class AssetStore {
     @discardableResult
     func removeUnattached(checksum: String) throws -> Bool {
         if try database.hasAttachedAssetRecord(checksum: checksum) { return false }
-        let records = database.loadAssetRecords().filter { $0.checksum == checksum }
+        let records = try database.loadAssetRecordsChecked(checksum: checksum)
         for record in records {
             let url = try resolvedURL(forRelativePath: record.relativePath)
             if FileManager.default.fileExists(atPath: url.path) {

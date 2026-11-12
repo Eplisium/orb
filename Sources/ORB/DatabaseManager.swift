@@ -1147,6 +1147,32 @@ final class DatabaseManager {
         }
     }
 
+    /// Destructive cleanup requires a complete, valid inventory for its checksum.
+    func loadAssetRecordsChecked(checksum: String) throws -> [AssetRecord] {
+        dbLock.lock()
+        defer { dbLock.unlock() }
+        let sql = """
+        SELECT id, relative_path, remote_reference, mime_type, size_bytes, checksum,
+               job_id, message_id, retention, created_at
+        FROM assets WHERE checksum = ?;
+        """
+        guard let stmt = prepare(sql) else { throw DatabaseManagerError.operationFailed(currentError()) }
+        defer { sqlite3_finalize(stmt) }
+        Self.bindText(stmt, 1, checksum)
+        var records: [AssetRecord] = []
+        while true {
+            switch sqlite3_step(stmt) {
+            case SQLITE_ROW:
+                guard let record = assetRecord(from: stmt) else {
+                    throw DatabaseManagerError.operationFailed("Invalid asset metadata")
+                }
+                records.append(record)
+            case SQLITE_DONE: return records
+            default: throw DatabaseManagerError.operationFailed(currentError())
+            }
+        }
+    }
+
     func loadAssetRecords() -> [AssetRecord] {
         let sql = """
         SELECT id, relative_path, remote_reference, mime_type, size_bytes, checksum,

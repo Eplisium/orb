@@ -574,6 +574,12 @@ final class VideoGenService: ObservableObject {
             // The creation was deleted from Library: allow downloading again.
             jobController.clearSavedCreation(remoteID: remoteID)
         }
+        // The manifest may have committed while the separate SQLite link failed.
+        // Recover that identity across service/app restarts before downloading again.
+        if let existing = store.creations.first(where: { $0.kind == .video && $0.videoRemoteID == remoteID }) {
+            jobController.recordSavedCreation(remoteID: remoteID, creationID: existing.id)
+            return existing
+        }
         if let running = downloadTasks[remoteID] { return try await running.value }
         let record = jobController.record(remoteID: remoteID)
         let task = Task<SavedCreation, Error> { @MainActor in
@@ -591,7 +597,7 @@ final class VideoGenService: ObservableObject {
             do {
                 let creation = try await store.save(
                     fileAt: file, mimeType: mime, kind: .video,
-                    modelID: record?.modelID ?? "unknown", prompt: record?.prompt
+                    modelID: record?.modelID ?? "unknown", prompt: record?.prompt, videoRemoteID: remoteID
                 )
                 retainedDownloads[remoteID] = nil
                 jobController.recordSavedCreation(remoteID: remoteID, creationID: creation.id)

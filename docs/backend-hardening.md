@@ -35,8 +35,17 @@ Approval lifetime coverage additionally delays a UI handler until after cancella
 | E01 | Store-owned pending removals protect shared bytes across window Undo lifetimes | LibraryExtendedAuditTests |
 | E02 | Failed attachment lookup denies asset deletion | LibraryExtendedAuditTests |
 | E03 | Stage-and-rename export preserves old destinations and refuses managed files/aliases; Image/Speech recovery bytes use the same checks | LibraryExtendedAuditTests, SavedCreationFileURLTests |
+| E04 | Failed/partial SQLite asset reads or undecodable metadata rows stop cleanup before metadata/bytes change | AssetRemovalFailureTests |
 
 Export protection here covers single-item Library/Video/Speech and generated Image/Speech actions, not every app exporter. Bulk export retains no-overwrite naming/copy behavior. Filesystem identities must be readable; unsupported destination filesystems fail closed. The distributed metadata/file deletion sequence is not a cross-store transaction.
+
+## Extended video recovery audit
+
+| ID | Repair | Primary regression suite |
+|---|---|---|
+| V01 | Commit remote job identity with the Library entry; retry a rejected SQLite link without duplicate download/save, even after reopening | VideoSaveLinkFailureTests, VideoDownloadRecoveryTests |
+
+The identity is optional for legacy compatibility. It protects newly saved videos; historical unlinked entries cannot be associated retroactively. The SQLite link and Library manifest remain separate commits, and link-write errors remain visible through the job controller.
 
 ## Extended MCP audit
 

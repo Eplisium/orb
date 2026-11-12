@@ -21,6 +21,8 @@ All notable changes to ORB are listed here. The format is based on [Keep a Chang
 - Cancelling MCP resource/prompt discovery aborts startup instead of publishing a partially initialized connection; ordinary optional-discovery RPC errors remain tolerated.
 
 ### Library data protection
+- Video saves retain the remote job identity in the Library manifest, so a failed separate job-link write can be retried after reopening without downloading/indexing a duplicate.
+- Asset cleanup aborts on failed/partial SQLite metadata reads or undecodable rows instead of removing metadata and orphaning bytes.
 - Keep shared asset bytes while another window still offers Undo. Attachment lookup failures stop cleanup rather than authorizing deletion.
 - Single-item Library/Video/Speech and generated Image/Speech exports reject managed assets, manifests, SQLite files and sidecars, including filesystem aliases. Failed replacements preserve existing destinations; recovery export works before the first successful Library save.
 
