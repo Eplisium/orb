@@ -388,6 +388,7 @@ actor MCPRegistry {
         }
         do {
             try await connection.connect()
+            try Task.checkCancellation()
             guard isDesired(config) else {
                 await connection.shutdown()
                 return

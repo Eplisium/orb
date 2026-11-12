@@ -38,6 +38,14 @@ Approval lifetime coverage additionally delays a UI handler until after cancella
 
 Export protection here covers single-item Library/Video/Speech and generated Image/Speech actions, not every app exporter. Bulk export retains no-overwrite naming/copy behavior. Filesystem identities must be readable; unsupported destination filesystems fail closed. The distributed metadata/file deletion sequence is not a cross-store transaction.
 
+## Extended MCP audit
+
+| ID | Repair | Primary regression suite |
+|---|---|---|
+| M02 | Cancellation during optional resource/prompt discovery escapes startup and prevents partial registry publication; ordinary RPC errors remain optional | MCPDiscoveryCancellationTests |
+
+The fixture holds actual discovery responses and exposes receipt state through an offline RPC. Registry lifecycle wait cancellation and direct concurrent `connect()` behavior are separate follow-up audit scopes.
+
 ## Verification commands
 
 ```bash

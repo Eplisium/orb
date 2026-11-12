@@ -15,6 +15,8 @@ All notable changes to ORB are listed here. The format is based on [Keep a Chang
 - Failed asset/Library saves preserve retry inputs; remote file deletion requires confirmation for the requested file. Shared Image/Video catalog refreshes survive departing callers.
 - Video polls validate job identity before state changes and preserve known costs through sparse/resumed responses, including explicit zero.
 
+- Cancelling MCP resource/prompt discovery aborts startup instead of publishing a partially initialized connection; ordinary optional-discovery RPC errors remain tolerated.
+
 ### Library data protection
 - Keep shared asset bytes while another window still offers Undo. Attachment lookup failures stop cleanup rather than authorizing deletion.
 - Single-item Library/Video/Speech and generated Image/Speech exports reject managed assets, manifests, SQLite files and sidecars, including filesystem aliases. Failed replacements preserve existing destinations; recovery export works before the first successful Library save.

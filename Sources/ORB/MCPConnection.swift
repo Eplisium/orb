@@ -433,7 +433,11 @@ actor MCPConnection {
         // Resources and prompts are optional; a server that advertises them but
         // fails the call should not take down an otherwise working connection.
         if supportsResources { resources = (try? await listResources()) ?? [] }
+        // Optional RPC failures are tolerated, but cancellation must escape so
+        // the owner shuts down instead of publishing a partial connection.
+        try Task.checkCancellation()
         if supportsPrompts { prompts = (try? await listPrompts()) ?? [] }
+        try Task.checkCancellation()
     }
 
     func shutdown() {
