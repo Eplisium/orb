@@ -31,8 +31,8 @@ extension DatabaseManager {
         try requireDone(stmt)
     }
 
-    /// Fills `prompt` / `savedCreationID` on records loaded through the core
-    /// loaders (which don't know about the media columns).
+    /// Legacy enrichment helper. Core job loaders now include these fields;
+    /// lifecycle mutations use the checked single-statement loaders instead.
     func withMediaFields(_ records: [JobRecord]) -> [JobRecord] {
         guard !records.isEmpty,
               let stmt = prepare("SELECT id, prompt, saved_creation_id FROM jobs;") else { return records }

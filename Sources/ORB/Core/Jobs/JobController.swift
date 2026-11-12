@@ -144,7 +144,14 @@ final class JobController {
         cost: Double? = nil,
         prompt: String? = nil
     ) -> JobRecord? {
-        if database.findJobRecord(remoteID: remoteID) != nil {
+        let existing: JobRecord?
+        do {
+            existing = try database.findJobRecordChecked(remoteID: remoteID)
+        } catch {
+            lastPersistenceError = error.localizedDescription
+            return nil
+        }
+        if existing != nil {
             update(remoteID: remoteID) { record in
                 record.submissionState = .submitted
                 if let prompt, record.prompt == nil { record.prompt = prompt }
@@ -317,11 +324,19 @@ final class JobController {
     // MARK: Queries
 
     func record(id: UUID) -> JobRecord? {
-        database.withMediaFields(database.findJobRecord(id: id))
+        do { return try database.findJobRecordChecked(id: id) }
+        catch {
+            lastPersistenceError = error.localizedDescription
+            return nil
+        }
     }
 
     func record(remoteID: String) -> JobRecord? {
-        database.withMediaFields(database.findJobRecord(remoteID: remoteID))
+        do { return try database.findJobRecordChecked(remoteID: remoteID) }
+        catch {
+            lastPersistenceError = error.localizedDescription
+            return nil
+        }
     }
 
     /// Resumable listing: jobs with a remote ID and a last known status that
@@ -336,7 +351,11 @@ final class JobController {
     }
 
     func allJobs() -> [JobRecord] {
-        database.withMediaFields(database.loadJobRecords())
+        do { return try database.loadJobRecordsChecked() }
+        catch {
+            lastPersistenceError = error.localizedDescription
+            return []
+        }
     }
 
     // MARK: Persistence

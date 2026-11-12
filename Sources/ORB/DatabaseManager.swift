@@ -1022,50 +1022,67 @@ final class DatabaseManager {
     }
 
     func loadJobRecords() -> [JobRecord] {
-        let sql = """
-        SELECT id, remote_id, kind, submission_state, polling_state, remote_status,
-               conversation_id, message_id, model_id, usage_cost, recoverable_error,
-               created_at, updated_at
-        FROM jobs ORDER BY created_at DESC;
-        """
-        guard let stmt = prepare(sql) else { return [] }
-        defer { sqlite3_finalize(stmt) }
-        var records: [JobRecord] = []
-        while sqlite3_step(stmt) == SQLITE_ROW {
-            if let record = jobRecord(from: stmt) { records.append(record) }
-        }
-        return records
+        (try? loadJobRecordsChecked()) ?? []
     }
 
     func findJobRecord(id: UUID) -> JobRecord? {
-        let sql = """
-        SELECT id, remote_id, kind, submission_state, polling_state, remote_status,
-               conversation_id, message_id, model_id, usage_cost, recoverable_error,
-               created_at, updated_at
-        FROM jobs WHERE id = ?;
-        """
-        guard let stmt = prepare(sql) else { return nil }
-        defer { sqlite3_finalize(stmt) }
-        Self.bindText(stmt, 1, id.uuidString)
-        guard sqlite3_step(stmt) == SQLITE_ROW else { return nil }
-        return jobRecord(from: stmt)
+        try? findJobRecordChecked(id: id)
     }
 
     func findJobRecord(remoteID: String) -> JobRecord? {
+        try? findJobRecordChecked(remoteID: remoteID)
+    }
+
+    /// Read core and media fields in one snapshot. A failed or malformed read
+    /// must not look like an absent job or a record with empty recovery fields.
+    func loadJobRecordsChecked() throws -> [JobRecord] {
+        try readJobRecordsChecked(suffix: "ORDER BY created_at DESC", value: nil)
+    }
+
+    func findJobRecordChecked(id: UUID) throws -> JobRecord? {
+        try readJobRecordsChecked(suffix: "WHERE id = ?", value: id.uuidString).first
+    }
+
+    func findJobRecordChecked(remoteID: String) throws -> JobRecord? {
+        try readJobRecordsChecked(
+            suffix: "WHERE remote_id = ? ORDER BY created_at DESC LIMIT 1", value: remoteID
+        ).first
+    }
+
+    private func readJobRecordsChecked(suffix: String, value: String?) throws -> [JobRecord] {
+        dbLock.lock()
+        defer { dbLock.unlock() }
+        // suffix is selected only by the fixed queries above; values are bound.
         let sql = """
         SELECT id, remote_id, kind, submission_state, polling_state, remote_status,
                conversation_id, message_id, model_id, usage_cost, recoverable_error,
-               created_at, updated_at
-        FROM jobs WHERE remote_id = ? ORDER BY created_at DESC LIMIT 1;
+               created_at, updated_at, prompt, saved_creation_id
+        FROM jobs \(suffix);
         """
-        guard let stmt = prepare(sql) else { return nil }
+        guard let stmt = prepare(sql) else { throw DatabaseManagerError.operationFailed(currentError()) }
         defer { sqlite3_finalize(stmt) }
-        Self.bindText(stmt, 1, remoteID)
-        guard sqlite3_step(stmt) == SQLITE_ROW else { return nil }
-        return jobRecord(from: stmt)
+        if let value, Self.bindText(stmt, 1, value) != SQLITE_OK {
+            throw DatabaseManagerError.operationFailed(currentError())
+        }
+        var records: [JobRecord] = []
+        while true {
+            switch sqlite3_step(stmt) {
+            case SQLITE_ROW:
+                guard let record = jobRecord(from: stmt) else {
+                    throw DatabaseManagerError.operationFailed("Invalid job metadata")
+                }
+                records.append(record)
+            case SQLITE_DONE: return records
+            default: throw DatabaseManagerError.operationFailed(currentError())
+            }
+        }
     }
 
     private func jobRecord(from stmt: OpaquePointer) -> JobRecord? {
+        // A non-null, invalid identity is corrupt metadata, not an absent link.
+        for column: Int32 in [6, 7, 14] {
+            if let value = columnTextOrNil(stmt, column), UUID(uuidString: value) == nil { return nil }
+        }
         guard let idStr = columnTextOrNil(stmt, 0), let id = UUID(uuidString: idStr),
               let kind = columnTextOrNil(stmt, 2),
               let submissionRaw = columnTextOrNil(stmt, 3),
@@ -1088,7 +1105,9 @@ final class DatabaseManager {
             usageCost: sqlite3_column_type(stmt, 9) == SQLITE_NULL ? nil : sqlite3_column_double(stmt, 9),
             recoverableError: columnTextOrNil(stmt, 10),
             createdAt: createdAt,
-            updatedAt: updatedAt
+            updatedAt: updatedAt,
+            prompt: columnTextOrNil(stmt, 13),
+            savedCreationID: columnTextOrNil(stmt, 14).flatMap(UUID.init(uuidString:))
         )
     }
 

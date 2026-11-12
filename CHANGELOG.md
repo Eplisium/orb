@@ -5,6 +5,7 @@ All notable changes to ORB are listed here. The format is based on [Keep a Chang
 ## [Unreleased] — 1.1.0
 
 ### Backend reliability and safety
+- Failed/partial job reads and malformed persisted identities stop lifecycle mutations with a visible persistence error instead of erasing prompts/links or creating duplicate remote-job records.
 - Fail-closed missing approvals, explicit Agent OP Mode opt-in, and per-run Test Suite command approvals with safe cancellation/navigation handling.
 - Checked conversation reads, transactional edit truncation, and lossless SQLite text/streaming Unicode handling.
 - Credential migration preserves unavailable current items and deletion tombstones; account services invalidate stale data and late responses across key changes.

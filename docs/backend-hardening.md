@@ -47,6 +47,14 @@ Export protection here covers single-item Library/Video/Speech and generated Ima
 
 The identity is optional for legacy compatibility. It protects newly saved videos; historical unlinked entries cannot be associated retroactively. The SQLite link and Library manifest remain separate commits, and link-write errors remain visible through the job controller.
 
+## Extended job persistence audit
+
+| ID | Repair | Primary regression suite |
+|---|---|---|
+| J01 | Checked complete core/media reads prevent failed lookups from erasing recovery fields or duplicating jobs; invalid optional identities and partial inventories fail closed | JobReadFailureTests |
+
+Controller errors remain visible and no mutation follows a failed read. Core/media writes remain separate commits, and failed initial submissions do not yet have a durable retry queue.
+
 ## Extended MCP audit
 
 | ID | Repair | Primary regression suite |
