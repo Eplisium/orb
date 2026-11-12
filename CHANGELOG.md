@@ -5,6 +5,8 @@ All notable changes to ORB are listed here. The format is based on [Keep a Chang
 ## [Unreleased] — 1.1.0
 
 ### Backend reliability and safety
+- Reasoning details retain unexpected known-field JSON shapes and explicit nulls through persistence and tool continuation, without displaying opaque values.
+- Responses/Messages SSE limits apply to the active line/event rather than an entire network delivery, so coalesced legal events no longer fail based on chunk boundaries.
 - Job core state and recovery fields now commit in one statement; failed parameter bindings cannot silently clear persisted values.
 - Speech/transcription/embedding/rerank discovery is model-owned, so replacement views await the shared refresh despite the first caller's cancellation.
 - Failed/partial job reads and malformed persisted identities stop lifecycle mutations with a visible persistence error instead of erasing prompts/links or creating duplicate remote-job records.

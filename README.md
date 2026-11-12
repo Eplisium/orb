@@ -138,7 +138,7 @@ Strict concurrency checking (`StrictConcurrency=targeted`) is enabled as warning
 - **Responses, Messages, and batch APIs.** Adapters exist and are contract-tested, but Chat and Agent use chat completions only, and batches have no UI.
 - **Test Suite verdicts are deterministic.** There is no LLM-judge score and no way to record a human review. Text answers stay "unverified". The spend ceiling checks reported model and helper costs between model runs, not a hard provider budget. A single request can exceed it. Independently billed helpers are recorded separately in Usage without double counting. Any unpriced model or helper request makes the run total unknown and stops a budgeted batch; known subtotals remain visible.
 - **Usage is best-effort accounting.** Successful ledger writes survive deleting conversations. Failed writes show a warning and can be retried in Settings → Usage; their original events are retained in memory only until ORB quits. Provider omissions remain unpriced, not $0.
-- **Encrypted reasoning isn't shown.** Signed or encrypted reasoning blocks are preserved byte-for-byte for tool continuation, but only text and summary reasoning is displayed.
+- **Encrypted reasoning isn't shown.** Signed or encrypted reasoning blocks are preserved for tool continuation, including unexpected JSON field shapes and explicit nulls; only string text and summary fields are displayed.
 - **No attribution referer.** ORB sends `X-OpenRouter-Title: ORB` but no `HTTP-Referer`.
 
 ## Contributing, changelog, license

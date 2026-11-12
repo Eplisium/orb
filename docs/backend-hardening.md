@@ -76,6 +76,15 @@ The fixtures hold actual discovery, initialize and tool/resource/prompt response
 
 Endpoint collision coverage uses decoded payloads and an injected `APIService` response; it does not claim the production catalog currently contains a colliding tag.
 
+## Extended reasoning and adapter audit
+
+| ID | Repair | Primary regression suite |
+|---|---|---|
+| R01 | Preserve unexpected known-field shapes and explicit nulls in reasoning details through stream decode, SQLite, and continuation encoding; keep opaque values out of display | ReasoningUnexpectedFieldTests |
+| A02 | Apply SSE bounds to the active line/event instead of aggregate network chunks; preserve fragmented UTF-8/CRLF and oversized-input rejection | AdapterSSEChunkTests |
+
+Responses/Messages remain adapter-only; Chat and Agent still use chat completions. These regressions use synthetic offline payloads, not evidence of malformed live provider output.
+
 ## Verification commands
 
 ```bash

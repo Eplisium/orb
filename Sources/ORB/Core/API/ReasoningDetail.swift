@@ -124,14 +124,27 @@ struct ReasoningDetail: Codable, Sendable, Equatable {
         var extra: [String: JSONValue] = [:]
         if let whole = try? decoder.singleValueContainer().decode(JSONValue.self),
            case .object(let object) = whole {
-            let known: Set<String> = ["id", "type", "format", "text", "summary", "signature", "data", "index"]
-            extra = object.filter { !known.contains($0.key) }
+            // Exclude only fields successfully represented by typed storage.
+            // Unexpected shapes and explicit nulls need their original value.
+            let represented: Set<String> = Set([
+                id == nil ? nil : "id", type == nil ? nil : "type",
+                format == nil ? nil : "format", text == nil ? nil : "text",
+                summary == nil ? nil : "summary", signature == nil ? nil : "signature",
+                data == nil ? nil : "data", index == nil ? nil : "index"
+            ].compactMap { $0 })
+            extra = object.filter { !represented.contains($0.key) }
         }
         self.extra = extra
     }
 
     func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
+        // Emit fallback/unknown values first. A caller's explicit typed
+        // replacement takes precedence over a previously malformed value.
+        for key in extra.keys.sorted() {
+            guard let codingKey = CodingKeys(stringValue: key), let value = extra[key] else { continue }
+            try container.encode(value, forKey: codingKey)
+        }
         try container.encodeIfPresent(id, forKey: .id)
         try container.encodeIfPresent(type, forKey: .type)
         try container.encodeIfPresent(format, forKey: .format)
@@ -140,11 +153,5 @@ struct ReasoningDetail: Codable, Sendable, Equatable {
         try container.encodeIfPresent(signature, forKey: .signature)
         try container.encodeIfPresent(data, forKey: .data)
         try container.encodeIfPresent(index, forKey: .index)
-        // Unknown keys are re-emitted so the block the provider gave us comes
-        // back structurally identical on the next request.
-        for key in extra.keys.sorted() {
-            guard let codingKey = CodingKeys(stringValue: key), let value = extra[key] else { continue }
-            try container.encode(value, forKey: codingKey)
-        }
     }
 }

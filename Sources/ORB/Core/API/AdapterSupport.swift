@@ -205,15 +205,17 @@ struct AdapterSSEFramer {
     }
 
     mutating func consume<S: DataProtocol>(_ fragment: S) throws -> [Data] {
-        pending.append(contentsOf: fragment)
-        guard pending.count <= maxEventBytes - eventBytes + 1 else {
-            throw AdapterStreamError.eventTooLarge(limit: maxEventBytes)
-        }
-
         var output: [Data] = []
-        while let newline = pending.firstIndex(of: 0x0A) {
-            var line = Data(pending[..<newline])
-            pending.removeSubrange(...newline)
+        // A network chunk may contain many complete events. Bound the active
+        // line/event, not the aggregate delivery, and drain before continuing.
+        for byte in fragment {
+            pending.append(byte)
+            guard pending.count <= maxEventBytes - eventBytes + 1 else {
+                throw AdapterStreamError.eventTooLarge(limit: maxEventBytes)
+            }
+            guard byte == 0x0A else { continue }
+            var line = Data(pending.dropLast())
+            pending.removeAll(keepingCapacity: true)
             if line.last == 0x0D { line.removeLast() }
 
             if line.isEmpty {

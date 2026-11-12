@@ -326,6 +326,61 @@ struct ReasoningDetailsDatabaseTests {
     }
 }
 
+@Suite("Reasoning details unexpected field preservation")
+struct ReasoningUnexpectedFieldTests {
+    @Test("known fields preserve unexpected JSON shapes and explicit null",
+          arguments: ["id", "type", "format", "text", "summary", "signature", "data", "index"],
+          ["null", "true", "1.5", "[\"opaque\"]", "{\"opaque\":\"fixture\"}"])
+    func unexpectedFields(key: String, value: String) throws {
+        let raw = Data("{\"\(key)\":\(value),\"provider_extra\":{\"keep\":true}}".utf8)
+        let detail = try JSONDecoder().decode(ReasoningDetail.self, from: raw)
+        #expect(detail.displayText == nil)
+        #expect(try canonicalJSON(JSONSerialization.jsonObject(with: JSONEncoder().encode(detail)))
+                == canonicalJSON(JSONSerialization.jsonObject(with: raw)))
+    }
+
+    @Test("explicit typed replacements supersede preserved malformed values")
+    func typedReplacement() throws {
+        var detail = try JSONDecoder().decode(ReasoningDetail.self, from: Data("{\"text\":{\"opaque\":true},\"index\":\"unknown\",\"data\":[\"preserved\"],\"format\":null}".utf8))
+        detail.text = "replacement"
+        detail.index = 3
+        let expected: JSONValue = .object(["text": .string("replacement"), "index": .number(3),
+                                           "data": .array([.string("preserved")]), "format": .null])
+        let encoded = try JSONEncoder().encode(detail)
+        #expect(try JSONDecoder().decode(JSONValue.self, from: encoded) == expected)
+        let reloaded = try JSONDecoder().decode(ReasoningDetail.self, from: encoded)
+        #expect(reloaded.displayText == "replacement")
+        #expect(try JSONDecoder().decode(JSONValue.self, from: JSONEncoder().encode(reloaded)) == expected)
+    }
+
+    @Test("unexpected opaque fields survive stream, SQLite, and continuation encoding")
+    func unexpectedContinuation() throws {
+        let fixture = """
+        [{"type":"reasoning.encrypted","data":{"opaque":"fixture"},"signature":["signed",null],"index":"future-index","format":null}]
+        """
+        var decoder = ServerSentEventDecoder()
+        let events = try decoder.consume(detailsEnvelope(fixture))
+        let details = try #require(events.compactMap { event -> [ReasoningDetail]? in
+            if case .reasoningDetails(_, let details) = event { return details }
+            return nil
+        }.first)
+        #expect(!events.contains { if case .reasoningDelta = $0 { return true }; return false })
+        let db = DatabaseManager(path: ":memory:")
+        var conversation = ChatConversation(modelId: "fixture/model", mode: .agent)
+        conversation.messages = [ChatMessage(role: "assistant", content: "", reasoningDetails: details)]
+        try db.saveConversationRecordChecked(conversation, agentHistoryJSON: "[]")
+        let restored = try #require(db.loadMessages(for: conversation.id).first?.reasoningDetails)
+        let request = OpenRouterRequest(apiKey: "fixture", model: "fixture/model", messages: [
+            .init(role: "assistant", content: "", reasoningDetails: restored)
+        ])
+        let body = try OpenRouterRequestEncoder.encodeBody(request, stream: true)
+        let object = try #require(try JSONSerialization.jsonObject(with: body) as? [String: Any])
+        let messages = try #require(object["messages"] as? [[String: Any]])
+        let wireDetails = try #require(messages.first?["reasoning_details"])
+        #expect(try canonicalJSON(wireDetails) == canonicalJSON(JSONSerialization.jsonObject(with: Data(fixture.utf8))))
+    }
+}
+
 @Suite("Reasoning details tool continuation (F07)")
 struct ReasoningDetailsContinuationTests {
     @Test("next tool-turn request carries the blocks unmodified")
