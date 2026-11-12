@@ -43,8 +43,17 @@ Export protection here covers single-item Library/Video/Speech and generated Ima
 | ID | Repair | Primary regression suite |
 |---|---|---|
 | M02 | Cancellation during optional resource/prompt discovery escapes startup and prevents partial registry publication; ordinary RPC errors remain optional | MCPDiscoveryCancellationTests |
+| M04 | Startup checks original transport identity/liveness after awaits; shutdown and child exit during optional discovery cannot report success | MCPDiscoveryCancellationTests |
 
-The fixture holds actual discovery responses and exposes receipt state through an offline RPC. Registry lifecycle wait cancellation and direct concurrent `connect()` behavior are separate follow-up audit scopes.
+The fixtures hold actual discovery, initialize and tool/resource/prompt responses and expose receipt state through an offline RPC. `MCPHeldResponseTests` verifies late initialize success/error and RPC results after config replacement, plus literal impersonation of computed compact names. Registry lifecycle wait cancellation and direct concurrent `connect()` behavior are separate follow-up audit scopes.
+
+## Extended catalog audit
+
+| ID | Repair | Primary regression suite |
+|---|---|---|
+| C01 | Generated endpoint identity suffixes reserve literal tags/fallback IDs and all assigned identities | EndpointIdentityCollisionTests |
+
+Endpoint collision coverage uses decoded payloads and an injected `APIService` response; it does not claim the production catalog currently contains a colliding tag.
 
 ## Verification commands
 

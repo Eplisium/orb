@@ -2,6 +2,7 @@
 import readline from "node:readline";
 const heldMethod = process.argv[2];
 const errorMode = process.argv[3] === "error";
+const exitMode = process.argv[3] === "exit";
 let seen = "";
 const lifetime = setTimeout(() => process.exit(0), 20000);
 function reply(id, result) {
@@ -20,6 +21,7 @@ readline.createInterface({ input: process.stdin }).on("line", line => {
   } else if (method === "resources/list" || method === "prompts/list") {
     seen = method;
     if (method === heldMethod) {
+      if (exitMode) process.exit(0);
       if (errorMode) process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id, error: { code: -32601, message: "optional fixture error" } }) + "\n");
       // Otherwise hold the reply while still serving test-state RPCs.
     } else reply(id, method === "resources/list" ? { resources: [] } : { prompts: [] });

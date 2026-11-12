@@ -15,6 +15,8 @@ All notable changes to ORB are listed here. The format is based on [Keep a Chang
 - Failed asset/Library saves preserve retry inputs; remote file deletion requires confirmation for the requested file. Shared Image/Video catalog refreshes survive departing callers.
 - Video polls validate job identity before state changes and preserve known costs through sparse/resumed responses, including explicit zero.
 
+- Endpoint table identities reserve literal suffix-looking tags before assigning duplicate IDs, keeping decoded endpoint rows distinct.
+- MCP startup rejects transport shutdown/replacement or server exit during discovery rather than reporting a dead connection as successful.
 - Cancelling MCP resource/prompt discovery aborts startup instead of publishing a partially initialized connection; ordinary optional-discovery RPC errors remain tolerated.
 
 ### Library data protection

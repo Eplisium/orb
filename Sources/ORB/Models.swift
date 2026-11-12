@@ -533,13 +533,21 @@ struct ModelEndpoint: Codable, Hashable, Identifiable {
     /// Gives every endpoint in `list` a distinct `id`, keeping order and
     /// leaving already-unique ids untouched.
     static func uniquified(_ list: [ModelEndpoint]) -> [ModelEndpoint] {
-        var seen: [String: Int] = [:]
+        let reserved = Set(list.map(\.baseID))
+        var assigned: Set<String> = []
+        var nextSuffix: [String: Int] = [:]
         return list.map { endpoint in
             var e = endpoint
             e.idSuffix = nil
-            let n = seen[e.baseID, default: 0]
-            seen[e.baseID] = n + 1
-            if n > 0 { e.idSuffix = String(n + 1) }
+            if assigned.contains(e.baseID) {
+                var suffix = nextSuffix[e.baseID, default: 2]
+                while reserved.contains("\(e.baseID)#\(suffix)") || assigned.contains("\(e.baseID)#\(suffix)") {
+                    suffix += 1
+                }
+                e.idSuffix = String(suffix)
+                nextSuffix[e.baseID] = suffix + 1
+            }
+            assigned.insert(e.id)
             return e
         }
     }

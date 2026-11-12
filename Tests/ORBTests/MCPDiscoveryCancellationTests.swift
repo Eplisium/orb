@@ -9,10 +9,10 @@ struct MCPDiscoveryCancellationTests {
             .first { FileManager.default.isExecutableFile(atPath: $0) }
     }
 
-    private func fixture(method: String, errors: Bool = false) throws -> (MCPServerConfig, MCPConnection) {
+    private func fixture(method: String, errors: Bool = false, exits: Bool = false) throws -> (MCPServerConfig, MCPConnection) {
         let script = try #require(Bundle.module.url(forResource: "orb-mcp-discovery-fixture", withExtension: "mjs", subdirectory: "Fixtures"))
         let config = MCPServerConfig(name: "discovery-fixture", command: try #require(Self.node),
-                                     args: [script.path, method, errors ? "error" : "hold"])
+                                     args: [script.path, method, exits ? "exit" : (errors ? "error" : "hold")])
         return (config, MCPConnection(config: config, secretStore: InMemoryCredentialStore(), requestTimeout: .seconds(8)))
     }
 
@@ -69,6 +69,48 @@ struct MCPDiscoveryCancellationTests {
             await registry.shutdownAll()
             throw error
         }
+    }
+
+    @Test("Transport shutdown during optional discovery must not report startup success",
+          .enabled(if: Self.node != nil, "requires Node"), arguments: ["resources/list", "prompts/list"])
+    func shutdownDuringDiscovery(method: String) async throws {
+        let (_, connection) = try fixture(method: method)
+        let startup = Task { try await connection.connect() }
+        do {
+            try await waitForDiscovery(method, connection: connection)
+            await connection.shutdown()
+            switch await startup.result {
+            case .success: Issue.record("Closed transport reported successful connection")
+            case .failure: break
+            }
+            #expect(await connection.isRunning == false)
+            #expect(await connection.tools.isEmpty)
+        } catch {
+            startup.cancel()
+            await connection.shutdown()
+            _ = await startup.result
+            throw error
+        }
+    }
+
+    @Test("Server exit during optional discovery is a failed startup",
+          .enabled(if: Self.node != nil, "requires Node"), arguments: ["resources/list", "prompts/list"])
+    func exitDuringDiscovery(method: String) async throws {
+        let (_, direct) = try fixture(method: method, exits: true)
+        do {
+            try await direct.connect()
+            Issue.record("Exited server reported successful connection")
+        } catch { }
+        await direct.shutdown()
+
+        let (config, connection) = try fixture(method: method, exits: true)
+        let registry = MCPRegistry(configProvider: { [config] }, connectionFactory: { _ in connection })
+        await registry.startEnabledServers()
+        let rows = await registry.status()
+        #expect(rows.count == 1)
+        #expect(rows.allSatisfy { !$0.connected && $0.error != nil })
+        #expect(await registry.availableTools().isEmpty)
+        await registry.shutdownAll()
     }
 
     @Test("Optional discovery RPC errors still allow tools to connect",

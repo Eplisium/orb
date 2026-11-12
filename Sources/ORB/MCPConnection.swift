@@ -421,6 +421,7 @@ actor MCPConnection {
                 ])
             ])
         )
+        try checkStartupTransport(task)
         serverInfo = initResult.objectValue?["serverInfo"]?.objectValue?["name"]?.stringValue
         // Record what the server actually supports so we never call a method it
         // doesn't implement (many servers error rather than returning empty).
@@ -429,15 +430,28 @@ actor MCPConnection {
         supportsPrompts = capabilities["prompts"] != nil
 
         try await notify(method: "notifications/initialized", params: .object([:]))
-        tools = try await listTools()
-        // Resources and prompts are optional; a server that advertises them but
-        // fails the call should not take down an otherwise working connection.
-        if supportsResources { resources = (try? await listResources()) ?? [] }
-        // Optional RPC failures are tolerated, but cancellation must escape so
-        // the owner shuts down instead of publishing a partial connection.
+        try checkStartupTransport(task)
+        let discoveredTools = try await listTools()
+        try checkStartupTransport(task)
+        tools = discoveredTools
+        // Ordinary optional RPC failures are tolerated, but cancellation or a
+        // closed/replaced transport must never publish successful startup.
+        if supportsResources {
+            let discoveredResources = (try? await listResources()) ?? []
+            try checkStartupTransport(task)
+            resources = discoveredResources
+        }
+        if supportsPrompts {
+            let discoveredPrompts = (try? await listPrompts()) ?? []
+            try checkStartupTransport(task)
+            prompts = discoveredPrompts
+        }
+        try checkStartupTransport(task)
+    }
+
+    private func checkStartupTransport(_ expected: Process) throws {
         try Task.checkCancellation()
-        if supportsPrompts { prompts = (try? await listPrompts()) ?? [] }
-        try Task.checkCancellation()
+        guard process === expected, expected.isRunning else { throw MCPError.notConnected }
     }
 
     func shutdown() {
