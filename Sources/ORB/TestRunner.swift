@@ -66,7 +66,62 @@ final class TestRunner: ObservableObject {
 
     typealias AgentRun = (String, String, String, URL, String, @escaping @MainActor (String) -> Void) async throws -> NativeAgentRunResult
     private let client: any OpenRouterClientProtocol
-    private let agentRun: AgentRun
+    private let agentRun: AgentRun?
+    private let agentToolExecutor: NativeAgentRunner.ToolExecutor?
+    let approvalPresenter = ApprovalPresenter()
+    @Published private(set) var approvalHostID: UUID?
+    private var approvalHosts: [UUID] = []
+    private var activeApprovals: ApprovalCoordinator?
+    private var activeApprovalRunID: UUID?
+
+    /// The shared runner has one sheet owner even when several windows show
+    /// Test Suite. Closing an unrelated window must not deny its requests.
+    func registerApprovalHost(_ id: UUID) {
+        if !approvalHosts.contains(id) { approvalHosts.append(id) }
+        if approvalHostID == nil { approvalHostID = id }
+    }
+
+    func unregisterApprovalHost(_ id: UUID) {
+        approvalHosts.removeAll { $0 == id }
+        guard approvalHostID == id else { return }
+        approvalHostID = approvalHosts.first
+        approvalPresenter.denyAll()
+        if let activeApprovals {
+            Task {
+                await activeApprovals.revokeSessionApprovals()
+                await activeApprovals.cancelPending()
+            }
+        }
+    }
+
+    private func runProject(prompt: String, modelID: String, key: String, directory: URL,
+                            systemPrompt: String, activity: @escaping @MainActor (String) -> Void) async throws -> NativeAgentRunResult {
+        // Each model run gets a fresh approval scope. OP Mode is deliberately
+        // not honored here: a model-comparison batch is not an unattended Agent run.
+        let approvals = ApprovalCoordinator()
+        let runID = UUID()
+        activeApprovalRunID = runID
+        activeApprovals = approvals
+        await approvals.setHandler { [weak self] request in
+            await self?.presentApproval(request, runID: runID) ?? .denied
+        }
+        defer {
+            approvalPresenter.denyAll()
+            activeApprovals = nil
+            activeApprovalRunID = nil
+        }
+        return try await NativeAgentRunner.run(
+            prompt: prompt, modelId: modelID, apiKey: key, workspace: directory.path,
+            fullComputerAccess: false, history: [], systemPromptOverride: systemPrompt,
+            client: client, toolExecutor: agentToolExecutor,
+            policy: .projectBuild, approvals: approvals, onActivity: activity
+        )
+    }
+
+    private func presentApproval(_ request: ApprovalCoordinator.Request, runID: UUID) async -> ApprovalCoordinator.Decision {
+        guard !Task.isCancelled, approvalHostID != nil, activeApprovalRunID == runID else { return .denied }
+        return await approvalPresenter.present(request)
+    }
     private let credential: () -> String?
     private let saveResult: (TestRunResult) -> Void
     private let saveExperiment: (ExperimentRunRecord) -> Void
@@ -77,13 +132,8 @@ final class TestRunner: ObservableObject {
 
     init(
         client: any OpenRouterClientProtocol = OpenRouterClient(),
-        agentRun: @escaping AgentRun = { prompt, modelID, key, directory, systemPrompt, activity in
-            try await NativeAgentRunner.run(
-                prompt: prompt, modelId: modelID, apiKey: key,
-                workspace: directory.path, fullComputerAccess: false, history: [],
-                systemPromptOverride: systemPrompt, policy: .projectBuild, onActivity: activity
-            )
-        },
+        agentRun: AgentRun? = nil,
+        agentToolExecutor: NativeAgentRunner.ToolExecutor? = nil,
         credential: @escaping () -> String? = { KeychainManager.getAPIKey() },
         saveResult: @escaping (TestRunResult) -> Void = { DatabaseManager.shared.saveTestResult($0) },
         saveExperiment: @escaping (ExperimentRunRecord) -> Void = { DatabaseManager.shared.saveExperimentRunRecord($0) },
@@ -91,6 +141,7 @@ final class TestRunner: ObservableObject {
     ) {
         self.client = client
         self.agentRun = agentRun
+        self.agentToolExecutor = agentToolExecutor
         self.credential = credential
         self.saveResult = saveResult
         self.saveExperiment = saveExperiment
@@ -197,7 +248,10 @@ final class TestRunner: ObservableObject {
     func cancel() {
         guard isRunning else { return }
         cancellationRequested = true
+        activeApprovalRunID = nil
         activeTask?.cancel()
+        approvalPresenter.denyAll()
+        if let activeApprovals { Task { await activeApprovals.cancelPending() } }
         batchNotice = "Cancelling; unstarted models skipped."
     }
 
@@ -221,6 +275,7 @@ final class TestRunner: ObservableObject {
         do {
             var response = ""
             var usage: ChatUsage?
+            var knownCostForDisplay = 0.0
             var status: ExperimentCompletionStatus = .completed
             if projectBuild {
                 let root = outputRoot.appendingPathComponent(UUID().uuidString, isDirectory: true)
@@ -231,14 +286,22 @@ final class TestRunner: ObservableObject {
 
                 Build a complete working project in \(root.path). Use write_file, verify with list_directory,
                 and build/test with run_command if applicable. Keep files in the workspace.
+                Shell commands require user approval and are NOT sandboxed. If approval is denied,
+                continue without executing the command and report what remains unverified.
                 For web projects, create an index.html that opens in a browser. Summarize actual work.
                 """
-                let result = try await agentRun(prompt, modelID, key, root, systemPrompt) { [weak self] label in
+                let run: AgentRun = agentRun ?? { [self] prompt, model, key, directory, system, activity in
+                    try await runProject(prompt: prompt, modelID: model, key: key, directory: directory,
+                                         systemPrompt: system, activity: activity)
+                }
+                let result = try await run(prompt, modelID, key, root, systemPrompt) { [weak self] label in
                     self?.activityLabel = label
                     self?.activityLog.append(ActivityEntry(text: label, icon: "gearshape"))
                 }
                 response = result.response
                 usage = result.usage
+                reportedCostForLastRun = result.reportedTotalCost
+                knownCostForDisplay = result.knownTotalCostSubtotal
                 status = result.hitToolBudget ? .exhausted : .completed
                 for name in result.toolNames {
                     activityLog.append(ActivityEntry(text: "Used tool: \(name)", icon: toolIcon(name)))
@@ -258,9 +321,10 @@ final class TestRunner: ObservableObject {
                     default: break
                     }
                 }
+                reportedCostForLastRun = usage?.cost
+                knownCostForDisplay = usage?.knownCostSubtotal ?? 0
             }
             try Task.checkCancellation()
-            reportedCostForLastRun = usage?.cost
             UsageLedger.shared.record(.testSuite, model: modelID, usage: usage)
             let evaluationMode: TestEvaluationMode = projectBuild ? .projectBuild : .textResponse
             let policy: ToolPolicy = projectBuild ? .projectBuild : ToolPolicy(capabilities: [])
@@ -279,7 +343,7 @@ final class TestRunner: ObservableObject {
             return TestRunResult(scenarioId: scenario.id, scenarioTitle: scenario.title,
                 category: scenario.category, modelId: modelID, response: response,
                 promptTokens: usage?.promptTokens ?? 0, completionTokens: usage?.completionTokens ?? 0,
-                totalTokens: usage?.totalTokens ?? 0, cost: usage?.cost ?? 0,
+                totalTokens: usage?.totalTokens ?? 0, cost: knownCostForDisplay,
                 latencyMs: Int(Date().timeIntervalSince(started) * 1000), success: passed,
                 errorMessage: message, outputPath: directory?.path)
         } catch {

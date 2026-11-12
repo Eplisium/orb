@@ -7,8 +7,6 @@ import SQLite3
 // are additive `addColumnIfMissing` calls only and never bump user_version.
 
 extension DatabaseManager {
-    private static let transientText = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
-
     /// Additive media columns. Called from `createTablesCore` before the
     /// version pragma; idempotent.
     func migrateMediaColumns() throws {
@@ -27,10 +25,9 @@ extension DatabaseManager {
             throw DatabaseManagerError.operationFailed(currentError())
         }
         defer { sqlite3_finalize(stmt) }
-        let t = Self.transientText
-        if let prompt = record.prompt { sqlite3_bind_text(stmt, 1, prompt, -1, t) } else { sqlite3_bind_null(stmt, 1) }
-        if let saved = record.savedCreationID { sqlite3_bind_text(stmt, 2, saved.uuidString, -1, t) } else { sqlite3_bind_null(stmt, 2) }
-        sqlite3_bind_text(stmt, 3, record.id.uuidString, -1, t)
+        if let prompt = record.prompt { Self.bindText(stmt, 1, prompt) } else { sqlite3_bind_null(stmt, 1) }
+        if let saved = record.savedCreationID { Self.bindText(stmt, 2, saved.uuidString) } else { sqlite3_bind_null(stmt, 2) }
+        Self.bindText(stmt, 3, record.id.uuidString)
         try requireDone(stmt)
     }
 

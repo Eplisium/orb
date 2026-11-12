@@ -480,26 +480,36 @@ final class DatabaseManager {
     /// re-delivered completion can never double count.
     @discardableResult
     func insertUsageEvent(_ event: UsageEvent) -> Bool {
+        do {
+            try insertUsageEventChecked(event)
+            return true
+        } catch {
+            return false
+        }
+    }
+
+    /// Production ledger writes use this throwing path so failures are retained
+    /// and surfaced rather than mistaken for successful accounting.
+    func insertUsageEventChecked(_ event: UsageEvent) throws {
         dbLock.lock()
         defer { dbLock.unlock() }
         let sql = """
-        INSERT OR IGNORE INTO usage_events
+        INSERT INTO usage_events
         (id, timestamp, feature, model_id, cost, prompt_tokens, completion_tokens, total_tokens, requests)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO NOTHING;
         """
-        guard let stmt = prepare(sql) else { return false }
+        guard let stmt = prepare(sql) else { throw DatabaseManagerError.operationFailed(currentError()) }
         defer { sqlite3_finalize(stmt) }
-        let transient = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
-        sqlite3_bind_text(stmt, 1, event.id, -1, transient)
+        Self.bindText(stmt, 1, event.id)
         sqlite3_bind_double(stmt, 2, event.timestamp.timeIntervalSince1970)
-        sqlite3_bind_text(stmt, 3, event.feature, -1, transient)
-        sqlite3_bind_text(stmt, 4, event.modelID, -1, transient)
+        Self.bindText(stmt, 3, event.feature)
+        Self.bindText(stmt, 4, event.modelID)
         if let cost = event.cost { sqlite3_bind_double(stmt, 5, cost) } else { sqlite3_bind_null(stmt, 5) }
         for (index, value) in [event.promptTokens, event.completionTokens, event.totalTokens].enumerated() {
             if let value { sqlite3_bind_int64(stmt, Int32(6 + index), Int64(value)) } else { sqlite3_bind_null(stmt, Int32(6 + index)) }
         }
         sqlite3_bind_int64(stmt, 9, Int64(event.requests))
-        return sqlite3_step(stmt) == SQLITE_DONE
+        try requireDone(stmt)
     }
 
     /// Aggregates the ledger. `grouping` is a closed enum, never caller SQL.
@@ -518,7 +528,7 @@ final class DatabaseManager {
         sqlite3_bind_double(stmt, 1, since?.timeIntervalSince1970 ?? 0)
         var rows: [UsageBucket] = []
         while sqlite3_step(stmt) == SQLITE_ROW {
-            let key = sqlite3_column_text(stmt, 0).map { String(cString: $0) } ?? "Unknown"
+            let key = columnTextOrNil(stmt, 0) ?? "Unknown"
             rows.append(UsageBucket(key: key, cost: sqlite3_column_double(stmt, 1),
                                     requests: Int(sqlite3_column_int64(stmt, 2)),
                                     tokens: Int(sqlite3_column_int64(stmt, 3)),
@@ -540,7 +550,7 @@ final class DatabaseManager {
         let sql = "SELECT 1 FROM favorites WHERE model_id = ?;"
         guard let stmt = prepare(sql) else { return false }
         defer { sqlite3_finalize(stmt) }
-        sqlite3_bind_text(stmt, 1, modelId, -1, unsafeBitCast(-1, to: sqlite3_destructor_type.self))
+        Self.bindText(stmt, 1, modelId)
         return sqlite3_step(stmt) == SQLITE_ROW
     }
 
@@ -548,7 +558,7 @@ final class DatabaseManager {
         let sql = "INSERT OR IGNORE INTO favorites (model_id, added_at) VALUES (?, ?);"
         guard let stmt = prepare(sql) else { return }
         defer { sqlite3_finalize(stmt) }
-        sqlite3_bind_text(stmt, 1, modelId, -1, unsafeBitCast(-1, to: sqlite3_destructor_type.self))
+        Self.bindText(stmt, 1, modelId)
         sqlite3_bind_double(stmt, 2, Date().timeIntervalSince1970)
         sqlite3_step(stmt)
     }
@@ -557,7 +567,7 @@ final class DatabaseManager {
         let sql = "DELETE FROM favorites WHERE model_id = ?;"
         guard let stmt = prepare(sql) else { return }
         defer { sqlite3_finalize(stmt) }
-        sqlite3_bind_text(stmt, 1, modelId, -1, unsafeBitCast(-1, to: sqlite3_destructor_type.self))
+        Self.bindText(stmt, 1, modelId)
         sqlite3_step(stmt)
     }
 
@@ -575,7 +585,7 @@ final class DatabaseManager {
         defer { sqlite3_finalize(stmt) }
         var ids: [String] = []
         while sqlite3_step(stmt) == SQLITE_ROW {
-            ids.append(String(cString: sqlite3_column_text(stmt, 0)))
+            ids.append((columnTextOrNil(stmt, 0) ?? ""))
         }
         return ids
     }
@@ -585,11 +595,9 @@ final class DatabaseManager {
         let sql = "SELECT notes FROM model_notes WHERE model_id = ?;"
         guard let stmt = prepare(sql) else { return "" }
         defer { sqlite3_finalize(stmt) }
-        sqlite3_bind_text(stmt, 1, modelId, -1, unsafeBitCast(-1, to: sqlite3_destructor_type.self))
+        Self.bindText(stmt, 1, modelId)
         if sqlite3_step(stmt) == SQLITE_ROW {
-            if let cStr = sqlite3_column_text(stmt, 0) {
-                return String(cString: cStr)
-            }
+            return columnTextOrNil(stmt, 0) ?? ""
         }
         return ""
     }
@@ -601,8 +609,8 @@ final class DatabaseManager {
         """
         guard let stmt = prepare(sql) else { return }
         defer { sqlite3_finalize(stmt) }
-        sqlite3_bind_text(stmt, 1, modelId, -1, unsafeBitCast(-1, to: sqlite3_destructor_type.self))
-        sqlite3_bind_text(stmt, 2, notes, -1, unsafeBitCast(-1, to: sqlite3_destructor_type.self))
+        Self.bindText(stmt, 1, modelId)
+        Self.bindText(stmt, 2, notes)
         sqlite3_step(stmt)
     }
 
@@ -614,9 +622,8 @@ final class DatabaseManager {
         let sql = "INSERT INTO agent_memories (id, content, created_at) VALUES (?, ?, ?);"
         guard let stmt = prepare(sql) else { throw DatabaseManagerError.operationFailed(currentError()) }
         defer { sqlite3_finalize(stmt) }
-        let t = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
-        sqlite3_bind_text(stmt, 1, UUID().uuidString, -1, t)
-        sqlite3_bind_text(stmt, 2, content, -1, t)
+        Self.bindText(stmt, 1, UUID().uuidString)
+        Self.bindText(stmt, 2, content)
         sqlite3_bind_double(stmt, 3, Date().timeIntervalSince1970)
         try requireDone(stmt)
     }
@@ -633,11 +640,11 @@ final class DatabaseManager {
         let sql = "SELECT id, content, created_at FROM agent_memories WHERE content LIKE ? ESCAPE '\\' ORDER BY created_at DESC LIMIT ?;"
         guard let stmt = prepare(sql) else { return [] }
         defer { sqlite3_finalize(stmt) }
-        sqlite3_bind_text(stmt, 1, "%\(escaped)%", -1, unsafeBitCast(-1, to: sqlite3_destructor_type.self))
+        Self.bindText(stmt, 1, "%\(escaped)%")
         sqlite3_bind_int(stmt, 2, Int32(max(limit, 1)))
         var hits: [AgentMemory] = []
         while sqlite3_step(stmt) == SQLITE_ROW {
-            let id = String(cString: sqlite3_column_text(stmt, 0))
+            let id = (columnTextOrNil(stmt, 0) ?? "")
             let content = columnTextOrNil(stmt, 1) ?? ""
             let createdAt = Date(timeIntervalSince1970: sqlite3_column_double(stmt, 2))
             hits.append(AgentMemory(id: id, content: content, createdAt: createdAt))
@@ -649,7 +656,7 @@ final class DatabaseManager {
         let sql = "DELETE FROM agent_memories WHERE id = ?;"
         guard let stmt = prepare(sql) else { throw DatabaseManagerError.operationFailed(currentError()) }
         defer { sqlite3_finalize(stmt) }
-        sqlite3_bind_text(stmt, 1, id, -1, unsafeBitCast(-1, to: sqlite3_destructor_type.self))
+        Self.bindText(stmt, 1, id)
         try requireDone(stmt)
     }
 
@@ -671,15 +678,14 @@ final class DatabaseManager {
         """
         guard let stmt = prepare(sql) else { throw DatabaseManagerError.operationFailed(currentError()) }
         defer { sqlite3_finalize(stmt) }
-        let t = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
-        sqlite3_bind_text(stmt, 1, conv.id.uuidString, -1, t)
-        sqlite3_bind_text(stmt, 2, conv.mode.rawValue, -1, t)
-        sqlite3_bind_text(stmt, 3, conv.modelId, -1, t)
-        sqlite3_bind_text(stmt, 4, conv.title, -1, t)
-        sqlite3_bind_text(stmt, 5, conv.systemPrompt, -1, t)
+        Self.bindText(stmt, 1, conv.id.uuidString)
+        Self.bindText(stmt, 2, conv.mode.rawValue)
+        Self.bindText(stmt, 3, conv.modelId)
+        Self.bindText(stmt, 4, conv.title)
+        Self.bindText(stmt, 5, conv.systemPrompt)
         sqlite3_bind_double(stmt, 6, conv.totalCost)
         sqlite3_bind_int(stmt, 7, Int32(conv.totalTokens))
-        sqlite3_bind_text(stmt, 8, agentHistoryJSON, -1, t)
+        Self.bindText(stmt, 8, agentHistoryJSON)
         sqlite3_bind_double(stmt, 9, conv.createdAt.timeIntervalSince1970)
         try requireDone(stmt)
     }
@@ -724,21 +730,29 @@ final class DatabaseManager {
 
     /// All conversations, or only one mode's (each playground service loads
     /// just its own sessions and their messages).
+    /// Compatibility convenience for read-only callers. Editable records must
+    /// use the checked loader so a failed read cannot become a saved snapshot.
     func loadConversations(mode: PlaygroundMode? = nil) -> [(conversation: ChatConversation, agentHistoryJSON: String)] {
+        (try? loadConversationsChecked(mode: mode)) ?? []
+    }
+
+    func loadConversationsChecked(mode: PlaygroundMode? = nil) throws -> [(conversation: ChatConversation, agentHistoryJSON: String)] {
+        dbLock.lock()
+        defer { dbLock.unlock() }
         let sql = mode == nil
             ? "SELECT * FROM conversations ORDER BY created_at DESC;"
             : "SELECT * FROM conversations WHERE mode = ? ORDER BY created_at DESC;"
-        guard let stmt = prepare(sql) else { return [] }
+        guard let stmt = prepare(sql) else { throw DatabaseManagerError.operationFailed(currentError()) }
         defer { sqlite3_finalize(stmt) }
         if let mode {
-            sqlite3_bind_text(stmt, 1, mode.rawValue, -1, unsafeBitCast(-1, to: sqlite3_destructor_type.self))
+            Self.bindText(stmt, 1, mode.rawValue)
         }
         var results: [(ChatConversation, String)] = []
-        while sqlite3_step(stmt) == SQLITE_ROW {
-            let idStr = String(cString: sqlite3_column_text(stmt, 0))
-            let modeStr = String(cString: sqlite3_column_text(stmt, 1))
-            let modelId = String(cString: sqlite3_column_text(stmt, 2))
-            let title = String(cString: sqlite3_column_text(stmt, 3))
+        while try stepRowChecked(stmt) {
+            let idStr = (columnTextOrNil(stmt, 0) ?? "")
+            let modeStr = (columnTextOrNil(stmt, 1) ?? "")
+            let modelId = (columnTextOrNil(stmt, 2) ?? "")
+            let title = (columnTextOrNil(stmt, 3) ?? "")
             let systemPrompt = columnTextOrNil(stmt, 4) ?? ""
             let totalCost = sqlite3_column_double(stmt, 5)
             let totalTokens = Int(sqlite3_column_int(stmt, 6))
@@ -764,7 +778,7 @@ final class DatabaseManager {
         let sql = "DELETE FROM conversations WHERE id = ?;"
         guard let stmt = prepare(sql) else { throw DatabaseManagerError.operationFailed(currentError()) }
         defer { sqlite3_finalize(stmt) }
-        sqlite3_bind_text(stmt, 1, id.uuidString, -1, unsafeBitCast(-1, to: sqlite3_destructor_type.self))
+        Self.bindText(stmt, 1, id.uuidString)
         try requireDone(stmt)
     }
 
@@ -782,28 +796,27 @@ final class DatabaseManager {
         """
         guard let stmt = prepare(sql) else { throw DatabaseManagerError.operationFailed(currentError()) }
         defer { sqlite3_finalize(stmt) }
-        let t = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
-        sqlite3_bind_text(stmt, 1, message.id.uuidString, -1, t)
-        sqlite3_bind_text(stmt, 2, conversationId.uuidString, -1, t)
-        sqlite3_bind_text(stmt, 3, message.role, -1, t)
-        sqlite3_bind_text(stmt, 4, message.content, -1, t)
+        Self.bindText(stmt, 1, message.id.uuidString)
+        Self.bindText(stmt, 2, conversationId.uuidString)
+        Self.bindText(stmt, 3, message.role)
+        Self.bindText(stmt, 4, message.content)
 
         if let toolCalls = message.toolCalls, !toolCalls.isEmpty,
            let data = try? JSONEncoder().encode(toolCalls),
            let json = String(data: data, encoding: .utf8) {
-            sqlite3_bind_text(stmt, 5, json, -1, t)
+            Self.bindText(stmt, 5, json)
         } else {
             sqlite3_bind_null(stmt, 5)
         }
 
         if let tcid = message.toolCallId {
-            sqlite3_bind_text(stmt, 6, tcid, -1, t)
+            Self.bindText(stmt, 6, tcid)
         } else {
             sqlite3_bind_null(stmt, 6)
         }
 
         if let tn = message.toolName {
-            sqlite3_bind_text(stmt, 7, tn, -1, t)
+            Self.bindText(stmt, 7, tn)
         } else {
             sqlite3_bind_null(stmt, 7)
         }
@@ -811,32 +824,32 @@ final class DatabaseManager {
         sqlite3_bind_int(stmt, 8, Int32(sortOrder))
         // The message's own creation time — rewrites must not restamp it.
         sqlite3_bind_double(stmt, 9, message.createdAt.timeIntervalSince1970)
-        sqlite3_bind_text(stmt, 10, message.status.rawValue, -1, t)
-        if let reason = message.finishReason { sqlite3_bind_text(stmt, 11, reason, -1, t) } else { sqlite3_bind_null(stmt, 11) }
-        if let error = message.errorMessage { sqlite3_bind_text(stmt, 12, error, -1, t) } else { sqlite3_bind_null(stmt, 12) }
+        Self.bindText(stmt, 10, message.status.rawValue)
+        if let reason = message.finishReason { Self.bindText(stmt, 11, reason) } else { sqlite3_bind_null(stmt, 11) }
+        if let error = message.errorMessage { Self.bindText(stmt, 12, error) } else { sqlite3_bind_null(stmt, 12) }
         if let parts = message.parts, !parts.isEmpty,
            let data = try? JSONEncoder().encode(parts),
            let json = String(data: data, encoding: .utf8) {
-            sqlite3_bind_text(stmt, 13, json, -1, t)
+            Self.bindText(stmt, 13, json)
         } else {
             sqlite3_bind_null(stmt, 13)
         }
         if let images = message.images, !images.isEmpty,
            let data = try? JSONEncoder().encode(images),
            let json = String(data: data, encoding: .utf8) {
-            sqlite3_bind_text(stmt, 14, json, -1, t)
+            Self.bindText(stmt, 14, json)
         } else {
             sqlite3_bind_null(stmt, 14)
         }
         if let details = message.reasoningDetails, !details.isEmpty,
            let data = try? JSONEncoder().encode(details),
            let json = String(data: data, encoding: .utf8) {
-            sqlite3_bind_text(stmt, 15, json, -1, t)
+            Self.bindText(stmt, 15, json)
         } else {
             sqlite3_bind_null(stmt, 15)
         }
         if let reasoning = message.reasoning {
-            sqlite3_bind_text(stmt, 16, reasoning, -1, t)
+            Self.bindText(stmt, 16, reasoning)
         } else {
             sqlite3_bind_null(stmt, 16)
         }
@@ -852,28 +865,35 @@ final class DatabaseManager {
         }
         if let transcript = message.transcript {
             let data = try JSONEncoder().encode(transcript)
-            sqlite3_bind_text(stmt, 19, String(decoding: data, as: UTF8.self), -1, t)
+            Self.bindText(stmt, 19, String(decoding: data, as: UTF8.self))
         } else {
             sqlite3_bind_null(stmt, 19)
         }
         if let usage = message.usage {
             let data = try JSONEncoder().encode(usage)
-            sqlite3_bind_text(stmt, 20, String(decoding: data, as: UTF8.self), -1, t)
+            Self.bindText(stmt, 20, String(decoding: data, as: UTF8.self))
         } else {
             sqlite3_bind_null(stmt, 20)
         }
         try requireDone(stmt)
     }
 
+    /// Read-only compatibility wrapper; never use this to hydrate editable state.
     func loadMessages(for conversationId: UUID) -> [ChatMessage] {
+        (try? loadMessagesChecked(for: conversationId)) ?? []
+    }
+
+    func loadMessagesChecked(for conversationId: UUID) throws -> [ChatMessage] {
+        dbLock.lock()
+        defer { dbLock.unlock() }
         let sql = "SELECT * FROM messages WHERE conversation_id = ? ORDER BY sort_order ASC;"
-        guard let stmt = prepare(sql) else { return [] }
+        guard let stmt = prepare(sql) else { throw DatabaseManagerError.operationFailed(currentError()) }
         defer { sqlite3_finalize(stmt) }
-        sqlite3_bind_text(stmt, 1, conversationId.uuidString, -1, unsafeBitCast(-1, to: sqlite3_destructor_type.self))
+        Self.bindText(stmt, 1, conversationId.uuidString)
         var messages: [ChatMessage] = []
-        while sqlite3_step(stmt) == SQLITE_ROW {
-            let idStr = String(cString: sqlite3_column_text(stmt, 0))
-            let role = String(cString: sqlite3_column_text(stmt, 2))
+        while try stepRowChecked(stmt) {
+            let idStr = (columnTextOrNil(stmt, 0) ?? "")
+            let role = (columnTextOrNil(stmt, 2) ?? "")
             let content = columnTextOrNil(stmt, 3) ?? ""
             let toolCallsJSON = columnTextOrNil(stmt, 4)
             let toolCallId = columnTextOrNil(stmt, 5)
@@ -936,7 +956,7 @@ final class DatabaseManager {
         let sql = "DELETE FROM messages WHERE conversation_id = ?;"
         guard let stmt = prepare(sql) else { throw DatabaseManagerError.operationFailed(currentError()) }
         defer { sqlite3_finalize(stmt) }
-        sqlite3_bind_text(stmt, 1, conversationId.uuidString, -1, unsafeBitCast(-1, to: sqlite3_destructor_type.self))
+        Self.bindText(stmt, 1, conversationId.uuidString)
         try requireDone(stmt)
     }
 
@@ -948,7 +968,7 @@ final class DatabaseManager {
         let sql = "DELETE FROM messages WHERE id = ?;"
         guard let stmt = prepare(sql) else { throw DatabaseManagerError.operationFailed(currentError()) }
         defer { sqlite3_finalize(stmt) }
-        sqlite3_bind_text(stmt, 1, messageId.uuidString, -1, unsafeBitCast(-1, to: sqlite3_destructor_type.self))
+        Self.bindText(stmt, 1, messageId.uuidString)
         try requireDone(stmt)
     }
 
@@ -979,18 +999,17 @@ final class DatabaseManager {
         """
         guard let stmt = prepare(sql) else { throw DatabaseManagerError.operationFailed(currentError()) }
         defer { sqlite3_finalize(stmt) }
-        let t = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
-        sqlite3_bind_text(stmt, 1, record.id.uuidString, -1, t)
-        if let remoteID = record.remoteID { sqlite3_bind_text(stmt, 2, remoteID, -1, t) } else { sqlite3_bind_null(stmt, 2) }
-        sqlite3_bind_text(stmt, 3, record.kind, -1, t)
-        sqlite3_bind_text(stmt, 4, record.submissionState.rawValue, -1, t)
-        sqlite3_bind_text(stmt, 5, record.pollingState.rawValue, -1, t)
-        if let status = record.lastRemoteStatus { sqlite3_bind_text(stmt, 6, status, -1, t) } else { sqlite3_bind_null(stmt, 6) }
-        if let conversationID = record.conversationID { sqlite3_bind_text(stmt, 7, conversationID.uuidString, -1, t) } else { sqlite3_bind_null(stmt, 7) }
-        if let messageID = record.messageID { sqlite3_bind_text(stmt, 8, messageID.uuidString, -1, t) } else { sqlite3_bind_null(stmt, 8) }
-        if let modelID = record.modelID { sqlite3_bind_text(stmt, 9, modelID, -1, t) } else { sqlite3_bind_null(stmt, 9) }
+        Self.bindText(stmt, 1, record.id.uuidString)
+        if let remoteID = record.remoteID { Self.bindText(stmt, 2, remoteID) } else { sqlite3_bind_null(stmt, 2) }
+        Self.bindText(stmt, 3, record.kind)
+        Self.bindText(stmt, 4, record.submissionState.rawValue)
+        Self.bindText(stmt, 5, record.pollingState.rawValue)
+        if let status = record.lastRemoteStatus { Self.bindText(stmt, 6, status) } else { sqlite3_bind_null(stmt, 6) }
+        if let conversationID = record.conversationID { Self.bindText(stmt, 7, conversationID.uuidString) } else { sqlite3_bind_null(stmt, 7) }
+        if let messageID = record.messageID { Self.bindText(stmt, 8, messageID.uuidString) } else { sqlite3_bind_null(stmt, 8) }
+        if let modelID = record.modelID { Self.bindText(stmt, 9, modelID) } else { sqlite3_bind_null(stmt, 9) }
         if let cost = record.usageCost { sqlite3_bind_double(stmt, 10, cost) } else { sqlite3_bind_null(stmt, 10) }
-        if let error = record.recoverableError { sqlite3_bind_text(stmt, 11, error, -1, t) } else { sqlite3_bind_null(stmt, 11) }
+        if let error = record.recoverableError { Self.bindText(stmt, 11, error) } else { sqlite3_bind_null(stmt, 11) }
         sqlite3_bind_double(stmt, 12, record.createdAt.timeIntervalSince1970)
         sqlite3_bind_double(stmt, 13, record.updatedAt.timeIntervalSince1970)
         try requireDone(stmt)
@@ -1021,7 +1040,7 @@ final class DatabaseManager {
         """
         guard let stmt = prepare(sql) else { return nil }
         defer { sqlite3_finalize(stmt) }
-        sqlite3_bind_text(stmt, 1, id.uuidString, -1, unsafeBitCast(-1, to: sqlite3_destructor_type.self))
+        Self.bindText(stmt, 1, id.uuidString)
         guard sqlite3_step(stmt) == SQLITE_ROW else { return nil }
         return jobRecord(from: stmt)
     }
@@ -1035,7 +1054,7 @@ final class DatabaseManager {
         """
         guard let stmt = prepare(sql) else { return nil }
         defer { sqlite3_finalize(stmt) }
-        sqlite3_bind_text(stmt, 1, remoteID, -1, unsafeBitCast(-1, to: sqlite3_destructor_type.self))
+        Self.bindText(stmt, 1, remoteID)
         guard sqlite3_step(stmt) == SQLITE_ROW else { return nil }
         return jobRecord(from: stmt)
     }
@@ -1085,16 +1104,15 @@ final class DatabaseManager {
         """
         guard let stmt = prepare(sql) else { throw DatabaseManagerError.operationFailed(currentError()) }
         defer { sqlite3_finalize(stmt) }
-        let t = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
-        sqlite3_bind_text(stmt, 1, record.id.uuidString, -1, t)
-        sqlite3_bind_text(stmt, 2, record.relativePath, -1, t)
-        if let remote = record.remoteReference { sqlite3_bind_text(stmt, 3, remote, -1, t) } else { sqlite3_bind_null(stmt, 3) }
-        if let mime = record.mimeType { sqlite3_bind_text(stmt, 4, mime, -1, t) } else { sqlite3_bind_null(stmt, 4) }
+        Self.bindText(stmt, 1, record.id.uuidString)
+        Self.bindText(stmt, 2, record.relativePath)
+        if let remote = record.remoteReference { Self.bindText(stmt, 3, remote) } else { sqlite3_bind_null(stmt, 3) }
+        if let mime = record.mimeType { Self.bindText(stmt, 4, mime) } else { sqlite3_bind_null(stmt, 4) }
         sqlite3_bind_int64(stmt, 5, Int64(record.sizeBytes))
-        sqlite3_bind_text(stmt, 6, record.checksum, -1, t)
-        if let jobID = record.jobID { sqlite3_bind_text(stmt, 7, jobID.uuidString, -1, t) } else { sqlite3_bind_null(stmt, 7) }
-        if let messageID = record.messageID { sqlite3_bind_text(stmt, 8, messageID.uuidString, -1, t) } else { sqlite3_bind_null(stmt, 8) }
-        sqlite3_bind_text(stmt, 9, record.retention.rawValue, -1, t)
+        Self.bindText(stmt, 6, record.checksum)
+        if let jobID = record.jobID { Self.bindText(stmt, 7, jobID.uuidString) } else { sqlite3_bind_null(stmt, 7) }
+        if let messageID = record.messageID { Self.bindText(stmt, 8, messageID.uuidString) } else { sqlite3_bind_null(stmt, 8) }
+        Self.bindText(stmt, 9, record.retention.rawValue)
         sqlite3_bind_double(stmt, 10, record.createdAt.timeIntervalSince1970)
         try requireDone(stmt)
     }
@@ -1104,7 +1122,7 @@ final class DatabaseManager {
         let sql = "DELETE FROM assets WHERE checksum = ? AND job_id IS NULL AND message_id IS NULL;"
         guard let stmt = prepare(sql) else { throw DatabaseManagerError.operationFailed(currentError()) }
         defer { sqlite3_finalize(stmt) }
-        sqlite3_bind_text(stmt, 1, checksum, -1, unsafeBitCast(-1, to: sqlite3_destructor_type.self))
+        Self.bindText(stmt, 1, checksum)
         try requireDone(stmt)
     }
 
@@ -1112,7 +1130,7 @@ final class DatabaseManager {
         let sql = "SELECT 1 FROM assets WHERE checksum = ? AND (job_id IS NOT NULL OR message_id IS NOT NULL) LIMIT 1;"
         guard let stmt = prepare(sql) else { return false }
         defer { sqlite3_finalize(stmt) }
-        sqlite3_bind_text(stmt, 1, checksum, -1, unsafeBitCast(-1, to: sqlite3_destructor_type.self))
+        Self.bindText(stmt, 1, checksum)
         return sqlite3_step(stmt) == SQLITE_ROW
     }
 
@@ -1141,7 +1159,7 @@ final class DatabaseManager {
         """
         guard let stmt = prepare(sql) else { return nil }
         defer { sqlite3_finalize(stmt) }
-        sqlite3_bind_text(stmt, 1, checksum, -1, unsafeBitCast(-1, to: sqlite3_destructor_type.self))
+        Self.bindText(stmt, 1, checksum)
         guard sqlite3_step(stmt) == SQLITE_ROW else { return nil }
         return assetRecord(from: stmt)
     }
@@ -1194,13 +1212,12 @@ final class DatabaseManager {
         """
         guard let stmt = prepare(sql) else { return }
         defer { sqlite3_finalize(stmt) }
-        let transient = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
-        sqlite3_bind_text(stmt, 1, result.id.uuidString, -1, transient)
-        sqlite3_bind_text(stmt, 2, result.scenarioId, -1, transient)
-        sqlite3_bind_text(stmt, 3, result.scenarioTitle, -1, transient)
-        sqlite3_bind_text(stmt, 4, result.category.rawValue, -1, transient)
-        sqlite3_bind_text(stmt, 5, result.modelId, -1, transient)
-        sqlite3_bind_text(stmt, 6, result.response, -1, transient)
+        Self.bindText(stmt, 1, result.id.uuidString)
+        Self.bindText(stmt, 2, result.scenarioId)
+        Self.bindText(stmt, 3, result.scenarioTitle)
+        Self.bindText(stmt, 4, result.category.rawValue)
+        Self.bindText(stmt, 5, result.modelId)
+        Self.bindText(stmt, 6, result.response)
         sqlite3_bind_int(stmt, 7, Int32(result.promptTokens))
         sqlite3_bind_int(stmt, 8, Int32(result.completionTokens))
         sqlite3_bind_int(stmt, 9, Int32(result.totalTokens))
@@ -1208,12 +1225,12 @@ final class DatabaseManager {
         sqlite3_bind_int(stmt, 11, Int32(result.latencyMs))
         sqlite3_bind_int(stmt, 12, result.success ? 1 : 0)
         if let err = result.errorMessage {
-            sqlite3_bind_text(stmt, 13, err, -1, transient)
+            Self.bindText(stmt, 13, err)
         } else {
             sqlite3_bind_null(stmt, 13)
         }
         if let path = result.outputPath {
-            sqlite3_bind_text(stmt, 14, path, -1, transient)
+            Self.bindText(stmt, 14, path)
         } else {
             sqlite3_bind_null(stmt, 14)
         }
@@ -1227,12 +1244,12 @@ final class DatabaseManager {
         defer { sqlite3_finalize(stmt) }
         var results: [TestRunResult] = []
         while sqlite3_step(stmt) == SQLITE_ROW {
-            let idStr = String(cString: sqlite3_column_text(stmt, 0))
-            let scenarioId = String(cString: sqlite3_column_text(stmt, 1))
-            let scenarioTitle = String(cString: sqlite3_column_text(stmt, 2))
-            let categoryStr = String(cString: sqlite3_column_text(stmt, 3))
-            let modelId = String(cString: sqlite3_column_text(stmt, 4))
-            let response = String(cString: sqlite3_column_text(stmt, 5))
+            let idStr = (columnTextOrNil(stmt, 0) ?? "")
+            let scenarioId = (columnTextOrNil(stmt, 1) ?? "")
+            let scenarioTitle = (columnTextOrNil(stmt, 2) ?? "")
+            let categoryStr = (columnTextOrNil(stmt, 3) ?? "")
+            let modelId = (columnTextOrNil(stmt, 4) ?? "")
+            let response = (columnTextOrNil(stmt, 5) ?? "")
             let promptTokens = Int(sqlite3_column_int(stmt, 6))
             let completionTokens = Int(sqlite3_column_int(stmt, 7))
             let totalTokens = Int(sqlite3_column_int(stmt, 8))
@@ -1275,7 +1292,7 @@ final class DatabaseManager {
         let sql = "DELETE FROM test_results WHERE id = ?;"
         guard let stmt = prepare(sql) else { return }
         defer { sqlite3_finalize(stmt) }
-        sqlite3_bind_text(stmt, 1, id.uuidString, -1, unsafeBitCast(-1, to: sqlite3_destructor_type.self))
+        Self.bindText(stmt, 1, id.uuidString)
         sqlite3_step(stmt)
     }
 
@@ -1307,22 +1324,21 @@ final class DatabaseManager {
         """
         guard let stmt = prepare(sql) else { throw DatabaseManagerError.operationFailed(currentError()) }
         defer { sqlite3_finalize(stmt) }
-        let t = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
-        sqlite3_bind_text(stmt, 1, record.id.uuidString, -1, t)
-        sqlite3_bind_text(stmt, 2, record.scenarioID, -1, t)
-        sqlite3_bind_text(stmt, 3, record.scenarioTitle, -1, t)
+        Self.bindText(stmt, 1, record.id.uuidString)
+        Self.bindText(stmt, 2, record.scenarioID)
+        Self.bindText(stmt, 3, record.scenarioTitle)
         sqlite3_bind_int(stmt, 4, Int32(record.scenarioVersion))
-        sqlite3_bind_text(stmt, 5, record.categoryRawValue, -1, t)
-        sqlite3_bind_text(stmt, 6, record.modelID, -1, t)
-        sqlite3_bind_text(stmt, 7, record.completionStatus.rawValue, -1, t)
-        sqlite3_bind_text(stmt, 8, record.verdict.rawValue, -1, t)
+        Self.bindText(stmt, 5, record.categoryRawValue)
+        Self.bindText(stmt, 6, record.modelID)
+        Self.bindText(stmt, 7, record.completionStatus.rawValue)
+        Self.bindText(stmt, 8, record.verdict.rawValue)
         if let v = record.spend.promptTokens { sqlite3_bind_int(stmt, 9, Int32(v)) } else { sqlite3_bind_null(stmt, 9) }
         if let v = record.spend.completionTokens { sqlite3_bind_int(stmt, 10, Int32(v)) } else { sqlite3_bind_null(stmt, 10) }
         if let v = record.spend.totalTokens { sqlite3_bind_int(stmt, 11, Int32(v)) } else { sqlite3_bind_null(stmt, 11) }
         if let v = record.spend.knownCostUSD { sqlite3_bind_double(stmt, 12, v) } else { sqlite3_bind_null(stmt, 12) }
         sqlite3_bind_double(stmt, 13, record.startedAt.timeIntervalSince1970)
         sqlite3_bind_double(stmt, 14, record.finishedAt.timeIntervalSince1970)
-        sqlite3_bind_text(stmt, 15, json, -1, t)
+        Self.bindText(stmt, 15, json)
         sqlite3_bind_double(stmt, 16, Date().timeIntervalSince1970)
         try requireDone(stmt)
     }
@@ -1353,15 +1369,14 @@ final class DatabaseManager {
         """
         guard let stmt = prepare(sql) else { return }
         defer { sqlite3_finalize(stmt) }
-        let transient = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
-        sqlite3_bind_text(stmt, 1, test.id, -1, transient)
-        sqlite3_bind_text(stmt, 2, test.title, -1, transient)
-        sqlite3_bind_text(stmt, 3, test.subtitle, -1, transient)
-        sqlite3_bind_text(stmt, 4, test.icon, -1, transient)
-        sqlite3_bind_text(stmt, 5, test.category.rawValue, -1, transient)
-        sqlite3_bind_text(stmt, 6, test.systemPrompt, -1, transient)
-        sqlite3_bind_text(stmt, 7, test.userPrompt, -1, transient)
-        sqlite3_bind_text(stmt, 8, test.notes, -1, transient)
+        Self.bindText(stmt, 1, test.id)
+        Self.bindText(stmt, 2, test.title)
+        Self.bindText(stmt, 3, test.subtitle)
+        Self.bindText(stmt, 4, test.icon)
+        Self.bindText(stmt, 5, test.category.rawValue)
+        Self.bindText(stmt, 6, test.systemPrompt)
+        Self.bindText(stmt, 7, test.userPrompt)
+        Self.bindText(stmt, 8, test.notes)
         sqlite3_bind_double(stmt, 9, test.createdAt.timeIntervalSince1970)
         sqlite3_step(stmt)
     }
@@ -1372,13 +1387,13 @@ final class DatabaseManager {
         defer { sqlite3_finalize(stmt) }
         var tests: [CustomTest] = []
         while sqlite3_step(stmt) == SQLITE_ROW {
-            let id = String(cString: sqlite3_column_text(stmt, 0))
-            let title = String(cString: sqlite3_column_text(stmt, 1))
-            let subtitle = String(cString: sqlite3_column_text(stmt, 2))
-            let icon = String(cString: sqlite3_column_text(stmt, 3))
-            let categoryStr = String(cString: sqlite3_column_text(stmt, 4))
-            let systemPrompt = String(cString: sqlite3_column_text(stmt, 5))
-            let userPrompt = String(cString: sqlite3_column_text(stmt, 6))
+            let id = (columnTextOrNil(stmt, 0) ?? "")
+            let title = (columnTextOrNil(stmt, 1) ?? "")
+            let subtitle = (columnTextOrNil(stmt, 2) ?? "")
+            let icon = (columnTextOrNil(stmt, 3) ?? "")
+            let categoryStr = (columnTextOrNil(stmt, 4) ?? "")
+            let systemPrompt = (columnTextOrNil(stmt, 5) ?? "")
+            let userPrompt = (columnTextOrNil(stmt, 6) ?? "")
             let notes = columnTextOrNil(stmt, 7) ?? ""
             let createdAt = Date(timeIntervalSince1970: sqlite3_column_double(stmt, 8))
             let category = TestCategory(rawValue: categoryStr) ?? .webDevelopment
@@ -1402,17 +1417,39 @@ final class DatabaseManager {
         let sql = "DELETE FROM custom_tests WHERE id = ?;"
         guard let stmt = prepare(sql) else { return }
         defer { sqlite3_finalize(stmt) }
-        sqlite3_bind_text(stmt, 1, id, -1, unsafeBitCast(-1, to: sqlite3_destructor_type.self))
+        Self.bindText(stmt, 1, id)
         sqlite3_step(stmt)
     }
 
     // MARK: - Helpers
 
+    /// A SELECT is complete only at SQLITE_DONE. Errors must discard every
+    /// accumulated row, not return an apparently valid empty list or prefix.
+    private func stepRowChecked(_ stmt: OpaquePointer) throws -> Bool {
+        switch sqlite3_step(stmt) {
+        case SQLITE_ROW: return true
+        case SQLITE_DONE: return false
+        default: throw DatabaseManagerError.operationFailed(currentError())
+        }
+    }
+
+    /// SQLite text is length-delimited, not a C string. The buffer includes a
+    /// trailing terminator for the empty-string case, but its explicit byte
+    /// count also preserves every embedded U+0000 and multibyte UTF-8 scalar.
+    @discardableResult
+    static func bindText(_ stmt: OpaquePointer?, _ index: Int32, _ text: String) -> Int32 {
+        text.utf8CString.withUnsafeBufferPointer { bytes in
+            sqlite3_bind_text64(stmt, index, bytes.baseAddress, UInt64(bytes.count - 1),
+                                unsafeBitCast(-1, to: sqlite3_destructor_type.self), UInt8(SQLITE_UTF8))
+        }
+    }
+
     func columnTextOrNil(_ stmt: OpaquePointer, _ index: Int32) -> String? {
         if index < 0 { return nil }
         if sqlite3_column_type(stmt, index) == SQLITE_NULL { return nil }
-        guard let cStr = sqlite3_column_text(stmt, index) else { return nil }
-        return String(cString: cStr)
+        guard let bytes = sqlite3_column_text(stmt, index) else { return nil }
+        let count = Int(sqlite3_column_bytes(stmt, index))
+        return String(decoding: UnsafeBufferPointer(start: bytes, count: count), as: UTF8.self)
     }
 
     func columnDoubleOrNil(_ stmt: OpaquePointer, _ index: Int32) -> Double? {

@@ -57,7 +57,7 @@ struct NativeAgentRunnerStreamingTests {
         _ = try await NativeAgentRunner.run(
             prompt: "read", modelId: "test/model", apiKey: "fixture", workspace: "/tmp",
             fullComputerAccess: true, history: [], client: client,
-            toolExecutor: { try await tools.execute($0) }, onEvent: { _ in }
+            toolExecutor: { try await tools.execute($0) }, missingApproval: .autoApprove, onEvent: { _ in }
         )
         let calls = await tools.calls
         #expect(calls.count == 1)
@@ -76,7 +76,7 @@ struct NativeAgentRunnerStreamingTests {
         let tools = ToolRecorder()
         let result = try await NativeAgentRunner.run(
             prompt: "go", modelId: "m", apiKey: "fixture", workspace: "/tmp", fullComputerAccess: true,
-            history: [], client: client, toolExecutor: { try await tools.execute($0) }, onEvent: { _ in }
+            history: [], client: client, toolExecutor: { try await tools.execute($0) }, missingApproval: .autoApprove, onEvent: { _ in }
         )
         #expect(await tools.calls.map(\.id) == ["a", "b"])
         #expect(result.history.compactMap(\.toolCallId) == ["a", "b"])
@@ -97,7 +97,7 @@ struct NativeAgentRunnerStreamingTests {
         let result = try await NativeAgentRunner.run(
             prompt: "check", modelId: "test/model", apiKey: "test-key", workspace: "/tmp",
             fullComputerAccess: true, history: [], client: client,
-            toolExecutor: { try await tools.execute($0) },
+            toolExecutor: { try await tools.execute($0) }, missingApproval: .autoApprove,
             onEvent: { await events.append($0) }
         )
 
@@ -131,7 +131,7 @@ struct NativeAgentRunnerStreamingTests {
             _ = try await NativeAgentRunner.run(
                 prompt: "run it", modelId: "test/model", apiKey: "test-key", workspace: "/tmp",
                 fullComputerAccess: true, history: [], client: client,
-                toolExecutor: { try await tools.execute($0) }, onEvent: { _ in }
+                toolExecutor: { try await tools.execute($0) }, missingApproval: .autoApprove, onEvent: { _ in }
             )
             Issue.record("Expected a truncated tool-call error")
         } catch {
@@ -155,7 +155,7 @@ struct NativeAgentRunnerStreamingTests {
         let result = try await NativeAgentRunner.run(
             prompt: "audit", modelId: "test/model", apiKey: "k", workspace: "/tmp",
             fullComputerAccess: true, history: [], client: client,
-            toolExecutor: { try await tools.execute($0) }, onEvent: { _ in }
+            toolExecutor: { try await tools.execute($0) }, missingApproval: .autoApprove, onEvent: { _ in }
         )
 
         #expect(result.response == "recovered")
@@ -177,7 +177,7 @@ struct NativeAgentRunnerStreamingTests {
 
         _ = try await NativeAgentRunner.run(
             prompt: "go", modelId: "m", apiKey: "k", workspace: "/tmp", fullComputerAccess: true,
-            history: [], client: client, toolExecutor: { try await tools.execute($0) }, onEvent: { _ in }
+            history: [], client: client, toolExecutor: { try await tools.execute($0) }, missingApproval: .autoApprove, onEvent: { _ in }
         )
 
         let calls = await tools.calls
@@ -216,7 +216,7 @@ struct NativeAgentRunnerStreamingTests {
         let result = try await NativeAgentRunner.run(
             prompt: "go", modelId: "test/model", apiKey: "test-key", workspace: "/tmp",
             fullComputerAccess: true, history: [], client: client,
-            toolExecutor: { try await tools.execute($0) }, onEvent: { _ in }
+            toolExecutor: { try await tools.execute($0) }, missingApproval: .autoApprove, onEvent: { _ in }
         )
 
         // Each turn keeps its own id, so the UI and the rebuilt history can
@@ -242,7 +242,7 @@ struct NativeAgentRunnerStreamingTests {
         let result = try await NativeAgentRunner.run(
             prompt: "go", modelId: "test/model", apiKey: "test-key", workspace: "/tmp",
             fullComputerAccess: true, history: [], client: client,
-            toolExecutor: { try await tools.execute($0) }, onEvent: { _ in }
+            toolExecutor: { try await tools.execute($0) }, missingApproval: .autoApprove, onEvent: { _ in }
         )
 
         #expect(await tools.calls.map(\.id) == ["t1_turn2"])

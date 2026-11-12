@@ -71,15 +71,18 @@ struct SidebarAccountChip: View {
         .accessibilityLabel("Account and settings")
         .accessibilityHint(state.help)
         .accessibilityValue(state.accessibilityValue)
-        .task {
-            if account.hasManagementKey { await account.fetchCredits() }
+        // A replacement keeps presence true, but changes the opaque revision.
+        // Refresh immediately rather than waiting for window focus to change.
+        .task(id: account.credentialRevision) {
+            if account.hasManagementKey && !account.isLoadingCredits { await account.fetchCredits() }
         }
-        // Keys are saved in the onboarding sheet or the Settings window;
-        // pick the change up when any window of the app becomes key.
         .onReceive(NotificationCenter.default.publisher(for: NSWindow.didBecomeKeyNotification)) { _ in
-            let had = account.hasManagementKey
+            let revision = account.credentialRevision
             account.refreshManagementKeyPresence()
-            if account.hasManagementKey && (!had || account.credits == nil) {
+            // A changed revision is owned by the task above. Focus can still
+            // retry an empty/error state without launching a duplicate fetch.
+            if revision == account.credentialRevision && account.hasManagementKey
+                && account.credits == nil && !account.isLoadingCredits {
                 Task { await account.fetchCredits() }
             }
         }

@@ -89,7 +89,11 @@ enum OpenRouterClientError: Error, Equatable, LocalizedError {
             case 402: return "OpenRouter credits are exhausted. Add credits, then try again. \(message)"
             case 408: return "OpenRouter timed out before streaming began. \(message)"
             case 429:
-                let retry = retryAfter.map { " Try again in about \(Int(ceil($0))) seconds." } ?? " Try again shortly."
+                let seconds = retryAfter.flatMap { value -> Int? in
+                    guard value.isFinite, value >= 0 else { return nil }
+                    return Int(exactly: ceil(value))
+                }
+                let retry = seconds.map { " Try again in about \($0) seconds." } ?? " Try again shortly."
                 return "OpenRouter rate limit reached.\(retry) \(message)"
             case 500...599: return "OpenRouter or the selected provider is temporarily unavailable (HTTP \(status)). \(message)"
             default: return "OpenRouter HTTP \(status): \(message)"

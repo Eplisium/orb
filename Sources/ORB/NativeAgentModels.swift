@@ -421,6 +421,19 @@ struct NativeAgentRunResult: Sendable {
     let hitToolBudget: Bool
     /// Raw primary finish reason of the final model turn (e.g. "length").
     let finishReason: String?
+    /// Independent helper ledger charges, excluded from `usage`.
+    let helperUsage: AgentHelperUsage
+    /// Complete model + helper cost for between-run budget checks. Unknown
+    /// model or helper charges keep this nil; never use the subtotal as a cap.
+    var reportedTotalCost: Double? {
+        guard let cost = usage?.cost, cost.isFinite, cost >= 0,
+              usage?.unpricedRequests == 0, helperUsage.isComplete else { return nil }
+        let total = cost + helperUsage.knownCostSubtotal
+        return total.isFinite ? total : nil
+    }
+    var knownTotalCostSubtotal: Double {
+        (usage?.knownCostSubtotal ?? 0) + helperUsage.knownCostSubtotal
+    }
 
     init(
         response: String,
@@ -430,7 +443,8 @@ struct NativeAgentRunResult: Sendable {
         toolCallDisplays: [ToolCallDisplay],
         toolMessages: [ChatMessage],
         hitToolBudget: Bool = false,
-        finishReason: String? = nil
+        finishReason: String? = nil,
+        helperUsage: AgentHelperUsage = .init()
     ) {
         self.response = response
         self.history = history
@@ -440,6 +454,7 @@ struct NativeAgentRunResult: Sendable {
         self.toolMessages = toolMessages
         self.hitToolBudget = hitToolBudget
         self.finishReason = finishReason
+        self.helperUsage = helperUsage
     }
 }
 

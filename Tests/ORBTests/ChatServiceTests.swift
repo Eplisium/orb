@@ -532,10 +532,13 @@ struct ChatServiceTests {
         for _ in 0..<200 where service.agentCumulativeUsage == nil {
             try await Task.sleep(for: .milliseconds(2))
         }
-        #expect(service.agentCumulativeUsage == usage)
+        #expect(service.agentCumulativeUsage?.cost == usage.cost)
+        #expect(service.agentCumulativeUsage?.totalTokens == usage.totalTokens)
+        #expect(service.agentCumulativeUsage?.accountedRequestCount == 1)
         service.stopStreaming()
         try await waitUntilIdle(service)
-        #expect(service.lastUsage == usage)
+        #expect(service.lastUsage?.knownCostSubtotal == usage.cost)
+        #expect(service.lastUsage?.totalTokens == usage.totalTokens)
         #expect(service.activeConversation?.totalTokens == 12)
         #expect(service.activeConversation?.totalCost == 0.02)
     }

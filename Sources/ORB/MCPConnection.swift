@@ -1,4 +1,6 @@
+import Darwin
 import Foundation
+import CryptoKit
 
 // MARK: - Configuration
 
@@ -178,7 +180,7 @@ enum MCPToolNaming {
     }
 
     static func qualify(server: String, tool: String) -> String {
-        "\(prefix)\(separator)\(sanitize(server))\(separator)\(tool)"
+        "\(prefix)\(separator)\(serverKey(server))\(separator)\(toolKey(tool))"
     }
 
     /// Splits a qualified name back into its server and tool parts.
@@ -189,11 +191,53 @@ enum MCPToolNaming {
         return (parts[1], parts.dropFirst(2).joined(separator: separator))
     }
 
+    /// Bounded, collision-resistant identity. Reserve z- so a literal digest
+    /// cannot impersonate a compacted name. Server + tool + separators fit the
+    /// common 64-byte provider function-name limit. Secret references retain
+    /// their separate legacy naming and are never changed here.
+    static func serverKey(_ value: String) -> String {
+        boundedKey(value, limit: 27, underscores: false)
+    }
+
+    static func toolKey(_ value: String) -> String {
+        boundedKey(value, limit: 30, underscores: true)
+    }
+
+    private static func boundedKey(_ value: String, limit: Int, underscores: Bool) -> String {
+        let safe = !value.isEmpty && value.utf8.count <= limit && !value.hasPrefix("z-") && value.utf8.allSatisfy {
+            (65...90).contains($0) || (97...122).contains($0) ||
+            (48...57).contains($0) || $0 == 45 || (underscores && $0 == 95)
+        }
+        if safe { return value }
+        return "z-h" + SHA256.hash(data: Data(value.utf8)).prefix(12)
+            .map { String(format: "%02x", $0) }.joined()
+    }
+
+    /// Legacy credential references only. Never use for RPC identity.
     static func sanitize(_ value: String) -> String {
         let allowed = value.map { character -> Character in
             character.isLetter || character.isNumber ? character : "-"
         }
         return String(allowed)
+    }
+}
+
+/// Cancellation is signalled synchronously from any executor, while all pipe
+/// ownership and continuation bookkeeping remain isolated to MCPConnection.
+private final class MCPWriteCancellation: @unchecked Sendable {
+    private let lock = NSLock()
+    private var cancelled = false
+
+    var isCancelled: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return cancelled
+    }
+
+    func cancel() {
+        lock.lock()
+        defer { lock.unlock() }
+        cancelled = true
     }
 }
 
@@ -213,9 +257,19 @@ actor MCPConnection {
     private var stdinHandle: FileHandle?
     private struct PendingRequest {
         let method: String
+        let expectsReply: Bool
+        let deadline: ContinuousClock.Instant
+        let cancellation: MCPWriteCancellation
         let continuation: CheckedContinuation<JSONValue, Error>
     }
+    private struct OutboundFrame {
+        let id: Int
+        let data: Data
+        var offset = 0
+    }
     private var pending: [Int: PendingRequest] = [:]
+    private var outbound: [OutboundFrame] = []
+    private var writerPump: Task<Void, Never>?
     private var stdoutPump: Task<Void, Never>?
     private var stdoutSink: AsyncStream<Data>.Continuation?
     private var nextID = 1
@@ -233,11 +287,16 @@ actor MCPConnection {
 
     /// Per-request ceiling. MCP tools can be slow (network, browsers), but an
     /// unbounded wait would hang the whole agent run.
-    private let requestTimeout: Duration = .seconds(120)
+    private let requestTimeout: Duration
 
-    init(config: MCPServerConfig, secretStore: CredentialSecretStore = KeychainCredentialStore()) {
+    init(
+        config: MCPServerConfig,
+        secretStore: CredentialSecretStore = KeychainCredentialStore(),
+        requestTimeout: Duration = .seconds(120)
+    ) {
         self.config = config
         self.secretStore = secretStore
+        self.requestTimeout = requestTimeout
     }
 
     var name: String { config.name }
@@ -271,7 +330,9 @@ actor MCPConnection {
     // MARK: Lifecycle
 
     func connect() async throws {
+        try Task.checkCancellation()
         guard process == nil else { return }
+        isShuttingDown = false
         lastError = nil
 
         let task = Process()
@@ -311,25 +372,37 @@ actor MCPConnection {
             chunkSink.yield(data)
         }
         stdoutPump = Task { [weak self] in
-            for await chunk in chunks { await self?.ingest(chunk) }
+            for await chunk in chunks {
+                guard !Task.isCancelled else { return }
+                await self?.ingest(chunk)
+            }
         }
         stdoutSink = chunkSink
         // Drain stderr so a chatty server cannot fill the pipe buffer and block.
         stderrPipe.fileHandleForReading.readabilityHandler = { handle in
             _ = handle.availableData
         }
-        task.terminationHandler = { [weak self] _ in
-            Task { await self?.handleTermination() }
+        task.terminationHandler = { [weak self] terminated in
+            Task { await self?.handleTermination(terminated) }
         }
 
         do {
             try task.run()
         } catch {
+            shutdown()
             throw MCPError.launchFailed("\(config.command): \(error.localizedDescription)")
         }
 
         process = task
         stdinHandle = stdinPipe.fileHandleForWriting
+        let fd = stdinPipe.fileHandleForWriting.fileDescriptor
+        let flags = fcntl(fd, F_GETFL)
+        guard flags != -1,
+              fcntl(fd, F_SETFL, flags | O_NONBLOCK) != -1,
+              fcntl(fd, F_SETNOSIGPIPE, 1) != -1 else {
+            shutdown()
+            throw MCPError.transport("Could not configure nonblocking MCP stdin")
+        }
 
         let initResult = try await send(
             method: "initialize",
@@ -369,34 +442,32 @@ actor MCPConnection {
             request.continuation.resume(throwing: MCPError.notConnected)
         }
         pending.removeAll()
+        outbound.removeAll()
+        writerPump?.cancel()
+        writerPump = nil
         stdoutSink?.finish()
         stdoutSink = nil
         stdoutPump?.cancel()
         stdoutPump = nil
         stdinHandle?.closeFile()
-        process?.terminate()
+        if let process, process.isRunning { process.terminate() }
         process = nil
         stdinHandle = nil
+        readBuffer.removeAll()
         tools = []
         resources = []
         prompts = []
     }
 
-    private func handleTermination() {
-        guard !isShuttingDown else { return }
+    private func handleTermination(_ terminated: Process) {
+        // A late callback from a closed transport must not tear down a newly
+        // connected process on this same actor.
+        guard process === terminated, !isShuttingDown else { return }
         for (_, request) in pending {
             request.continuation.resume(throwing: MCPError.transport("server exited unexpectedly"))
         }
         pending.removeAll()
-        process = nil
-        stdinHandle?.closeFile()
-        stdinHandle = nil
-        // A dead server must stop advertising its surface: keeping the
-        // descriptors made every later run offer tools whose calls could only
-        // fail with "not connected".
-        tools = []
-        resources = []
-        prompts = []
+        shutdown()
         lastError = "MCP server \"\(config.name)\" exited unexpectedly."
     }
 
@@ -536,97 +607,161 @@ actor MCPConnection {
     // MARK: JSON-RPC plumbing
 
     private func send(method: String, params: JSONValue) async throws -> JSONValue {
-        guard process?.isRunning == true else { throw MCPError.notConnected }
         let id = nextID
         nextID += 1
-
         let envelope = JSONValue.object([
             "jsonrpc": .string("2.0"),
             "id": .number(Double(id)),
             "method": .string(method),
             "params": params
         ])
+        return try await exchange(id: id, method: method, envelope: envelope, expectsReply: true)
+    }
 
-        let timeout = requestTimeout
+    /// One absolute deadline covers encoding, waiting for the ordered writer,
+    /// the write itself, and the response. Notifications/replies use this same
+    /// path, but finish when their complete frame has reached the pipe.
+    private func exchange(id: Int, method: String, envelope: JSONValue, expectsReply: Bool) async throws -> JSONValue {
+        try Task.checkCancellation()
+        guard process?.isRunning == true else { throw MCPError.notConnected }
+        let deadline = ContinuousClock.now + requestTimeout
+        let cancellation = MCPWriteCancellation()
         let timer = Task { [weak self] in
-            try? await Task.sleep(for: timeout)
+            try? await Task.sleep(until: deadline, clock: .continuous)
             guard !Task.isCancelled else { return }
-            await self?.fail(id: id, method: method, with: MCPError.timedOut(method), notifyServer: true)
+            await self?.fail(id: id, with: MCPError.timedOut(method))
         }
         defer { timer.cancel() }
-        // Cancelling the calling task (e.g. Stop in Agent) abandons exactly
-        // this request: it is removed from `pending`, the caller resumes with
-        // CancellationError, and the server is told via
-        // `notifications/cancelled`. The shared connection stays up.
         return try await withTaskCancellationHandler {
-            try await self.awaitReply(id: id, method: method, envelope: envelope)
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<JSONValue, Error>) in
+                // The cancellation handler may have run before registration.
+                guard !cancellation.isCancelled, !Task.isCancelled else {
+                    continuation.resume(throwing: CancellationError())
+                    return
+                }
+                var data = Data(envelope.jsonText.utf8)
+                data.append(0x0A)
+                guard ContinuousClock.now < deadline else {
+                    continuation.resume(throwing: MCPError.timedOut(method))
+                    return
+                }
+                // Register BEFORE any bytes are written, including tiny frames
+                // whose reply may arrive immediately.
+                pending[id] = PendingRequest(
+                    method: method, expectsReply: expectsReply, deadline: deadline,
+                    cancellation: cancellation, continuation: continuation
+                )
+                outbound.append(OutboundFrame(id: id, data: data))
+                if writerPump == nil {
+                    writerPump = Task { [weak self] in
+                        guard let self else { return }
+                        await self.pumpWrites()
+                    }
+                }
+            }
         } onCancel: {
-            Task { await self.fail(id: id, method: method, with: CancellationError(), notifyServer: true, reason: "Cancelled by client") }
+            // Synchronous flag stops queued frames even before the actor gets
+            // to the cancellation task. Never perform I/O in this handler.
+            cancellation.cancel()
+            Task { await self.fail(id: id, with: CancellationError()) }
         }
     }
 
-    /// Registers the pending request and writes it, atomically on the actor:
-    /// registration happens before the write (a fast reply can never be
-    /// dropped) and the task's cancellation flag is checked at registration,
-    /// so a cancel that raced ahead of this call is honored without ever
-    /// sending the request.
-    private func awaitReply(id: Int, method: String, envelope: JSONValue) async throws -> JSONValue {
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<JSONValue, Error>) in
-            if Task.isCancelled {
-                continuation.resume(throwing: CancellationError())
+    /// Bounded nonblocking syscalls keep the connection actor responsive. There
+    /// is exactly one writer and only its head frame can make progress; JSON
+    /// lines never interleave. EAGAIN sleeps cooperatively rather than holding
+    /// a thread (or an actor) waiting for a stalled server to drain stdin.
+    private func pumpWrites() async {
+        while !Task.isCancelled {
+            guard let frame = outbound.first else {
+                writerPump = nil
                 return
             }
-            guard process?.isRunning == true else {
-                continuation.resume(throwing: MCPError.notConnected)
+            guard let request = pending[frame.id] else {
+                outbound.removeFirst()
+                continue
+            }
+            if request.cancellation.isCancelled {
+                fail(id: frame.id, with: CancellationError())
+                continue
+            }
+            if ContinuousClock.now >= request.deadline {
+                fail(id: frame.id, with: MCPError.timedOut(request.method))
+                continue
+            }
+            guard let handle = stdinHandle else {
+                shutdown()
                 return
             }
-            pending[id] = PendingRequest(method: method, continuation: continuation)
-            do {
-                try write(envelope)
-            } catch {
-                pending[id] = nil
-                continuation.resume(throwing: error)
+            let remaining = min(frame.data.count - frame.offset, 16 * 1024)
+            let written = frame.data.withUnsafeBytes { bytes in
+                Darwin.write(handle.fileDescriptor, bytes.baseAddress!.advanced(by: frame.offset), remaining)
+            }
+            if written > 0 {
+                outbound[0].offset += written
+                if outbound[0].offset == frame.data.count {
+                    outbound.removeFirst()
+                    if !request.expectsReply {
+                        pending.removeValue(forKey: frame.id)?.continuation.resume(returning: .object([:]))
+                    }
+                }
+                await Task.yield()
+            } else if written < 0 && errno == EINTR {
+                await Task.yield()
+            } else if written == 0 || errno == EAGAIN || errno == EWOULDBLOCK {
+                try? await Task.sleep(for: .milliseconds(5))
+            } else {
+                let error = MCPError.transport("Could not write MCP stdin (errno \(errno))")
+                for request in pending.values { request.continuation.resume(throwing: error) }
+                pending.removeAll()
+                shutdown()
+                lastError = error.localizedDescription
+                return
             }
         }
     }
 
-    /// Resolves one pending request with an error (timeout or cancellation)
-    /// and, when it was already sent, tells the server to stop working on it.
-    /// No-op when the reply already arrived or the request was already failed,
-    /// which also makes a late timer or a late server reply for a cancelled id
-    /// harmless (`dispatch` drops replies with no pending entry).
-    private func fail(id: Int, method: String, with error: Error, notifyServer: Bool, reason: String = "Request timed out") {
+    /// Removing an untouched frame is safe. Removing half a JSON line is NOT:
+    /// sending its tail could execute a cancelled call, and skipping the tail
+    /// would splice the next message into malformed JSON. Close the transport
+    /// in that case, aborting all outstanding calls without sending a newline.
+    /// Already-sent calls receive a bounded, best-effort cancel notification.
+    private func fail(id: Int, with error: Error) {
         guard let request = pending.removeValue(forKey: id) else { return }
         request.continuation.resume(throwing: error)
-        // `initialize` must never be cancelled (MCP spec).
-        guard notifyServer, method != "initialize", process?.isRunning == true else { return }
-        try? write(.object([
-            "jsonrpc": .string("2.0"),
-            "method": .string("notifications/cancelled"),
-            "params": .object([
-                "requestId": .number(Double(id)),
-                "reason": .string(reason)
-            ])
-        ]))
+        if let index = outbound.firstIndex(where: { $0.id == id }) {
+            let partial = outbound[index].offset > 0
+            outbound.remove(at: index)
+            if partial {
+                shutdown()
+                lastError = "MCP connection closed after an interrupted partial write; reconnect to continue."
+            }
+            return
+        }
+        // initialize MUST NOT receive notifications/cancelled (MCP spec).
+        guard request.expectsReply, request.method != "initialize", process?.isRunning == true else { return }
+        let reason = error is CancellationError ? "Cancelled by client" : "Request timed out"
+        Task { [weak self] in
+            try? await self?.notify(method: "notifications/cancelled", params: .object([
+                "requestId": .number(Double(id)), "reason": .string(reason)
+            ]))
+        }
     }
 
-    private func notify(method: String, params: JSONValue) async throws {
-        try write(.object([
+    // Internal rather than private so transport tests exercise the real
+    // notification path (including initialized/cancelled notifications).
+    func notify(method: String, params: JSONValue) async throws {
+        try await writeMessage(.object([
             "jsonrpc": .string("2.0"),
             "method": .string(method),
             "params": params
-        ]))
+        ]), method: method)
     }
 
-    private func write(_ value: JSONValue) throws {
-        guard let handle = stdinHandle else { throw MCPError.notConnected }
-        var data = Data(value.jsonText.utf8)
-        data.append(0x0A)
-        do {
-            try handle.write(contentsOf: data)
-        } catch {
-            throw MCPError.transport(error.localizedDescription)
-        }
+    private func writeMessage(_ envelope: JSONValue, method: String) async throws {
+        let id = nextID
+        nextID += 1
+        _ = try await exchange(id: id, method: method, envelope: envelope, expectsReply: false)
     }
 
     /// Accumulates stdout and dispatches each complete newline-delimited message.
@@ -658,7 +793,18 @@ actor MCPConnection {
         // server-supplied id outside Int's range must be ignored, not trap.
         guard let idValue = message["id"], case .number(let rawID) = idValue,
               let id = Int(exactly: rawID),
-              let continuation = pending.removeValue(forKey: id)?.continuation else { return }
+              let request = pending[id], request.expectsReply,
+              !outbound.contains(where: { $0.id == id }) else { return }
+        if request.cancellation.isCancelled {
+            fail(id: id, with: CancellationError())
+            return
+        }
+        if ContinuousClock.now >= request.deadline {
+            fail(id: id, with: MCPError.timedOut(request.method))
+            return
+        }
+        pending[id] = nil
+        let continuation = request.continuation
 
         if let error = message["error"]?.objectValue {
             let rawCode = error["code"].flatMap { value -> Double? in
@@ -692,6 +838,8 @@ actor MCPConnection {
                 ])
             ])
         }
-        try? write(reply)
+        Task { [weak self] in
+            try? await self?.writeMessage(reply, method: "reply/" + method)
+        }
     }
 }

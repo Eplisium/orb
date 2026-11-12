@@ -154,18 +154,18 @@ final class AssetStore {
         }
     }
 
-    /// Stores a file that is already on disk (e.g. a streamed video
-    /// download) without loading it into memory: the checksum is computed
-    /// in fixed-size chunks and the file is MOVED into the library. The
-    /// source file is consumed on success and on dedupe; on failure it is
-    /// left in place so the caller can retry or export it.
+    /// Stores a file without loading it into memory. Copy to a sibling
+    /// temporary file, atomically rename, then commit metadata before consuming
+    /// the source. Outer transactions must pass `consumeSource: false` and only
+    /// consume after their own commit, so every failure leaves retry/export bytes.
     @discardableResult
     func store(
         fileAt source: URL,
         mimeType: String? = nil,
         remoteReference: String? = nil,
         jobID: UUID? = nil,
-        messageID: UUID? = nil
+        messageID: UUID? = nil,
+        consumeSource: Bool = true
     ) async throws -> AssetRecord {
         let checksum: String
         let size: Int
@@ -180,7 +180,7 @@ final class AssetStore {
                 throw AssetStoreError.invalidPath(existing.relativePath)
             }
             try verifyStoredFile(existing)
-            try? FileManager.default.removeItem(at: source)
+            if consumeSource { consumeSourceFile(source, afterStoring: existing) }
             return existing
         }
         let relativePath = Self.relativePath(forChecksum: checksum, mimeType: mimeType)
@@ -194,32 +194,40 @@ final class AssetStore {
                 guard try Self.sha256Hex(fileAt: finalURL) == checksum else {
                     throw AssetStoreError.corrupt(relativePath: relativePath)
                 }
-                try? FileManager.default.removeItem(at: source)
             } else {
-                // Move into the shard under a temporary name first (a copy when
-                // crossing volumes), then rename atomically into place.
+                // Never move the caller's only copy before metadata commits.
                 let temporaryURL = finalURL.deletingLastPathComponent().appendingPathComponent(
                     ".tmp-\(UUID().uuidString)", isDirectory: false
                 )
-                try FileManager.default.moveItem(at: source, to: temporaryURL)
                 do {
+                    try FileManager.default.copyItem(at: source, to: temporaryURL)
                     _ = try resolvedURL(forRelativePath: relativePath)
                     try FileManager.default.moveItem(at: temporaryURL, to: finalURL)
                 } catch {
-                    // Hand the bytes back to the caller rather than losing them.
-                    try? FileManager.default.moveItem(at: temporaryURL, to: source)
+                    try? FileManager.default.removeItem(at: temporaryURL)
                     throw error
                 }
             }
-            return try recordStoredAsset(
+            let record = try recordStoredAsset(
                 sizeBytes: size, checksum: checksum, relativePath: relativePath, mimeType: mimeType,
                 remoteReference: remoteReference, jobID: jobID, messageID: messageID
             )
+            if consumeSource { consumeSourceFile(source, afterStoring: record) }
+            return record
         } catch let error as AssetStoreError {
             throw error
         } catch {
             throw AssetStoreError.storageFailure(error.localizedDescription)
         }
+    }
+
+    /// Best-effort cleanup after all owning transactions commit. A caller may
+    /// pass an existing library path; never unlink the stored asset itself.
+    func consumeSourceFile(_ source: URL, afterStoring record: AssetRecord) {
+        guard let stored = try? fileURL(forRelativePath: record.relativePath),
+              source.resolvingSymlinksInPath().standardizedFileURL
+                != stored.resolvingSymlinksInPath().standardizedFileURL else { return }
+        try? FileManager.default.removeItem(at: source)
     }
 
     /// Streams the stored file through SHA-256 (no full read into memory).

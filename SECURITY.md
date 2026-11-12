@@ -29,7 +29,7 @@ ORB is a local desktop app that holds OpenRouter credentials and can run tools w
 These are **by design** and not vulnerabilities by themselves:
 
 - With Computer Access enabled, the Agent can do anything your macOS user can. Shell commands aren't confined to the workspace folder.
-- When the user enables **OP Mode**, risky tool calls run without a prompt.
+- When the user enables **OP Mode**, risky Agent tool calls run without a prompt. This is an explicit caller policy, not the default for a missing approval coordinator. Test Suite project commands still prompt and are denied when its approval UI is unavailable.
 - MCP servers you add run as local processes with your permissions.
 - Ad-hoc signed builds aren't notarized.
 

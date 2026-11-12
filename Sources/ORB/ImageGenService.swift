@@ -233,23 +233,35 @@ final class ImageGenService: ObservableObject {
     @Published var lastUsage: ImageGenUsage?
 
     private let transport: MediaTransport
+    /// The service, not a transient view caller, owns the shared refresh.
+    private var modelsTask: Task<Void, Never>?
 
     init(transport: MediaTransport = MediaTransport()) { self.transport = transport }
 
     func fetchModels() async {
-        guard !isLoadingModels else { return }
+        if let modelsTask {
+            await modelsTask.value
+            return
+        }
         isLoadingModels = true
         modelsError = nil
-        defer { isLoadingModels = false }
-        do {
-            let request = try transport.request(path: "images/models")
-            let list: ImageGenModelList = try await transport.send(request)
-            models = list.data.sorted { $0.name < $1.name }
-        } catch is CancellationError {
-            // Leave prior models in place; a cancelled refresh is not an error.
-        } catch {
-            modelsError = error.localizedDescription
+        let task = Task { @MainActor in
+            defer {
+                isLoadingModels = false
+                modelsTask = nil
+            }
+            do {
+                let request = try transport.request(path: "images/models")
+                let list: ImageGenModelList = try await transport.send(request)
+                models = list.data.sorted { $0.name < $1.name }
+            } catch is CancellationError {
+                // Preserve prior models. View cancellation does not cancel this task.
+            } catch {
+                modelsError = error.localizedDescription
+            }
         }
+        modelsTask = task
+        await task.value
     }
 
     /// Lists the per-provider endpoints for an image model

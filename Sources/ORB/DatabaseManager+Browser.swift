@@ -43,7 +43,7 @@ extension DatabaseManager {
     }
 
     private static func bind(_ stmt: OpaquePointer?, _ index: Int32, _ text: String) {
-        sqlite3_bind_text(stmt, index, text, -1, unsafeBitCast(-1, to: sqlite3_destructor_type.self))
+        Self.bindText(stmt, index, text)
     }
 
     private func runChecked(_ sql: String, bind: (OpaquePointer?) -> Void) throws {

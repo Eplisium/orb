@@ -2,6 +2,12 @@ import Foundation
 
 /// ORB's function-calling loop. Every model turn uses the same streaming client
 /// as direct Chat, and tool fragments are assembled by choice/tool index.
+enum MissingApprovalBehavior: Sendable {
+    case deny
+    /// Only explicitly enabled unattended mode may choose this.
+    case autoApprove
+}
+
 enum NativeAgentRunner {
     /// Wall-clock arrival time of the stream event currently being delivered
     /// to `onEvent`, sampled off the main actor (see `StreamArrivalRelay`).
@@ -49,6 +55,7 @@ enum NativeAgentRunner {
         toolExecutor: ToolExecutor? = nil,
         policy: ToolPolicy? = nil,
         approvals: ApprovalCoordinator? = nil,
+        missingApproval: MissingApprovalBehavior = .deny,
         /// Sampling for every turn. Unset values are omitted so the
         /// provider's defaults apply (never a hardcoded temperature).
         settings: GenerationSettings = .agentDefault,
@@ -122,7 +129,8 @@ enum NativeAgentRunner {
             try Task.checkCancellation()
             return result
         }
-        var aggregateUsage: ChatUsage?
+        let helperUsage = AgentHelperUsageCollector()
+        var usageAccumulator = AgentUsageAccumulator()
         var usedTools: [String] = []
         var displays: [ToolCallDisplay] = []
         var toolMessages: [ChatMessage] = []
@@ -194,8 +202,13 @@ enum NativeAgentRunner {
                 default: break
                 }
             }
+            try Task.checkCancellation()
             break turnAttempt
             } catch {
+                // An attempted request may have billed before failing, even if
+                // it emitted no usage. Retain each attempt before retry/reset.
+                usageAccumulator.append(turnUsage)
+                if let usage = usageAccumulator.value { await onEvent(.usage(turn: turn, cumulative: usage)) }
                 let action = AgentTurnRecovery.action(
                     for: error, transientAttempts: transientAttempts, strippedAlready: strippedAlready,
                     canStrip: request.messages.contains { $0.reasoningDetails != nil },
@@ -222,9 +235,9 @@ enum NativeAgentRunner {
             // A cancelled consumer ends the relay stream normally instead of
             // throwing, so Stop must be caught here, before a cut-off turn is
             // read as a finished answer (or as an invalid empty response).
+            usageAccumulator.append(turnUsage)
+            if let usage = usageAccumulator.value { await onEvent(.usage(turn: turn, cumulative: usage)) }
             try Task.checkCancellation()
-            aggregateUsage = sum(aggregateUsage, turnUsage)
-            if let aggregateUsage { await onEvent(.usage(turn: turn, cumulative: aggregateUsage)) }
             await emit(.turnFinished(reason: finishReason), lastArrival)
 
             if finishReason == "length",
@@ -289,9 +302,9 @@ enum NativeAgentRunner {
                 if hasText {
                     await onEvent(.runCompleted)
                     return .init(
-                        response: text, history: messages, usage: aggregateUsage,
+                        response: text, history: messages, usage: usageAccumulator.value,
                         toolNames: usedTools, toolCallDisplays: displays, toolMessages: toolMessages,
-                        finishReason: finishReason
+                        finishReason: finishReason, helperUsage: helperUsage.snapshot
                     )
                 }
 
@@ -337,17 +350,23 @@ enum NativeAgentRunner {
                 let rawResult: NativeAgentToolResult
                 if effectivePolicy.allowsExecution(name: call.name) {
                     var approved = true
-                    if let approvals, effectivePolicy.requiresApproval(name: call.name) {
-                        approved = await approvals.requestApproval(
-                            toolName: call.name,
-                            server: MCPToolNaming.resolve(call.name)?.server,
-                            // Full arguments: the user must see the exact command or
-                            // path being approved, never a truncated prefix.
-                            summary: call.arguments
-                        )
+                    if effectivePolicy.requiresApproval(name: call.name) {
+                        if let approvals {
+                            approved = await approvals.requestApproval(
+                                toolName: call.name,
+                                server: MCPToolNaming.resolve(call.name)?.server,
+                                // Show the exact arguments, never a truncated prefix.
+                                summary: call.arguments
+                            )
+                        } else {
+                            approved = missingApproval == .autoApprove
+                        }
                     }
                     if approved {
-                        rawResult = try await executor(call)
+                        try Task.checkCancellation()
+                        rawResult = try await AgentHelperUsageCollector.$current.withValue(helperUsage) {
+                            try await executor(call)
+                        }
                     } else {
                         rawResult = NativeAgentToolResult(
                             content: "Denied: the user did not approve \"\(call.name)\" for this session.",
@@ -415,8 +434,11 @@ enum NativeAgentRunner {
             default: break
             }
         }
+        try Task.checkCancellation()
         break finalAttempt
         } catch {
+            usageAccumulator.append(finalUsage)
+            if let usage = usageAccumulator.value { await onEvent(.usage(turn: maximumTurns, cumulative: usage)) }
             let action = AgentTurnRecovery.action(
                 for: error, transientAttempts: finalTransientAttempts, strippedAlready: finalStrippedAlready,
                 canStrip: finalRequest.messages.contains { $0.reasoningDetails != nil },
@@ -441,17 +463,18 @@ enum NativeAgentRunner {
         }
         // Same as the turn loop: Stop during the summary must not be recorded
         // as a completed (truncated) answer.
+        usageAccumulator.append(finalUsage)
+        if let usage = usageAccumulator.value { await onEvent(.usage(turn: maximumTurns, cumulative: usage)) }
         try Task.checkCancellation()
-        aggregateUsage = sum(aggregateUsage, finalUsage)
         guard !finalText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             throw NativeAgentError.exhausted
         }
         messages.append(.init(role: "assistant", content: finalText))
         await onEvent(.runCompleted)
         return .init(
-            response: finalText, history: messages, usage: aggregateUsage,
+            response: finalText, history: messages, usage: usageAccumulator.value,
             toolNames: usedTools, toolCallDisplays: displays, toolMessages: toolMessages,
-            hitToolBudget: true, finishReason: finalFinishReason
+            hitToolBudget: true, finishReason: finalFinishReason, helperUsage: helperUsage.snapshot
         )
     }
 
@@ -481,14 +504,17 @@ enum NativeAgentRunner {
         fullComputerAccess: Bool,
         history: [AgentAPIMessage],
         systemPromptOverride: String? = nil,
+        client: any OpenRouterClientProtocol = OpenRouterClient(),
+        toolExecutor: ToolExecutor? = nil,
         policy: ToolPolicy? = nil,
+        approvals: ApprovalCoordinator? = nil,
         onActivity: @escaping @MainActor (String) -> Void
     ) async throws -> NativeAgentRunResult {
         try await run(
             prompt: prompt, modelId: modelId, apiKey: apiKey, workspace: workspace,
             fullComputerAccess: fullComputerAccess, history: history,
-            systemPromptOverride: systemPromptOverride,
-            policy: policy,
+            systemPromptOverride: systemPromptOverride, client: client, toolExecutor: toolExecutor,
+            policy: policy, approvals: approvals,
             onEvent: { event in
                 let label: String?
                 switch event {
@@ -526,18 +552,6 @@ enum NativeAgentRunner {
         - Web: web_search for current information (docs, prices, news) instead of guessing; fetch_url to read a specific page.
         - Media (spend credits, ask only for large work): generate_image saves AI pictures to disk; speak_text saves narration audio to disk.
         """
-    }
-
-    private static func sum(_ lhs: ChatUsage?, _ rhs: ChatUsage?) -> ChatUsage? {
-        guard lhs != nil || rhs != nil else { return nil }
-        func add(_ a: Int?, _ b: Int?) -> Int? { a == nil && b == nil ? nil : (a ?? 0) + (b ?? 0) }
-        func add(_ a: Double?, _ b: Double?) -> Double? { a == nil && b == nil ? nil : (a ?? 0) + (b ?? 0) }
-        return ChatUsage(
-            promptTokens: add(lhs?.promptTokens, rhs?.promptTokens),
-            completionTokens: add(lhs?.completionTokens, rhs?.completionTokens),
-            totalTokens: add(lhs?.totalTokens, rhs?.totalTokens),
-            cost: add(lhs?.cost, rhs?.cost)
-        )
     }
 
     private static func activityLabel(for tool: String) -> String {

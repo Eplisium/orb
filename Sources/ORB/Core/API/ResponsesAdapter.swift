@@ -366,11 +366,10 @@ enum ResponsesStreamDecoder {
     }
 
     private static func intValue(_ value: JSONValue?) -> Int? {
-        guard let double = value?.doubleValue,
-              double.rounded() == double,
-              double >= 0, double <= Double(Int.max)
-        else { return nil }
-        return Int(double)
+        guard let double = value?.doubleValue, double >= 0 else { return nil }
+        // Double(Int.max) rounds above Int.max on 64-bit hosts. An exact
+        // conversion rejects overflow, fractions and nonfinite values safely.
+        return Int(exactly: double)
     }
 }
 

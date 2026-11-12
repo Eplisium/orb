@@ -161,11 +161,11 @@ struct TruncateConversationTests {
         #expect(service.conversations.first { $0.id == c.id }?.messages.count == 4)
     }
 
-    @Test("Storage-first: a failed database removal keeps the in-memory transcript intact")
+    @Test("Storage-first: a failed atomic replacement keeps the in-memory transcript intact")
     func failure() {
         let (service, store) = makeService()
         let c = seed(service)
-        store.failMessageRemoval = true
+        store.failSave = true
         #expect(service.truncateConversation(from: c.messages[2].id, in: c.id) == nil)
         #expect(service.conversations.first { $0.id == c.id }?.messages.count == 4)
         #expect(service.lastError != nil)

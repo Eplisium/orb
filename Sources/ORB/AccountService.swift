@@ -1,4 +1,5 @@
 import Foundation
+import Combine
 
 /// Service for authenticated OpenRouter API calls: credits and activity.
 ///
@@ -15,6 +16,8 @@ final class AccountService: ObservableObject {
     @Published var creditsError: String?
     @Published var activityError: String?
     @Published var hasManagementKey = false
+    /// Public refresh identity for views; never contains credential bytes.
+    @Published private(set) var credentialRevision = UUID()
 
     typealias DataLoader = (URLRequest) async throws -> (Data, URLResponse)
 
@@ -27,6 +30,8 @@ final class AccountService: ObservableObject {
     /// slow response for a replaced/removed key can't publish into the new
     /// (or empty) account state.
     private var credentialGeneration = 0
+    private var observedStoreRevision: UUID?
+    private var credentialObservation: AnyCancellable?
 
     private struct FetchFailure: Error {
         let message: String
@@ -46,6 +51,20 @@ final class AccountService: ObservableObject {
         self.hasManagementKey = profile.managementKeyReference.map {
             secretStore.hasSecret(forReference: $0)
         } ?? false
+        if let reference = profile.managementKeyReference, let changes = secretStore.credentialChanges {
+            observedStoreRevision = changes.revision(for: reference)
+            credentialObservation = changes.publisher.sink { @Sendable [weak self] changedReference in
+                guard changedReference == reference else { return }
+                // Settings writes happen on the main actor: clear other
+                // windows synchronously, before their next render. Background
+                // writers hop to it; fetch completion also checks revisions.
+                if Thread.isMainThread {
+                    MainActor.assumeIsolated { self?.refreshManagementKeyPresence() }
+                } else {
+                    Task { @MainActor [weak self] in self?.refreshManagementKeyPresence() }
+                }
+            }
+        }
     }
 
     // MARK: - Role-routed requests
@@ -69,6 +88,7 @@ final class AccountService: ObservableObject {
     // MARK: - Credits
 
     func fetchCredits() async {
+        refreshManagementKeyPresence()
         guard let url = URL(string: "\(baseURL)/credits"),
               let request = authenticatedRequest(url: url, role: .management) else {
             credits = nil
@@ -100,6 +120,7 @@ final class AccountService: ObservableObject {
 
         // Stale: the credential changed while we waited. The current
         // generation owns the published state and loading flag.
+        refreshManagementKeyPresence()
         guard generation == credentialGeneration else { return }
         switch result {
         case .success(let value): credits = value
@@ -111,6 +132,7 @@ final class AccountService: ObservableObject {
     // MARK: - Activity
 
     func fetchActivity() async {
+        refreshManagementKeyPresence()
         guard let url = URL(string: "\(baseURL)/activity"),
               let request = authenticatedRequest(url: url, role: .management) else {
             activity = []
@@ -141,6 +163,7 @@ final class AccountService: ObservableObject {
             result = .failure(FetchFailure(error.localizedDescription))
         }
 
+        refreshManagementKeyPresence()
         guard generation == credentialGeneration else { return }
         switch result {
         case .success(let value): activity = value
@@ -156,6 +179,7 @@ final class AccountService: ObservableObject {
     /// will no longer clear them, and a new request sets them itself).
     private func invalidateAccountState() {
         credentialGeneration &+= 1
+        credentialRevision = UUID()
         credits = nil
         activity = []
         creditsError = nil
@@ -168,12 +192,18 @@ final class AccountService: ObservableObject {
         profile.managementKeyReference.map { secretStore.hasSecret(forReference: $0) } ?? false
     }
 
-    /// Re-reads (existence-only, prompt-free) whether a management key is
-    /// stored, e.g. after it was saved from another window.
+    /// Reconciles presence AND the shared store revision. Presence alone
+    /// cannot distinguish a replacement account from the previous one.
     func refreshManagementKeyPresence() {
+        let revision = profile.managementKeyReference.flatMap {
+            secretStore.credentialChanges?.revision(for: $0)
+        }
         let present = storeHasManagementKey
-        if present != hasManagementKey { hasManagementKey = present }
-        if !present { invalidateAccountState() }
+        if revision != observedStoreRevision || present != hasManagementKey {
+            observedStoreRevision = revision
+            invalidateAccountState()
+        }
+        hasManagementKey = present
     }
 
     /// Saves a management key. A failed save leaves the previous key (and its
@@ -181,10 +211,14 @@ final class AccountService: ObservableObject {
     @discardableResult
     func setManagementKey(_ key: String) -> String? {
         let reference = profile.managementKeyReference ?? CredentialRole.management.keychainAccount
+        let generation = credentialGeneration
         let error = secretStore.saveSecret(key, forReference: reference)
         if error == nil {
-            invalidateAccountState() // new credential = new account data
-            hasManagementKey = true
+            refreshManagementKeyPresence()
+            // Custom stores without a revision source still invalidate the
+            // initiating service; observable stores already did so above.
+            if generation == credentialGeneration { invalidateAccountState() }
+            hasManagementKey = storeHasManagementKey
         } else {
             hasManagementKey = storeHasManagementKey // old key may still be there
         }
@@ -192,19 +226,20 @@ final class AccountService: ObservableObject {
     }
 
     /// Removes the management key. Returns nil on verified removal, or an
-    /// error message when the credential may still exist — in which case
-    /// nothing is cleared and `hasManagementKey` still reflects reality.
-    /// On success published data is cleared immediately and in-flight
-    /// requests are invalidated.
+    /// error message when the credential may still exist. A failed write
+    /// preserves state; a successful write with uncertain verification still
+    /// invalidates old account data through the shared revision source.
     @discardableResult
     func removeManagementKey() -> String? {
         let reference = profile.managementKeyReference ?? CredentialRole.management.keychainAccount
+        let generation = credentialGeneration
         let deleted = secretStore.deleteSecret(forReference: reference)
         if !deleted || secretStore.hasSecret(forReference: reference) {
             hasManagementKey = storeHasManagementKey
             return "The management key could not be removed from Keychain. It may still be stored."
         }
-        invalidateAccountState()
+        refreshManagementKeyPresence()
+        if generation == credentialGeneration { invalidateAccountState() }
         hasManagementKey = false
         return nil
     }

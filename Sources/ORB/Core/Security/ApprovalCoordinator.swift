@@ -28,10 +28,15 @@ actor ApprovalCoordinator {
     private var handler: (@Sendable (Request) async -> Decision)?
     private var pending: [UUID: CheckedContinuation<Decision, Never>] = [:]
     private var sessionApproved: Set<String> = []
+    private var handlerTasks: [UUID: Task<Void, Never>] = [:]
 
     /// Installs the UI responder. Passing nil removes it (and fails closed).
     func setHandler(_ handler: (@Sendable (Request) async -> Decision)?) {
         self.handler = handler
+        if handler == nil {
+            cancelPending()
+            revokeSessionApprovals()
+        }
     }
 
     var pendingRequestIDs: [UUID] {
@@ -46,17 +51,28 @@ actor ApprovalCoordinator {
         summary: String = "",
         sessionScope: Bool = false
     ) async -> Bool {
+        guard !Task.isCancelled else { return false }
         let key = "\(server ?? "")|\(toolName)"
         if sessionApproved.contains(key) { return true }
         guard let handler else { return false }
         let request = Request(id: UUID(), toolName: toolName, server: server, summary: summary)
-        let decision = await withCheckedContinuation { (continuation: CheckedContinuation<Decision, Never>) in
-            pending[request.id] = continuation
-            Task { [handler] in
-                let resolved = await handler(request)
-                await self.fulfill(id: request.id, decision: resolved)
+        let decision = await withTaskCancellationHandler {
+            await withCheckedContinuation { (continuation: CheckedContinuation<Decision, Never>) in
+                guard !Task.isCancelled else {
+                    continuation.resume(returning: .denied)
+                    return
+                }
+                pending[request.id] = continuation
+                handlerTasks[request.id] = Task { [handler] in
+                    guard !Task.isCancelled else { return }
+                    let resolved = await handler(request)
+                    await self.fulfill(id: request.id, decision: resolved)
+                }
             }
+        } onCancel: {
+            Task { await self.cancelPending(request.id) }
         }
+        guard !Task.isCancelled else { return false }
         if decision == .approvedForSession || (decision == .approved && sessionScope) {
             sessionApproved.insert(key)
         }
@@ -70,10 +86,13 @@ actor ApprovalCoordinator {
         let cancelled: [CheckedContinuation<Decision, Never>]
         if let id {
             guard let cont = pending.removeValue(forKey: id) else { return }
+            handlerTasks.removeValue(forKey: id)?.cancel()
             cancelled = [cont]
         } else {
             cancelled = Array(pending.values)
             pending.removeAll()
+            for task in handlerTasks.values { task.cancel() }
+            handlerTasks.removeAll()
         }
         for continuation in cancelled {
             continuation.resume(returning: .denied)
@@ -86,6 +105,7 @@ actor ApprovalCoordinator {
     }
 
     private func fulfill(id: UUID, decision: Decision) {
+        handlerTasks.removeValue(forKey: id)
         guard let continuation = pending.removeValue(forKey: id) else { return }
         continuation.resume(returning: decision)
     }

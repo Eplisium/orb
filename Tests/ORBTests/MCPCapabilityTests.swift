@@ -98,13 +98,11 @@ struct MCPCapabilityTests {
         guard let config = Self.serverConfig() else { return }
         var enabled = config
         enabled.isEnabled = true
-        MCPRegistry.saveConfigs([enabled])
-        defer { MCPRegistry.saveConfigs([]) }
+        let configs = [enabled]
+        let registry = MCPRegistry(configProvider: { configs })
+        await registry.startEnabledServers()
 
-        await MCPRegistry.shared.startEnabledServers()
-        defer { Task { await MCPRegistry.shared.shutdownAll() } }
-
-        let names = await MCPRegistry.shared.toolDefinitions().map(\.function.name)
+        let names = await registry.toolDefinitions().map(\.function.name)
         #expect(names.contains("mcp__mock__read_resource"))
         #expect(names.contains("mcp__mock__get_prompt"))
         #expect(names.contains("mcp__mock__echo"))
@@ -124,6 +122,7 @@ struct MCPCapabilityTests {
         var unapproved = ToolPolicy.computerControl
         unapproved.approvedMCPServers = ["someone-else"]
         #expect(names.filter { unapproved.allowsExecution(name: $0) }.allSatisfy { !MCPRegistry.isMCPTool($0) })
+        await registry.shutdownAll()
     }
 
     @Test("synthetic read_resource routes through to the live server")
@@ -131,18 +130,17 @@ struct MCPCapabilityTests {
         guard let config = Self.serverConfig() else { return }
         var enabled = config
         enabled.isEnabled = true
-        MCPRegistry.saveConfigs([enabled])
-        defer { MCPRegistry.saveConfigs([]) }
+        let configs = [enabled]
+        let registry = MCPRegistry(configProvider: { configs })
+        await registry.startEnabledServers()
 
-        await MCPRegistry.shared.startEnabledServers()
-        defer { Task { await MCPRegistry.shared.shutdownAll() } }
-
-        let result = await MCPRegistry.shared.call(
+        let result = await registry.call(
             qualifiedName: "mcp__mock__read_resource",
             argumentsJSON: #"{"uri":"mock://readme"}"#
         )
         #expect(!result.isError)
         #expect(result.content == "ORB resource body")
+        await registry.shutdownAll()
     }
 
     @Test("synthetic get_prompt coerces non-string arguments")
@@ -150,20 +148,19 @@ struct MCPCapabilityTests {
         guard let config = Self.serverConfig() else { return }
         var enabled = config
         enabled.isEnabled = true
-        MCPRegistry.saveConfigs([enabled])
-        defer { MCPRegistry.saveConfigs([]) }
-
-        await MCPRegistry.shared.startEnabledServers()
-        defer { Task { await MCPRegistry.shared.shutdownAll() } }
+        let configs = [enabled]
+        let registry = MCPRegistry(configProvider: { configs })
+        await registry.startEnabledServers()
 
         // Models frequently emit numbers for numeric-looking arguments; those
         // must be coerced rather than silently dropped.
-        let result = await MCPRegistry.shared.call(
+        let result = await registry.call(
             qualifiedName: "mcp__mock__get_prompt",
             argumentsJSON: #"{"name":"greet","arguments":{"who":"Zach","times":3}}"#
         )
         #expect(!result.isError)
         #expect(result.content == "Hello Zach x3")
+        await registry.shutdownAll()
     }
 
     @Test("a bridge only reads from the server it is qualified with")
@@ -171,25 +168,25 @@ struct MCPCapabilityTests {
         guard let config = Self.serverConfig() else { return }
         var enabled = config
         enabled.isEnabled = true
-        MCPRegistry.saveConfigs([enabled])
-        defer { MCPRegistry.saveConfigs([]) }
-
-        await MCPRegistry.shared.startEnabledServers()
-        defer { Task { await MCPRegistry.shared.shutdownAll() } }
+        let configs = [enabled]
+        let registry = MCPRegistry(configProvider: { configs })
+        await registry.startEnabledServers()
 
         // mock://readme exists on `mock`, but a bridge for another server
         // must not reach it.
-        let wrong = await MCPRegistry.shared.call(
+        let wrong = await registry.call(
             qualifiedName: "mcp__elsewhere__read_resource",
             argumentsJSON: #"{"uri":"mock://readme"}"#
         )
         #expect(wrong.isError)
         #expect(!wrong.content.contains("ORB resource body"))
+        await registry.shutdownAll()
     }
 
     @Test("legacy global bridge names are no longer routable")
     func legacyGlobalBridgeNames() async {
-        let result = await MCPRegistry.shared.call(
+        let registry = MCPRegistry(configProvider: { [] })
+        let result = await registry.call(
             qualifiedName: "mcp__read_resource", argumentsJSON: #"{"uri":"mock://readme"}"#
         )
         #expect(result.isError)
@@ -200,23 +197,23 @@ struct MCPCapabilityTests {
         guard let config = Self.serverConfig() else { return }
         var enabled = config
         enabled.isEnabled = true
-        MCPRegistry.saveConfigs([enabled])
-        defer { MCPRegistry.saveConfigs([]) }
+        let configs = [enabled]
+        let registry = MCPRegistry(configProvider: { configs })
+        await registry.startEnabledServers()
 
-        await MCPRegistry.shared.startEnabledServers()
-        defer { Task { await MCPRegistry.shared.shutdownAll() } }
-
-        let result = await MCPRegistry.shared.call(
+        let result = await registry.call(
             qualifiedName: "mcp__mock__read_resource",
             argumentsJSON: #"{"uri":"mock://missing"}"#
         )
         // An agent run must survive a bad URI.
         #expect(result.isError)
+        await registry.shutdownAll()
     }
 
     @Test("missing required arguments are rejected with a clear message")
     func missingArgumentsRejected() async throws {
-        let result = await MCPRegistry.shared.call(
+        let registry = MCPRegistry(configProvider: { [] })
+        let result = await registry.call(
             qualifiedName: "mcp__mock__read_resource",
             argumentsJSON: "{}"
         )

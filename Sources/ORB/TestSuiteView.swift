@@ -10,6 +10,7 @@ struct TestSuiteView: View {
     @StudioState("TestSuiteView.selectedScenario") private var selectedScenario: TestScenario? = nil
     @StudioState("TestSuiteView.selectedModelId") private var selectedModelId = ""
     @State private var showModelPicker = false
+    @State private var approvalHostID = UUID()
     @StudioState("TestSuiteView.modelSearchText") private var modelSearchText = ""
     @State private var showCreateTest = false
     @StudioState("TestSuiteView.customTests") private var customTests: [CustomTest] = []
@@ -44,6 +45,10 @@ struct TestSuiteView: View {
             mainArea
         }
         .background(testBackground)
+        .modifier(ApprovalSheetModifier(presenter: testRunner.approvalPresenter,
+                                        isPresentationHost: testRunner.approvalHostID == approvalHostID))
+        .onAppear { testRunner.registerApprovalHost(approvalHostID) }
+        .onDisappear { testRunner.unregisterApprovalHost(approvalHostID) }
         .task {
             if selectedModelId.isEmpty { selectedModelId = preferredModelId }
             viewModel.loadFavorites()

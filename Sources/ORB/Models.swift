@@ -838,6 +838,11 @@ struct MessageUsage: Codable, Equatable, Sendable {
     var totalTokens: Int?
     var reasoningTokens: Int?
     var cost: Double?
+    /// Optional for backwards-compatible decoding of legacy persisted replies.
+    var costSubtotal: Double?
+    var requestCount: Int?
+    var unpricedRequestCount: Int?
+    var knownCostSubtotal: Double { costSubtotal ?? cost ?? 0 }
     /// Completion tokens per second of wall time for the run.
     var tokensPerSecond: Double?
 
@@ -859,6 +864,9 @@ struct MessageUsage: Codable, Equatable, Sendable {
                 seconds > 0 ? Double(tokens) / seconds : nil
             }
         )
+        costSubtotal = usage.costSubtotal
+        requestCount = usage.requestCount
+        unpricedRequestCount = usage.unpricedRequestCount
     }
 
     /// Compact footer text, e.g. "1,204 tokens · $0.0031 · 42 tok/s".
@@ -866,7 +874,16 @@ struct MessageUsage: Codable, Equatable, Sendable {
         var parts: [String] = []
         if let totalTokens { parts.append("\(totalTokens.formatted()) tokens") }
         else if let completionTokens { parts.append("\(completionTokens.formatted()) out") }
-        if let cost, cost > 0 { parts.append(cost < 0.01 ? String(format: "$%.4f", cost) : String(format: "$%.2f", cost)) }
+        if let unpricedRequestCount, unpricedRequestCount > 0 {
+            if knownCostSubtotal > 0 {
+                let amount = knownCostSubtotal < 0.01
+                    ? String(format: "$%.4f", knownCostSubtotal) : String(format: "$%.2f", knownCostSubtotal)
+                parts.append("\(amount) known")
+            }
+            parts.append("\(unpricedRequestCount) unpriced")
+        } else if let cost, cost > 0 {
+            parts.append(cost < 0.01 ? String(format: "$%.4f", cost) : String(format: "$%.2f", cost))
+        }
         if let tokensPerSecond { parts.append("\(Int(tokensPerSecond.rounded())) tok/s") }
         return parts.joined(separator: " · ")
     }
@@ -952,6 +969,20 @@ struct ChatUsage: Codable, Equatable, Sendable {
     let completionTokens: Int?
     let totalTokens: Int?
     let cost: Double?
+    /// ORB-only aggregate metadata. Absent on legacy/provider single-request usage.
+    var costSubtotal: Double?
+    var requestCount: Int?
+    var unpricedRequestCount: Int?
+
+    var knownCostSubtotal: Double {
+        let value = costSubtotal ?? cost ?? 0
+        return value.isFinite && value >= 0 ? value : 0
+    }
+    var accountedRequestCount: Int { max(requestCount ?? 1, 0) }
+    var unpricedRequests: Int {
+        if let unpricedRequestCount { return min(max(unpricedRequestCount, 0), accountedRequestCount) }
+        return cost.map { $0.isFinite && $0 >= 0 } == true ? 0 : accountedRequestCount
+    }
     /// Prompt tokens served from the provider's cache. These bill at a reduced
     /// rate, so showing them explains cost gaps on long conversations.
     var cachedTokens: Int?
@@ -969,6 +1000,9 @@ struct ChatUsage: Codable, Equatable, Sendable {
 
     enum CodingKeys: String, CodingKey {
         case cost
+        case costSubtotal = "orb_cost_subtotal"
+        case requestCount = "orb_request_count"
+        case unpricedRequestCount = "orb_unpriced_request_count"
         case promptTokens = "prompt_tokens"
         case completionTokens = "completion_tokens"
         case totalTokens = "total_tokens"
@@ -1035,6 +1069,9 @@ struct ChatUsage: Codable, Equatable, Sendable {
         completionTokens = try c.decodeIfPresent(Int.self, forKey: .completionTokens)
         totalTokens = try c.decodeIfPresent(Int.self, forKey: .totalTokens)
         cost = try c.decodeIfPresent(Double.self, forKey: .cost)
+        costSubtotal = try c.decodeIfPresent(Double.self, forKey: .costSubtotal)
+        requestCount = try c.decodeIfPresent(Int.self, forKey: .requestCount)
+        unpricedRequestCount = try c.decodeIfPresent(Int.self, forKey: .unpricedRequestCount)
         // Nested detail objects are optional and provider-specific.
         let promptDetails = try c.decodeIfPresent(PromptDetails.self, forKey: .promptTokensDetails)
         let completionDetails = try c.decodeIfPresent(CompletionDetails.self, forKey: .completionTokensDetails)
@@ -1056,6 +1093,9 @@ struct ChatUsage: Codable, Equatable, Sendable {
         try c.encodeIfPresent(completionTokens, forKey: .completionTokens)
         try c.encodeIfPresent(totalTokens, forKey: .totalTokens)
         try c.encodeIfPresent(cost, forKey: .cost)
+        try c.encodeIfPresent(costSubtotal, forKey: .costSubtotal)
+        try c.encodeIfPresent(requestCount, forKey: .requestCount)
+        try c.encodeIfPresent(unpricedRequestCount, forKey: .unpricedRequestCount)
         try c.encodeIfPresent(cachedTokens, forKey: .cachedTokens)
         try c.encodeIfPresent(reasoningTokens, forKey: .reasoningTokens)
         try c.encodeIfPresent(audioTokens, forKey: .audioTokens)

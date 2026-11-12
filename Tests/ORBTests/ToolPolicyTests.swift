@@ -98,11 +98,11 @@ struct ToolPolicyTests {
         #expect(policy.allowsExecution(name: "mcp__get_prompt") == false)
     }
 
-    @Test("bridge names are parseable and sanitize the server like tool names")
+    @Test("bridge names use the same collision-free server key as tool names")
     func bridgeNamesResolve() throws {
         let name = MCPToolNaming.readResourceTool(server: "File System")
         let route = try #require(MCPToolNaming.resolve(name))
-        #expect(route.server == MCPToolNaming.sanitize("File System"))
+        #expect(route.server == MCPToolNaming.serverKey("File System"))
         #expect(route.tool == "read_resource")
         #expect(MCPToolNaming.bridge(forTool: route.tool) == .readResource)
         #expect(MCPToolNaming.bridge(forTool: "echo") == nil)

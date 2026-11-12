@@ -234,6 +234,8 @@ final class VideoGenService: ObservableObject {
     @Published var jobError: String?
 
     private let transport: MediaTransport
+    /// The service, not a transient view caller, owns the shared refresh.
+    private var modelsTask: Task<Void, Never>?
     /// Application-owned durable job state (W06). Injectable so tests can
     /// isolate storage; the default view path uses the shared controller so
     /// job records survive navigation and app restarts.
@@ -255,6 +257,9 @@ final class VideoGenService: ObservableObject {
     /// Remote IDs whose result is being downloaded+saved right now.
     @Published private(set) var downloadingRemoteIDs: Set<String> = []
     private var downloadTasks: [String: Task<SavedCreation, Error>] = [:]
+    /// Complete downloads whose local save failed. Keep the URL available for
+    /// export, and reuse the bytes on retry instead of downloading again.
+    @Published private(set) var retainedDownloads: [String: (file: URL, mimeType: String)] = [:]
 
     init(
         transport: MediaTransport = MediaTransport(),
@@ -269,19 +274,29 @@ final class VideoGenService: ObservableObject {
     }
 
     func fetchModels() async {
-        guard !isLoadingModels else { return }
+        if let modelsTask {
+            await modelsTask.value
+            return
+        }
         isLoadingModels = true
         modelsError = nil
-        defer { isLoadingModels = false }
-        do {
-            let request = try transport.request(path: "videos/models")
-            let list: VideoGenModelList = try await transport.send(request)
-            models = list.data.sorted { $0.name < $1.name }
-        } catch is CancellationError {
-            // Leave prior models in place; a cancelled refresh is not an error.
-        } catch {
-            modelsError = error.localizedDescription
+        let task = Task { @MainActor in
+            defer {
+                isLoadingModels = false
+                modelsTask = nil
+            }
+            do {
+                let request = try transport.request(path: "videos/models")
+                let list: VideoGenModelList = try await transport.send(request)
+                models = list.data.sorted { $0.name < $1.name }
+            } catch is CancellationError {
+                // Preserve prior models. View cancellation does not cancel this task.
+            } catch {
+                modelsError = error.localizedDescription
+            }
         }
+        modelsTask = task
+        await task.value
     }
 
     /// Submits the job, then polls until it reaches a terminal status.
@@ -388,7 +403,7 @@ final class VideoGenService: ObservableObject {
         // goes to the canonical `videos/<remoteID>` route (or the record's
         // stored polling URL after origin validation) exactly like an
         // uninterrupted poll would.
-        let initial = VideoJob(id: remoteID, status: record.lastRemoteStatus ?? "queued")
+        let initial = VideoJob(id: remoteID, status: record.lastRemoteStatus ?? "queued", cost: record.usageCost)
         onUpdate(initial)
         return try await runOwnedPollLoop(
             from: initial, modelID: record.modelID ?? "unknown",
@@ -452,7 +467,16 @@ final class VideoGenService: ObservableObject {
             try Task.checkCancellation()
             do {
                 let next: VideoJob = try await transport.send(pollRequest(for: job))
-                job = next
+                // Identity must be checked before replacing state, following a
+                // polling URL, publishing progress, persisting, or accounting.
+                guard next.id == initial.id else {
+                    throw MediaServiceError.decoding("The poll response belongs to a different video job.")
+                }
+                // Polls are sparse snapshots. Omitted cost keeps the last known
+                // price; a reported zero is a real update, never an omission.
+                job = VideoJob(id: next.id, status: next.status, pollingURL: next.pollingURL,
+                               generationId: next.generationId, unsignedURLs: next.unsignedURLs,
+                               error: next.error, cost: next.cost ?? job.cost)
                 consecutiveFailures = 0
             } catch is CancellationError {
                 throw CancellationError()
@@ -553,16 +577,28 @@ final class VideoGenService: ObservableObject {
         if let running = downloadTasks[remoteID] { return try await running.value }
         let record = jobController.record(remoteID: remoteID)
         let task = Task<SavedCreation, Error> { @MainActor in
-            let (file, mime) = try await downloadToFile(remoteID: remoteID)
+            let file: URL
+            let mime: String
+            if let retained = retainedDownloads[remoteID],
+               FileManager.default.fileExists(atPath: retained.file.path) {
+                (file, mime) = (retained.file, retained.mimeType)
+            } else {
+                retainedDownloads[remoteID] = nil
+                (file, mime) = try await downloadToFile(remoteID: remoteID)
+            }
+            // Transfer ownership before the outer manifest save can fail.
+            retainedDownloads[remoteID] = (file, mime)
             do {
                 let creation = try await store.save(
                     fileAt: file, mimeType: mime, kind: .video,
                     modelID: record?.modelID ?? "unknown", prompt: record?.prompt
                 )
+                retainedDownloads[remoteID] = nil
                 jobController.recordSavedCreation(remoteID: remoteID, creationID: creation.id)
                 return creation
             } catch {
-                try? FileManager.default.removeItem(at: file)
+                // SavedCreations preserves this file until both storage commits.
+                // Retain our ownership for the next Retry or an explicit export.
                 throw error
             }
         }

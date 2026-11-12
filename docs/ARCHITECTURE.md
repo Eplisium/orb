@@ -56,29 +56,33 @@ There are no third-party dependencies. The app uses only Apple frameworks: Swift
 - `ChatService` coordinates Chat and Agent sessions, run state, publish coalescing (`StreamPublishCoalescer`), reasoning timing, and persistence.
 - `NativeAgentRunner` runs the function-calling loop: it streams a turn, normalizes and validates tool calls (`ToolArgumentNormalizer`), checks the policy, asks for approval, executes, and feeds results back. When the turn budget runs out, it makes one final tool-free summary turn rather than discarding the run.
 - `NativeAgentTools` implements the native tools: files, cancellable process-group shell commands, AppleScript, screen capture, input events, memory, and planning.
-- `Core/Security/ToolPolicy` is the single deny-by-default capability policy. It controls both which tools are offered and which calls execute. `WorkspacePathGuard` confines ORB's own file tools. `ApprovalCoordinator` is a fail-closed actor for per-call approvals.
-- `MCPConnection` (actor) is a JSON-RPC client for a stdio subprocess. `MCPRegistry` manages server lifecycle, tool and resource bridging, and Keychain secret references.
+- `Core/Security/ToolPolicy` is the single deny-by-default capability policy. It controls both which tools are offered and which calls execute. `WorkspacePathGuard` confines ORB's own file tools, not shell commands. A missing `ApprovalCoordinator` denies gated calls unless the Agent caller explicitly selects OP Mode auto-approval. Test Suite uses a fresh approval coordinator for each model run and denies calls when its UI is unavailable.
+- `MCPConnection` (actor) is a JSON-RPC client for a stdio subprocess. An ordered nonblocking writer keeps cancellation/deadlines independent of a stalled reader; interrupted partial frames close the transport rather than corrupting later messages. `MCPRegistry` reconciles complete launch configurations and rejects obsolete startup/RPC results. Bounded collision-resistant server/tool keys fit provider naming limits; actual RPC names are recovered from advertised descriptors. Legacy Keychain secret references are unchanged.
 - `MessageTranscript` stores the presentation-only order of reasoning, text, and tool segments. It is kept separate from the wire `content` and `reasoning_details`.
 
 ### Generate studio and media
 
 - `MediaServices` has clients for images, video, audio, files, and embeddings/rerank. `MediaEndpointURL` validates every polling URL against `https://openrouter.ai/api/…` before attaching credentials.
 - `Core/Jobs/JobController` keeps a durable record of each video job before polling starts, so jobs can resume after relaunch without being submitted (and paid for) again.
-- `Core/Assets/AssetStore` provides content-addressed (SHA-256) atomic writes. `SavedCreations` indexes outputs for the Library.
+- `Core/Assets/AssetStore` provides content-addressed (SHA-256) atomic writes. `SavedCreations` indexes outputs for the Library. Streamed input files are consumed only after both metadata and Library index commits; failures retain the service-owned download for retry/export. Video polling validates the expected job ID before updating state and merges absent cost from the previous/durable job.
 
 ### Credentials
 
 - `Core/Auth/CredentialStore` separates the inference and management roles into different Keychain accounts.
-- `KeychainOpenAccess` holds the current Keychain service. It reads older items at most once and never modifies them.
+- `KeychainOpenAccess` holds the current Keychain service. Legacy migration runs only after a confirmed missing current item; denied, unavailable, or malformed reads cannot replace current credentials or tombstones. Migration mirrors with add-only semantics. Opaque per-reference revisions invalidate account data and late responses across service instances without exposing credentials.
 - `PKCECoordinator` handles browser sign-in with S256 PKCE over a loopback callback. It fails closed on replay or on an origin, path, or state mismatch.
 
 ### Persistence
 
 `DatabaseManager` owns `~/Library/Application Support/ORB/favorites.sqlite3` (WAL mode). Migrations are idempotent (`CREATE TABLE IF NOT EXISTS` plus `addColumnIfMissing`) and versioned through `PRAGMA user_version`. If a database file fails to open, it is moved aside and the app continues with a temporary database. Under tests the manager isolates itself to a temporary database on its own.
 
+Conversation loads use checked SQLite reads: preparation and mid-iteration failures cannot masquerade as empty transcripts. Edit truncation publishes memory only after a transactional replacement save. SQLite text is bound/read with explicit UTF-8 lengths, including embedded NULs.
+
+`AgentUsageAccumulator` adds model-turn usage and keeps missing cost sticky across turns. Paid web-search helpers create separate `Agent Web Search` ledger events, avoiding double counting in the model-run event. `UsageLedger` retains rejected writes in a visible in-memory retry queue with stable event IDs; this is not a durable outbox.
+
 ### Experiments
 
-`TestScenarios`, `TestRunner`, and `Experiments/ExperimentEvaluation` keep two things apart. *Completion status* says whether the run finished. The *verdict* says whether deterministic artifact checks passed. A text answer alone is never marked as passed, and spend ceilings are enforced in dollars between requests.
+`TestScenarios`, `TestRunner`, and `Experiments/ExperimentEvaluation` keep two things apart. *Completion status* says whether the run finished. The *verdict* says whether deterministic artifact checks passed. A text answer alone is never marked as passed, and spend ceilings check reported model-plus-helper dollars between model runs. They are not hard provider budgets. Model usage and task-local helper accounting remain separate ledger charges; any unknown component stops a budgeted batch while known subtotals are preserved.
 
 ## Testing approach
 

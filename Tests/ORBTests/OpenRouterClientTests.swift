@@ -228,6 +228,22 @@ struct OpenRouterClientTests {
         }
     }
 
+    @Test("B08: exhausted retries safely format an oversized final Retry-After")
+    func oversizedFinalRetryDescription() async throws {
+        let body = Data("{\"error\":{\"message\":\"busy\"}}".utf8)
+        let transport = FixtureHTTPTransport(["0", "0", "1e100"].map {
+            .init(response: response(status: 429, headers: ["Retry-After": $0]), chunks: [.success(body)])
+        })
+        let client = OpenRouterClient(transport: transport, retryPolicy: .init(maxRetries: 2), sleeper: { _ in })
+        do {
+            _ = try await client.stream(request())
+            Issue.record("Expected final rate limit failure")
+        } catch let error as OpenRouterClientError {
+            #expect(error.localizedDescription == "OpenRouter rate limit reached. Try again shortly. busy")
+        }
+        #expect(await transport.requestCount == 3)
+    }
+
     @Test("non-transient HTTP failures do not retry")
     func doesNotRetryAuthenticationFailure() async throws {
         let error = Data("{\"error\":{\"message\":\"bad key\"}}".utf8)

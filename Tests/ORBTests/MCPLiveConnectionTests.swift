@@ -232,6 +232,41 @@ struct MCPLiveConnectionTests {
         #expect(echo.content == "ok")
     }
 
+    @Test("native reply timeout notifies the server without closing the connection",
+          .enabled(if: MCPLiveConnectionTests.nodeAvailable, "requires node (or NODE_BINARY)"),
+          .timeLimit(.minutes(1)))
+    func nativeReplyTimeoutIsScoped() async throws {
+        let connection = MCPConnection(
+            config: try #require(Self.serverConfig()), secretStore: InMemoryCredentialStore(),
+            requestTimeout: .milliseconds(800)
+        )
+        do {
+            try await connection.connect()
+            let started = ContinuousClock.now
+            do {
+                _ = try await connection.callTool(name: "hang", arguments: .object([:]))
+                Issue.record("A server that never replies must reach the native deadline")
+            } catch {
+                #expect(error as? MCPError == .timedOut("tools/call"))
+            }
+            #expect(ContinuousClock.now - started < .seconds(2))
+            #expect(await connection.isRunning)
+            var cancelled: [Int] = []
+            for _ in 0..<40 {
+                cancelled = try await Self.report(connection).cancelled
+                if !cancelled.isEmpty { break }
+                try await Task.sleep(for: .milliseconds(25))
+            }
+            #expect(cancelled.count == 1)
+            let echo = try await connection.callTool(name: "echo", arguments: .object(["message": .string("alive")]))
+            #expect(echo.content == "alive")
+            await connection.shutdown()
+        } catch {
+            await connection.shutdown()
+            throw error
+        }
+    }
+
     @Test("a bad command fails cleanly instead of hanging")
     func badCommand() async {
         let config = MCPServerConfig(name: "broken", command: "/nonexistent/binary-xyz", args: [])

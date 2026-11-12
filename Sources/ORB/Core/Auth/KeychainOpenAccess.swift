@@ -1,20 +1,11 @@
 import Foundation
 import Security
 
-// MARK: - Open ("allow all applications") keychain access
+// MARK: - ORB-only keychain access
 //
-// The legacy ACL on a generic-password item defaults to trusting the
-// *creating app's designated requirement*. ORB is rebuilt (and was ad-hoc
-// re-signed) constantly, so every rebuild was a "different app" to the
-// keychain and macOS raised the legacy "enter your login keychain password"
-// dialog — confusing, and it can never be satisfied by Touch ID.
-//
-// New items are created with a single ACL entry that trusts ALL applications
-// with no prompt (Any authorization, promptSelector 0, NULL trusted-
-// application list — the documented representation of Keychain Access's
-// "Allow all applications to access this item"). Combined with stable code
-// signing, reads never raise that dialog again. The real protections are the
-// user's login session (FileVault) and ORB's own Touch ID / password unlock.
+// The v3 store trusts the creating ORB's designated requirement. Stable code
+// signing preserves that identity across rebuilds. Dormant stores are never
+// mutated: only a confirmed missing v3 slot is eligible for one-time mirroring.
 
 enum KeychainOpenAccess {
     /// Access object for a NEW item: exactly one trusted application — this
@@ -114,11 +105,10 @@ enum KeychainSecrets {
 
     /// Accounts whose dormant copies were already attempted this install
     /// (whether allowed or denied). Prevents a denied prompt from returning
-    /// on every launch; the Settings button clears it for a manual retry.
+    /// on every launch; Settings can explicitly retry eligible missing slots.
     private static let attemptedKey = "orb.keychain.migrationAttempted"
-    private static var attempted: Set<String> {
-        get { Set(UserDefaults.standard.stringArray(forKey: attemptedKey) ?? []) }
-        set { UserDefaults.standard.set(Array(newValue).sorted(), forKey: attemptedKey) }
+    private static func attempted(in defaults: UserDefaults) -> Set<String> {
+        Set(defaults.stringArray(forKey: attemptedKey) ?? [])
     }
 
     /// Review-mode defaults key (mirrors `OnboardingGate.reviewModeKey`).
@@ -132,28 +122,39 @@ enum KeychainSecrets {
         defaults.bool(forKey: reviewModeKey) ? ReviewModeKeychainBackend() : SystemKeychainBackend()
     }
 
-    static func read(_ account: String, backend: KeychainBackend = KeychainSecrets.defaultBackend()) -> String? {
-        if let (data, present) = readItem(service: currentService, account: account, backend: backend) {
-            // Present-but-empty is a deletion tombstone; dormant copies must
-            // never resurrect a deleted secret.
-            return (present && !data.isEmpty) ? String(data: data, encoding: .utf8) : nil
+    static func read(
+        _ account: String,
+        backend: KeychainBackend = KeychainSecrets.defaultBackend(),
+        defaults: UserDefaults = .standard,
+        allowsLegacyReads: Bool = KeychainGate.allowsLegacyReads
+    ) -> String? {
+        switch readItem(service: currentService, account: account, backend: backend) {
+        case .present(let data):
+            // Empty is a deletion tombstone, not an absent item.
+            return data.isEmpty ? nil : String(data: data, encoding: .utf8)
+        case .unavailable:
+            return nil // A denied/failed read never authorizes migration.
+        case .missing:
+            guard allowsLegacyReads, !attempted(in: defaults).contains(account) else { return nil }
+            return mirrorFromDormant(account, backend: backend, defaults: defaults)
         }
-        guard KeychainGate.allowsLegacyReads, !attempted.contains(account) else { return nil }
-        return mirrorFromDormant(account, backend: backend)
     }
 
-    /// Reads each dormant copy at most once (the only operation that can
-    /// raise a system dialog — "Always Allow" once), then writes the value
-    /// into v3. Dormant items are never modified or deleted.
-    private static func mirrorFromDormant(_ account: String, backend: KeychainBackend = KeychainSecrets.defaultBackend()) -> String? {
-        var seen = attempted
+    /// Mirrors only into a confirmed missing slot. ADD (never update) also
+    /// protects a replacement/tombstone created after the absence check.
+    private static func mirrorFromDormant(_ account: String, backend: KeychainBackend, defaults: UserDefaults) -> String? {
+        guard case .missing = readItem(service: currentService, account: account, backend: backend) else { return nil }
+        var seen = attempted(in: defaults)
         seen.insert(account)
-        attempted = seen // record BEFORE the read: a crash/deny can't loop
+        defaults.set(Array(seen).sorted(), forKey: attemptedKey) // record before a possibly denied prompt
         for service in dormantServices {
-            guard let (data, present) = readItem(service: service, account: account, backend: backend),
-                  present, !data.isEmpty,
-                  let value = String(data: data, encoding: .utf8) else { continue }
-            if save(account, value, backend: backend) == nil { return value }
+            guard case .present(let data) = readItem(service: service, account: account, backend: backend),
+                  !data.isEmpty, let value = String(data: data, encoding: .utf8) else { continue }
+            // A duplicate means another writer owns this slot; do not replace
+            // it, return the dormant value, or try an even older credential.
+            guard backend.add(newItem(account, data: data)) == errSecSuccess else { return nil }
+            CredentialChanges.keychain.recordChange(for: account)
+            return value
         }
         return nil
     }
@@ -202,26 +203,35 @@ enum KeychainSecrets {
         guard let data = value.data(using: .utf8) else { return "Could not encode key as UTF-8." }
         guard !data.isEmpty else { return "Key is empty." } // empty data is the tombstone
         let status = write(account, data: data, backend: backend)
-        return status == errSecSuccess ? nil : "Keychain error \(status)."
+        guard status == errSecSuccess else { return "Keychain error \(status)." }
+        CredentialChanges.keychain.recordChange(for: account)
+        return nil
     }
 
     /// Replace the value with an empty tombstone so a dormant copy can't
     /// resurrect it. Returns true only when the credential is verified gone
-    /// (v3 item reads back empty); on any failure the previous value remains.
+    /// (v3 item reads back empty). A failed write preserves the old value;
+    /// a failed readback reports uncertainty, never a verified removal.
     @discardableResult
     static func delete(_ account: String, backend: KeychainBackend = KeychainSecrets.defaultBackend()) -> Bool {
         guard write(account, data: Data(), backend: backend) == errSecSuccess else { return false }
-        return !exists(account, backend: backend)
+        // Successful writes invalidate consumers even when verification is
+        // unavailable; do not leave an old account response publishable.
+        CredentialChanges.keychain.recordChange(for: account)
+        guard case .present(let data) = readItem(service: currentService, account: account, backend: backend) else { return false }
+        return data.isEmpty
     }
 
     /// Existence check. Prompt-free for ORB itself: the v3 item trusts this
     /// app, and dormant items are matched by metadata only. The v3 lookup
     /// does fetch the value, because an empty value is a deletion tombstone.
     static func exists(_ account: String, backend: KeychainBackend = KeychainSecrets.defaultBackend()) -> Bool {
-        if let (data, present) = readItem(service: currentService, account: account, backend: backend) {
-            return present && !data.isEmpty
+        switch readItem(service: currentService, account: account, backend: backend) {
+        case .present(let data): return !data.isEmpty
+        case .unavailable: return false
+        case .missing:
+            return dormantServices.contains { dormantExists(service: $0, account: account, backend: backend) }
         }
-        return dormantServices.contains { dormantExists(service: $0, account: account, backend: backend) }
     }
 
     private static func dormantExists(service: String, account: String, backend: KeychainBackend) -> Bool {
@@ -257,28 +267,43 @@ enum KeychainSecrets {
 
     /// Accounts with a dormant copy but no v3 item yet (tombstones count as
     /// migrated). Prompt-free.
-    static func pendingLegacyAccounts() -> [String] {
-        legacyAccounts().filter { readItem(service: currentService, account: $0) == nil }
+    static func pendingLegacyAccounts(backend: KeychainBackend = KeychainSecrets.defaultBackend()) -> [String] {
+        legacyAccounts(backend: backend).filter {
+            if case .missing = readItem(service: currentService, account: $0, backend: backend) { return true }
+            return false
+        }
     }
 
     /// Batch migration. `force` (the Settings button) ignores the
     /// already-attempted memory so a previously denied prompt can be retried.
     @discardableResult
-    static func migrateAllLegacy(force: Bool = false) -> [String] {
-        guard KeychainGate.allowsLegacyReads else { return [] }
-        if force { attempted = [] }
+    static func migrateAllLegacy(
+        force: Bool = false,
+        backend: KeychainBackend = KeychainSecrets.defaultBackend(),
+        defaults: UserDefaults = .standard,
+        allowsLegacyReads: Bool = KeychainGate.allowsLegacyReads
+    ) -> [String] {
+        guard allowsLegacyReads else { return [] }
         var migrated: [String] = []
-        for account in pendingLegacyAccounts() where force || !attempted.contains(account) {
-            if mirrorFromDormant(account) != nil { migrated.append(account) }
+        // Force retries eligible missing items, never erases attempt history
+        // for current items whose read is temporarily unavailable.
+        for account in pendingLegacyAccounts(backend: backend) where force || !attempted(in: defaults).contains(account) {
+            if mirrorFromDormant(account, backend: backend, defaults: defaults) != nil { migrated.append(account) }
         }
         return migrated
     }
 
     // MARK: Raw item operations
 
-    /// (data, itemPresent) — distinguishes "absent" from "present but empty".
-    /// Any failure (including a denied read) reports as absent.
-    private static func readItem(service: String, account: String, backend: KeychainBackend = KeychainSecrets.defaultBackend()) -> (Data, Bool)? {
+    private enum ItemRead {
+        case present(Data)
+        case missing
+        case unavailable(OSStatus)
+    }
+
+    /// Only errSecItemNotFound establishes absence. Denied reads and malformed
+    /// success payloads must not authorize migration or verify deletion.
+    private static func readItem(service: String, account: String, backend: KeychainBackend) -> ItemRead {
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
@@ -287,7 +312,9 @@ enum KeychainSecrets {
             kSecMatchLimit as String: kSecMatchLimitOne,
         ]
         let (status, result) = backend.copyMatching(query)
-        guard status == errSecSuccess else { return nil }
-        return (result as? Data ?? Data(), true)
+        if status == errSecItemNotFound { return .missing }
+        guard status == errSecSuccess else { return .unavailable(status) }
+        guard let data = result as? Data else { return .unavailable(errSecDecode) }
+        return .present(data)
     }
 }

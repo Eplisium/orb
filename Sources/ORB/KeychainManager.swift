@@ -4,10 +4,10 @@ import Security
 
 /// Secure storage for the OpenRouter API key using macOS Keychain.
 ///
-/// All mechanics live in `KeychainSecrets`: saves go to the open-access v2
-/// service (prompt-free), and any item left by an older build under the
-/// legacy service is read at most once to mirror it across, then never
-/// touched again. No operation raises the legacy keychain dialogs.
+/// All mechanics live in `KeychainSecrets`: saves use the ORB-only v3
+/// service and publish opaque store revisions. Dormant items may be read
+/// once to fill a confirmed missing slot, but are never modified. A failed
+/// current-item read must never authorize migration over it.
 enum KeychainManager {
     private static let account = "openrouter-api-key"
 

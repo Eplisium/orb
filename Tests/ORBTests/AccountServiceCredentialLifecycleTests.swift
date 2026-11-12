@@ -65,6 +65,108 @@ struct AccountServiceCredentialLifecycleTests {
         return (svc, store)
     }
 
+    @Test("replacement in another window clears already loaded credits and activity")
+    func crossInstanceLoadedData() async {
+        let store = InMemoryCredentialStore()
+        _ = store.saveSecret("A", forReference: ref)
+        let loader: AccountService.DataLoader = { request in
+            let body = request.url?.lastPathComponent == "credits" ? credits(100) : activity("model-a")
+            return (Data(body.utf8), HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!)
+        }
+        let first = AccountService(secretStore: store, dataLoader: loader)
+        let second = AccountService(secretStore: store, dataLoader: loader)
+        await first.fetchCredits()
+        await first.fetchActivity()
+        #expect(first.credits != nil)
+        #expect(!first.activity.isEmpty)
+        let revision = first.credentialRevision
+        #expect(second.setManagementKey("B") == nil)
+        // No window-focus or manual refresh required.
+        #expect(first.credits == nil)
+        #expect(first.activity.isEmpty)
+        #expect(first.hasManagementKey)
+        #expect(first.credentialRevision != revision)
+    }
+
+    @Test("other-window replacement drops late credits, activity, and failures", arguments: [false, true])
+    func crossInstanceLateResponses(failOld: Bool) async {
+        let loader = LifecycleGatedLoader()
+        let (first, store) = make(loader)
+        let second = AccountService(secretStore: store)
+        let oldCredits = Task { await first.fetchCredits() }
+        let oldActivity = Task { await first.fetchActivity() }
+        await waitUntil(loader.isPending("A") && loader.isPending("A", "activity"))
+        #expect(second.setManagementKey("B") == nil)
+        let newCredits = Task { await first.fetchCredits() }
+        let newActivity = Task { await first.fetchActivity() }
+        await waitUntil(loader.isPending("B") && loader.isPending("B", "activity"))
+        loader.finish("A", body: failOld ? "invalid" : credits(100))
+        loader.finish("A", "activity", body: failOld ? "invalid" : activity("model-a"))
+        await oldCredits.value
+        await oldActivity.value
+        #expect(first.credits == nil)
+        #expect(first.activity.isEmpty)
+        #expect(first.creditsError == nil)
+        #expect(first.activityError == nil)
+        #expect(first.isLoadingCredits)
+        #expect(first.isLoadingActivity)
+        loader.finish("B", body: credits(200))
+        loader.finish("B", "activity", body: activity("model-b"))
+        await newCredits.value
+        await newActivity.value
+        #expect(first.credits?.totalCredits == 200)
+        #expect(first.activity.map(\.model) == ["model-b"])
+    }
+
+    @Test("other-window removal invalidates in-flight account data")
+    func crossInstanceRemoval() async {
+        let loader = LifecycleGatedLoader()
+        let (first, store) = make(loader)
+        let second = AccountService(secretStore: store)
+        let pending = Task { await first.fetchCredits() }
+        await waitUntil(loader.isPending("A"))
+        #expect(second.removeManagementKey() == nil)
+        #expect(!first.hasManagementKey)
+        #expect(!first.isLoadingCredits)
+        loader.finish("A", body: credits(100))
+        await pending.value
+        #expect(first.credits == nil)
+    }
+
+    @Test("direct shared-store writes invalidate, unrelated references and stores do not")
+    func scopedStoreRevisions() async {
+        let store = InMemoryCredentialStore()
+        _ = store.saveSecret("A", forReference: ref)
+        let first = AccountService(secretStore: store) { request in
+            (Data(credits(100).utf8), HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!)
+        }
+        await first.fetchCredits()
+        let revision = first.credentialRevision
+        _ = store.saveSecret("inference-fixture", forReference: CredentialRole.inference.keychainAccount)
+        _ = InMemoryCredentialStore().saveSecret("B", forReference: ref)
+        #expect(first.credits != nil)
+        #expect(first.credentialRevision == revision)
+        _ = store.saveSecret("B", forReference: ref)
+        #expect(first.credits == nil)
+        #expect(first.credentialRevision != revision)
+    }
+
+    @Test("background store mutation invalidates a suspended response")
+    func backgroundStoreReplacement() async {
+        let loader = LifecycleGatedLoader()
+        let (first, store) = make(loader)
+        let pending = Task { await first.fetchCredits() }
+        await waitUntil(loader.isPending("A"))
+        let reference = ref
+        await Task.detached { _ = store.saveSecret("B", forReference: reference) }.value
+        loader.finish("A", body: credits(100))
+        await pending.value
+        #expect(first.credits == nil)
+        #expect(first.creditsError == nil)
+        #expect(!first.isLoadingCredits)
+        #expect(first.hasManagementKey)
+    }
+
     // MARK: Bug 2 — stale responses
 
     @Test("credits: a slow response for a replaced key never overwrites the new account")

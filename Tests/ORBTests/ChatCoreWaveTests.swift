@@ -64,7 +64,9 @@ final class CountingConversationStore: ConversationStore {
     var messageSaves: [Set<UUID>] = []
 
     func loadRecords() throws -> [StoredConversation] { Array(records.values) }
+    var saveError: String?
     func saveRecord(_ record: StoredConversation) throws {
+        if let saveError { throw CountingStoreError.remove(saveError) }
         fullSaves += 1
         records[record.conversation.id] = record
     }
@@ -119,15 +121,15 @@ struct AgentMCPPolicyTests {
         MCPServerConfig(name: "off", command: "true", isEnabled: false),
     ]
 
-    @Test("agentSession approves enabled servers by sanitized slug, only with computer access")
+    @Test("agentSession approves enabled servers by collision-free identity, only with computer access")
     func policyFromConfigs() {
         let full = ToolPolicy.agentSession(fullComputerAccess: true, mcpServers: servers)
-        #expect(full.approvedMCPServers == ["File-System"])
-        #expect(full.allowsDefinition(name: "mcp__File-System__read"))
+        #expect(full.approvedMCPServers == [MCPToolNaming.serverKey("File System")])
+        #expect(full.allowsDefinition(name: MCPToolNaming.qualify(server: "File System", tool: "read")))
         #expect(!full.allowsDefinition(name: "mcp__off__read"))
         let webOnly = ToolPolicy.agentSession(fullComputerAccess: false, mcpServers: servers)
         #expect(webOnly.approvedMCPServers.isEmpty)
-        #expect(!webOnly.allowsDefinition(name: "mcp__File-System__read"))
+        #expect(!webOnly.allowsDefinition(name: MCPToolNaming.qualify(server: "File System", tool: "read")))
     }
 
     @Test("sendAgentMessage passes a policy populated from MCP settings into the run")
@@ -139,7 +141,7 @@ struct AgentMCPPolicyTests {
         )
         await service.sendAgentMessage("hi", modelId: "test/model", workspace: workspace, fullComputerAccess: true)
         try await waitUntilIdle(service)
-        #expect(service.lastAgentPolicy?.approvedMCPServers == ["File-System"])
+        #expect(service.lastAgentPolicy?.approvedMCPServers == [MCPToolNaming.serverKey("File System")])
         #expect(service.lastAgentPolicy?.capabilities.contains(.mcp) == true)
     }
 }
@@ -605,20 +607,18 @@ struct EditResendTests {
         #expect(store.records[service.activeConversation!.id]?.conversation.messages.last?.status == .interrupted)
     }
 
-    @Test("a failed removal aborts the send instead of interleaving turns")
+    @Test("a failed atomic replacement aborts the send instead of interleaving turns")
     func failedRemovalAbortsTheSend() async throws {
         let store = CountingConversationStore()
-        store.removeError = "database is locked"
         let client = WaveScriptedClient([])
         let service = ChatService(client: client, store: store, apiKeyProvider: { "fixture" })
         service.sendMessage("a", modelId: "test/model")
         try await waitUntilIdle(service)
-        store.removeError = nil
         service.sendMessage("b", modelId: "test/model")
         try await waitUntilIdle(service)
         let conversation = try #require(service.activeConversation)
         let edit = try #require(service.beginEdit(from: conversation.messages[0].id, in: conversation.id))
-        store.removeError = "database is locked"
+        store.saveError = "database is locked"
 
         service.sendMessage("a2", modelId: "test/model", replacing: edit)
         try await waitUntilIdle(service)

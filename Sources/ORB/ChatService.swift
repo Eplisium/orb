@@ -68,6 +68,8 @@ final class ChatService: ObservableObject {
     private let store: any ConversationStore
     private let apiKeyProvider: () -> String?
     private let agentMaximumTurns: Int
+    /// Nil uses the app ledger; tests can inject an in-memory event sink.
+    private let usageLedger: UsageLedger?
     /// Source of MCP server configs for the Agent tool policy. Injected so
     /// tests never read the user's real MCP settings.
     let mcpServerProvider: () -> [MCPServerConfig]
@@ -116,13 +118,15 @@ final class ChatService: ObservableObject {
         apiKeyProvider: @escaping () -> String?,
         agentMaximumTurns: Int = 100,
         mcpServerProvider: @escaping () -> [MCPServerConfig] = { [] },
-        loadMode: PlaygroundMode? = nil
+        loadMode: PlaygroundMode? = nil,
+        usageLedger: UsageLedger? = nil
     ) {
         self.loadMode = loadMode
         self.client = client
         self.store = store
         self.apiKeyProvider = apiKeyProvider
         self.agentMaximumTurns = agentMaximumTurns
+        self.usageLedger = usageLedger
         self.mcpServerProvider = mcpServerProvider
         installApprovalHandler()
         loadPersistedConversations()
@@ -321,17 +325,21 @@ final class ChatService: ObservableObject {
               let cut = conversations[index].messages.firstIndex(where: { $0.id == messageID }),
               conversations[index].messages[cut].role == "user" else { return nil }
         let text = conversations[index].messages[cut].content
-        let dropped = conversations[index].messages[cut...].map(\.id)
+        var replacement = conversations[index]
+        replacement.messages.removeSubrange(cut...)
+        let history = agentHistory(for: replacement)
         do {
-            for id in dropped { try store.removeMessage(id) }
+            // saveRecord replaces the full record in one transaction. Never
+            // delete individual rows first: a later failure must preserve all
+            // messages and history, both on disk and in the published state.
+            try store.saveRecord(.init(conversation: replacement, agentHistory: history))
         } catch {
             lastError = "Could not edit the conversation: \(error.localizedDescription)"
             return nil
         }
-        conversations[index].messages.removeSubrange(cut...)
-        rebuildAgentHistory(for: conversationID)
+        conversations[index] = replacement
+        agentHistories[conversationID] = history
         synchronizeActive(conversationID)
-        do { try saveRecord(conversationID) } catch { lastError = "Could not edit the conversation: \(error.localizedDescription)" }
         return text
     }
 
@@ -665,7 +673,9 @@ final class ChatService: ObservableObject {
     /// janked layout on longer answers.
     private func publish(content: String, context: PlaygroundRunContext) {
         guard owns(context.runID), mutateMessage(context, mutation: { message in
-            let delta = String(content.dropFirst(message.content.count))
+            // A later delta can extend the last grapheme (accent, ZWJ, CRLF).
+            // Scalar offsets preserve the exact suffix without normalization.
+            let delta = String(content.unicodeScalars.dropFirst(message.content.unicodeScalars.count))
             message.recordTranscript(.text, text: delta)
             message.content = content
         }) else { return }
@@ -707,7 +717,7 @@ final class ChatService: ObservableObject {
     private func publishReasoning(_ reasoning: String, context: PlaygroundRunContext) {
         guard owns(context.runID) else { return }
         _ = mutateMessage(context, mutation: { message in
-            let delta = String(reasoning.dropFirst((message.reasoning ?? "").count))
+            let delta = String(reasoning.unicodeScalars.dropFirst((message.reasoning ?? "").unicodeScalars.count))
             message.recordTranscript(.reasoning, text: delta)
             message.reasoning = reasoning
         })
@@ -778,16 +788,16 @@ final class ChatService: ObservableObject {
 
     private func apply(usage: ChatUsage?, to context: PlaygroundRunContext) {
         let index = conversations.firstIndex(where: { $0.id == context.conversationID })
-        // Every run gets exactly one ledger row keyed by its run id — even a
-        // run whose provider sent no usage block happened, and its spend is
-        // unknown ("unpriced"), never zero.
-        UsageLedger.shared.record(context.mode == .agent ? .agent : .chat,
+        // Stable run IDs keep model accounting idempotent. Mixed Agent usage
+        // gets separate priced/unpriced rows, retaining its known lower bound
+        // and request counts without re-recording independently billed helpers.
+        (usageLedger ?? .shared).record(context.mode == .agent ? .agent : .chat,
                                   model: index.map { conversations[$0].modelId } ?? "",
                                   usage: usage,
                                   eventID: context.runID.uuidString)
         guard let usage, let index else { return }
         lastUsage = usage
-        conversations[index].totalCost += usage.cost ?? 0
+        conversations[index].totalCost += usage.knownCostSubtotal
         conversations[index].totalTokens += usage.totalTokens ?? 0
         let elapsed = max(Date().timeIntervalSince(context.startedAt), 0.001)
         if let completion = usage.completionTokens {
@@ -1010,6 +1020,7 @@ final class ChatService: ObservableObject {
                     maximumTurns: self.agentMaximumTurns,
                     policy: policy,
                     approvals: OPMode.approvals(self.approvals),
+                    missingApproval: OPMode.isEnabled() ? .autoApprove : .deny,
                     settings: settings,
                     orbControl: orbControl,
                     onEvent: { event in
@@ -1030,7 +1041,7 @@ final class ChatService: ObservableObject {
                     ? visibleResponse + "\n\n---\n_Note: this run reached its tool-call budget, so the summary above may be incomplete._"
                     : visibleResponse
                 _ = self.mutateMessage(context, mutation: { message in
-                    message.recordTranscript(.text, text: String(body.dropFirst(message.content.count)))
+                    message.recordTranscript(.text, text: String(body.unicodeScalars.dropFirst(message.content.unicodeScalars.count)))
                     message.content = body
                 })
                 self.synchronizeActive(context.conversationID)
@@ -1056,10 +1067,15 @@ final class ChatService: ObservableObject {
     }
 
     private func receiveAgent(_ event: NativeAgentEvent, context: PlaygroundRunContext, at arrival: Date = Date()) {
-        guard owns(context.runID), !Task.isCancelled else { return }
-        switch event {
-        case .usage(_, let cumulative):
+        guard owns(context.runID) else { return }
+        // Cancellation suppresses UI deltas, not billing already received by
+        // an attempted model request. Cleanup persists this final snapshot.
+        if case .usage(_, let cumulative) = event {
             agentCumulativeUsage = cumulative
+            return
+        }
+        guard !Task.isCancelled else { return }
+        switch event {
         case .modelTurnStarted:
             flushAgentStreams()
             freezeReasoningDuration(context, at: arrival)
@@ -1208,7 +1224,9 @@ final class ChatService: ObservableObject {
     private func publishAgentContent(_ content: String, context: PlaygroundRunContext) {
         guard owns(context.runID) else { return }
         _ = mutateMessage(context, mutation: { message in
-            let delta = String(content.dropFirst(message.content.count))
+            // A later delta can extend the last grapheme (accent, ZWJ, CRLF).
+            // Scalar offsets preserve the exact suffix without normalization.
+            let delta = String(content.unicodeScalars.dropFirst(message.content.unicodeScalars.count))
             message.recordTranscript(.text, text: delta)
             message.content = content
         })
@@ -1290,6 +1308,10 @@ final class ChatService: ObservableObject {
 
     private func rebuildAgentHistory(for conversationID: UUID) {
         guard let conversation = conversations.first(where: { $0.id == conversationID }) else { return }
+        agentHistories[conversationID] = agentHistory(for: conversation)
+    }
+
+    private func agentHistory(for conversation: ChatConversation) -> [AgentAPIMessage] {
         let toolResults = conversation.messages.reduce(into: [String: ChatMessage]()) { results, message in
             guard message.role == "tool", let id = message.toolCallId, results[id] == nil else { return }
             results[id] = message
@@ -1331,7 +1353,7 @@ final class ChatService: ObservableObject {
                 ))
             }
         }
-        agentHistories[conversationID] = history
+        return history
     }
 
     private func persist(_ conversationID: UUID) {

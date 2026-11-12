@@ -330,6 +330,9 @@ final class FileService: ObservableObject {
         }
         let request = try transport.request(path: "files/\(id)", method: "DELETE")
         let confirmation: FileDeleteConfirmation = try await transport.send(request)
+        guard confirmation.id == id, confirmation.fileDeleted else {
+            throw MediaServiceError.decoding("The server did not confirm deletion of the requested file. Refresh the file list before trying again.")
+        }
         files.removeAll { $0.id == id }
         return confirmation
     }

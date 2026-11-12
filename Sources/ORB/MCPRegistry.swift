@@ -53,8 +53,25 @@ struct MCPSecretMigrationOutcome: Sendable, Equatable {
 actor MCPRegistry {
     static let shared = MCPRegistry()
 
+    /// Defaults remain production-backed; tests supply an isolated in-memory source.
+    private let configProvider: @Sendable () -> [MCPServerConfig]
+    /// Injectable construction also permits deterministic suspended-startup tests.
+    private let connectionFactory: @Sendable (MCPServerConfig) async -> MCPConnection
+
+    init(
+        configProvider: @escaping @Sendable () -> [MCPServerConfig] = { MCPRegistry.loadConfigs() },
+        connectionFactory: @escaping @Sendable (MCPServerConfig) async -> MCPConnection = { MCPConnection(config: $0) }
+    ) {
+        self.configProvider = configProvider
+        self.connectionFactory = connectionFactory
+    }
+
     private var connections: [String: MCPConnection] = [:]
+    /// Exact launch snapshots, not just names/UUIDs. Never log these (env may
+    /// contain plaintext credentials). A replacement UUID is a new identity.
+    private var connectedConfigs: [String: MCPServerConfig] = [:]
     private var lastErrors: [String: String] = [:]
+    private var failedConfigs: [String: MCPServerConfig] = [:]
     private var didLoad = false
 
     private static let defaultsKey = "orb.mcp.servers"
@@ -281,70 +298,132 @@ actor MCPRegistry {
         }
     }
 
-    /// Connects every enabled server. Failures are recorded per server rather
-    /// than thrown, so one broken server cannot disable the whole agent.
-    /// Passes run one at a time (`beginWork` joins any pass already running),
-    /// and `didLoad` flips only after the loop completes — a caller arriving
-    /// mid-pass waits instead of observing a half-connected world.
+    /// Reconciles every enabled server under the existing lifecycle gate.
+    /// Reload after suspension: persistence can change independently of this
+    /// actor while a process is handshaking or shutting down.
     func startEnabledServers() async {
         await beginWork()
-        let configs = Self.loadConfigs().filter(\.isEnabled)
-        let active = Set(configs.map(\.name))
-
-        for (name, connection) in connections where !active.contains(name) {
-            connections[name] = nil
-            await connection.shutdown()
-        }
-
-        for config in configs {
-            await connectLocked(config)
-        }
+        defer { endWork() }
+        await reconcileLocked()
         didLoad = true
-        endWork()
     }
 
-    /// Connects one config. Caller holds the lifecycle gate. A live connection
-    /// is kept as-is; a dead one is shut down before being replaced so its
-    /// child process can never leak, and an existing entry is never
-    /// overwritten without that shutdown.
+    /// A targeted start also reconciles already-live rows, including a renamed
+    /// config's old key. Unrelated stopped rows are not newly started.
+    private func reconcileLocked(named name: String? = nil) async {
+        let previouslyLiveNames = Set(connections.keys)
+        let previouslyLiveIDs = Set(connectedConfigs.values.map(\.id))
+        var requestedID: UUID?
+        while true {
+            let snapshot = configProvider()
+            if requestedID == nil, let name {
+                requestedID = snapshot.first { $0.name == name }?.id
+            }
+            // Names are routing keys. Match the first persisted row consistently,
+            // including a disabled first row, rather than launching duplicates.
+            var desired: [String: MCPServerConfig] = [:]
+            for config in snapshot where desired[config.name] == nil {
+                desired[config.name] = config
+            }
+            for (key, connection) in connections {
+                guard let config = desired[key], config.isEnabled,
+                      connectedConfigs[key] == config else {
+                    connections[key] = nil
+                    connectedConfigs[key] = nil
+                    lastErrors[key] = nil
+                    failedConfigs[key] = nil
+                    await connection.shutdown()
+                    continue
+                }
+            }
+            for key in Array(lastErrors.keys)
+                where desired[key]?.isEnabled != true || desired[key] != failedConfigs[key] {
+                lastErrors[key] = nil
+                failedConfigs[key] = nil
+            }
+            for config in snapshot where config.isEnabled && desired[config.name] == config {
+                if let name, config.name != name && config.id != requestedID
+                    && !previouslyLiveNames.contains(config.name) && !previouslyLiveIDs.contains(config.id) { continue }
+                await connectLocked(config)
+            }
+            // No await between this check and returning/releasing the gate.
+            // Changed configs are attempted on the next pass, never published
+            // from an obsolete startup completion.
+            if configProvider() == snapshot { return }
+        }
+    }
+
+    private func isDesired(_ config: MCPServerConfig) -> Bool {
+        config.isEnabled && configProvider().first(where: { $0.name == config.name }) == config
+    }
+
+    /// Check both identity and launch inputs after every cross-actor read/RPC.
+    /// A late result from a replaced process must not describe the new server.
+    private func isCurrentConnection(_ connection: MCPConnection, named name: String) -> Bool {
+        guard connections[name] === connection, let config = connectedConfigs[name] else { return false }
+        return isDesired(config)
+    }
+
+    /// Caller holds the lifecycle gate. Equality includes command, ordered args,
+    /// environment values, secret references, enabled state, name and UUID.
     private func connectLocked(_ config: MCPServerConfig) async {
+        guard isDesired(config) else { return }
         if let existing = connections[config.name] {
-            if await existing.isRunning { return }
+            let running = await existing.isRunning
+            if running && connectedConfigs[config.name] == config && isDesired(config) { return }
             connections[config.name] = nil
+            connectedConfigs[config.name] = nil
             await existing.shutdown()
         }
-        let connection = MCPConnection(config: config)
+        guard isDesired(config) else { return }
+        guard !config.command.isEmpty else {
+            lastErrors[config.name] = "Command is empty."
+            failedConfigs[config.name] = config
+            return
+        }
+        let connection = await connectionFactory(config)
+        guard isDesired(config) else {
+            await connection.shutdown()
+            return
+        }
         do {
             try await connection.connect()
+            guard isDesired(config) else {
+                await connection.shutdown()
+                return
+            }
             connections[config.name] = connection
+            connectedConfigs[config.name] = config
             lastErrors[config.name] = nil
+            failedConfigs[config.name] = nil
         } catch {
             await connection.shutdown()
-            lastErrors[config.name] = error.localizedDescription
+            // A failed OLD handshake must not become the new row's error.
+            if isDesired(config) {
+                lastErrors[config.name] = error.localizedDescription
+                failedConfigs[config.name] = config
+            }
         }
     }
 
-    /// Connects a single server right now (settings enable/add), so "Enabled"
-    /// is true the moment the user acts — not only after Reconnect All.
+    /// Settings enable/add/import takes effect without a relaunch. Missing or
+    /// disabled targets also reconcile, instead of leaving the old process live.
     func startServer(named name: String) async {
         await beginWork()
         defer { endWork() }
-        guard let config = Self.loadConfigs().first(where: { $0.name == name }), config.isEnabled else { return }
-        guard !config.command.isEmpty else {
-            lastErrors[name] = "Command is empty."
-            return
-        }
-        await connectLocked(config)
+        await reconcileLocked(named: name)
     }
 
     /// Shuts down a single server's connection (settings disable/remove).
     func stopServer(named name: String) async {
         await beginWork()
         defer { endWork() }
+        connectedConfigs[name] = nil
         if let existing = connections.removeValue(forKey: name) {
             await existing.shutdown()
         }
         lastErrors[name] = nil
+        failedConfigs[name] = nil
     }
 
     func shutdownAll() async {
@@ -352,6 +431,7 @@ actor MCPRegistry {
         defer { endWork() }
         let dying = connections
         connections.removeAll()
+        connectedConfigs.removeAll()
         for (_, connection) in dying { await connection.shutdown() }
     }
 
@@ -379,14 +459,16 @@ actor MCPRegistry {
 
     func availableTools() async -> [MCPToolDescriptor] {
         await ensureStarted()
+        let snapshot = connections
         var all: [MCPToolDescriptor] = []
-        for (_, connection) in connections {
-            // A crashed server stops advertising its tools (its descriptors
-            // are cleared on termination); skip anything not running.
+        for (_, connection) in snapshot {
             guard await connection.isRunning else { continue }
             all += await connection.tools
         }
-        return all.sorted { $0.qualifiedName < $1.qualifiedName }
+        let currentNames = Set(snapshot.compactMap { name, connection in
+            isCurrentConnection(connection, named: name) ? name : nil
+        })
+        return all.filter { currentNames.contains($0.serverName) }.sorted { $0.qualifiedName < $1.qualifiedName }
     }
 
     /// OpenRouter-shaped tool definitions for every connected MCP server.
@@ -396,6 +478,8 @@ actor MCPRegistry {
     /// chat model can only call tools — without this bridge the agent could see
     /// a server's resources but never read one.
     func toolDefinitions() async -> [AgentToolDefinition] {
+        await ensureStarted()
+        let snapshot = connections
         var definitions = await availableTools().map { descriptor in
             AgentToolDefinition(function: .init(
                 name: descriptor.qualifiedName,
@@ -456,29 +540,43 @@ actor MCPRegistry {
             )))
         }
 
-        return definitions
+        let currentKeys = Set(snapshot.compactMap { name, connection in
+            isCurrentConnection(connection, named: name) ? MCPToolNaming.serverKey(name) : nil
+        })
+        return definitions.filter { definition in
+            guard let route = MCPToolNaming.resolve(definition.function.name) else { return false }
+            return currentKeys.contains(route.server)
+        }
     }
 
     // MARK: - Resources and prompts
 
     func availableResources() async -> [MCPResourceDescriptor] {
         await ensureStarted()
+        let snapshot = connections
         var all: [MCPResourceDescriptor] = []
-        for (_, connection) in connections {
+        for (_, connection) in snapshot {
             guard await connection.isRunning else { continue }
             all += await connection.resources
         }
-        return all.sorted { $0.id < $1.id }
+        let currentNames = Set(snapshot.compactMap { name, connection in
+            isCurrentConnection(connection, named: name) ? name : nil
+        })
+        return all.filter { currentNames.contains($0.serverName) }.sorted { $0.id < $1.id }
     }
 
     func availablePrompts() async -> [MCPPromptDescriptor] {
         await ensureStarted()
+        let snapshot = connections
         var all: [MCPPromptDescriptor] = []
-        for (_, connection) in connections {
+        for (_, connection) in snapshot {
             guard await connection.isRunning else { continue }
             all += await connection.prompts
         }
-        return all.sorted { $0.id < $1.id }
+        let currentNames = Set(snapshot.compactMap { name, connection in
+            isCurrentConnection(connection, named: name) ? name : nil
+        })
+        return all.filter { currentNames.contains($0.serverName) }.sorted { $0.id < $1.id }
     }
 
     /// Reads a resource by URI from ONE server's connection. URIs are
@@ -488,6 +586,8 @@ actor MCPRegistry {
         guard await connection.resources.contains(where: { $0.uri == uri }) else {
             return .init(content: "No resource \(uri) is published by MCP server \"\(await connection.name)\".", isError: true)
         }
+        let server = await connection.name
+        guard isCurrentConnection(connection, named: server) else { return Self.obsoleteConnectionResult }
         do {
             let text = try await connection.readResource(uri: uri)
             return .init(content: text.isEmpty ? "(empty resource)" : text, isError: false)
@@ -500,6 +600,8 @@ actor MCPRegistry {
         guard await connection.prompts.contains(where: { $0.name == name }) else {
             return .init(content: "No prompt \(name) is published by MCP server \"\(await connection.name)\".", isError: true)
         }
+        let server = await connection.name
+        guard isCurrentConnection(connection, named: server) else { return Self.obsoleteConnectionResult }
         do {
             let text = try await connection.getPrompt(name: name, arguments: arguments)
             return .init(content: text.isEmpty ? "(empty prompt)" : text, isError: false)
@@ -509,14 +611,18 @@ actor MCPRegistry {
     }
 
     func status() async -> [(name: String, toolCount: Int, connected: Bool, error: String?)] {
+        await joinWork()
         var rows: [(String, Int, Bool, String?)] = []
-        for config in Self.loadConfigs() {
+        for config in configProvider() {
             let connection = connections[config.name]
-            let connected = await connection?.isRunning ?? false
-            let tools = connected ? (await connection?.tools.count ?? 0) : 0
+            let running = await connection?.isRunning ?? false
+            let tools = running ? (await connection?.tools.count ?? 0) : 0
             let terminationError = await connection?.lastError
-            let error = connected ? nil : (terminationError ?? lastErrors[config.name])
-            rows.append((config.name, tools, connected, error))
+            let current = connection.map { isCurrentConnection($0, named: config.name) } ?? false
+            let connected = running && current
+            let failure = failedConfigs[config.name] == config && isDesired(config) ? lastErrors[config.name] : nil
+            let error = connected ? nil : ((current ? terminationError : nil) ?? failure)
+            rows.append((config.name, connected ? tools : 0, connected, error))
         }
         return rows
     }
@@ -537,20 +643,49 @@ actor MCPRegistry {
         let parsed = JSONValue.parse(argumentsJSON)?.objectValue ?? [:]
         let bridge = MCPToolNaming.bridge(forTool: route.tool)
 
-        // The qualified name carries a sanitized server slug, so match on that.
-        let match = connections.first { name, _ in
-            MCPToolNaming.sanitize(name) == route.server
+        // Match the same collision-free key used by advertisement and policy.
+        let matches = connections.filter { name, _ in
+            MCPToolNaming.serverKey(name) == route.server
         }
+        guard matches.count <= 1 else {
+            return .init(content: "Ambiguous MCP server identity; no call was dispatched.", isError: true)
+        }
+        let match = matches.first
         guard let connection = match?.value else {
             if let bridge, let invalid = Self.invalidBridgeArguments(bridge, parsed) { return invalid }
             let detail = lastErrors
-                .first { MCPToolNaming.sanitize($0.key) == route.server }
+                .first { key, _ in
+                    MCPToolNaming.serverKey(key) == route.server
+                        && (failedConfigs[key].map { isDesired($0) } ?? false)
+                }
                 .map { " (\($0.value))" } ?? ""
             return .init(
                 content: "MCP server \"\(route.server)\" is not connected\(detail).",
                 isError: true
             )
         }
+        guard let match, isCurrentConnection(connection, named: match.key) else {
+            return Self.obsoleteConnectionResult
+        }
+        let result = await callConnected(connection, named: match.key, route: route, argumentsJSON: argumentsJSON)
+        guard isCurrentConnection(connection, named: match.key) else {
+            return Self.obsoleteConnectionResult
+        }
+        return result
+    }
+
+    private static var obsoleteConnectionResult: NativeAgentToolResult {
+        .init(content: "MCP server configuration changed or the connection was stopped; the obsolete result was discarded.", isError: true)
+    }
+
+    private func callConnected(
+        _ connection: MCPConnection,
+        named name: String,
+        route: (server: String, tool: String),
+        argumentsJSON: String
+    ) async -> NativeAgentToolResult {
+        let parsed = JSONValue.parse(argumentsJSON)?.objectValue ?? [:]
+        let bridge = MCPToolNaming.bridge(forTool: route.tool)
         // A crashed server must not receive calls (or advertise tools); say
         // why the connection is gone instead of failing per call.
         guard await connection.isRunning else {
@@ -564,7 +699,13 @@ actor MCPRegistry {
 
         // A real tool of the same name on that server takes precedence over
         // the synthetic bridge.
-        let hasRealTool = await connection.tools.contains { $0.toolName == route.tool }
+        let matchingTools = await connection.tools.filter { MCPToolNaming.toolKey($0.toolName) == route.tool }
+        guard matchingTools.count <= 1 else {
+            return .init(content: "Ambiguous MCP tool identity; no call was dispatched.", isError: true)
+        }
+        let realTool = matchingTools.first
+        let hasRealTool = realTool != nil
+        guard isCurrentConnection(connection, named: name) else { return Self.obsoleteConnectionResult }
         if let bridge, !hasRealTool {
             if let invalid = Self.invalidBridgeArguments(bridge, parsed) { return invalid }
             switch bridge {
@@ -595,7 +736,10 @@ actor MCPRegistry {
 
         let arguments = JSONValue.parse(argumentsJSON) ?? .object([:])
         do {
-            return try await connection.callTool(name: route.tool, arguments: arguments)
+            guard let realTool else {
+                return .init(content: "Unknown MCP tool on the connected server.", isError: true)
+            }
+            return try await connection.callTool(name: realTool.toolName, arguments: arguments)
         } catch {
             return .init(content: "MCP call failed: \(error.localizedDescription)", isError: true)
         }

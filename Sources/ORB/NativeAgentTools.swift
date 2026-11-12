@@ -280,12 +280,16 @@ enum NativeAgentTools {
         }
         let text = try String(contentsOf: url, encoding: .utf8)
         let lines = text.components(separatedBy: .newlines)
-        let offset = max((arguments["offset"] as? Int ?? 1) - 1, 0)
+        let oneBasedOffset = arguments["offset"] as? Int ?? 1
+        guard oneBasedOffset >= 1 else {
+            throw ToolError.message("offset must be a positive one-based line number.")
+        }
+        let offset = oneBasedOffset - 1
         let limit = min(max(arguments["limit"] as? Int ?? 400, 1), 2000)
         guard offset < lines.count else {
             return .init(content: "File has \(lines.count) lines; offset is past the end.", isError: false)
         }
-        let end = min(offset + limit, lines.count)
+        let end = offset + min(limit, lines.count - offset)
         let numbered = lines[offset..<end].enumerated().map {
             "\(offset + $0.offset + 1)|\($0.element)"
         }.joined(separator: "\n")
@@ -839,9 +843,16 @@ enum NativeAgentTools {
     /// to validate it, then asks a vision-capable chat model to describe it.
     /// The model answers in text, so even a text-only agent can now "see"
     /// its own screenshots before acting on coordinates.
-    private static func describeImage(
+    static func describeImage(
         _ arguments: [String: Any],
-        workspace: String
+        workspace: String,
+        client: any OpenRouterClientProtocol = OpenRouterClient(),
+        credential: @Sendable () -> String? = { KeychainManager.getAPIKey() },
+        recordUsage: @Sendable (ChatUsage?) async -> Void = { usage in
+            await MainActor.run {
+                UsageLedger.shared.record(.agentVision, model: "google/gemini-2.5-flash-lite", usage: usage)
+            }
+        }
     ) async throws -> NativeAgentToolResult {
         guard let rawPath = arguments["path"] as? String, !rawPath.isEmpty else {
             throw ToolError.missing("path")
@@ -860,7 +871,7 @@ enum NativeAgentTools {
         guard mime.hasPrefix("image/") else {
             throw ToolError.message("\(url.lastPathComponent) is not an image file.")
         }
-        guard let apiKey = KeychainManager.getAPIKey(), !apiKey.isEmpty else {
+        guard let apiKey = credential(), !apiKey.isEmpty else {
             throw ToolError.message("No OpenRouter API key configured. Add one in Settings → Accounts & Keys first.")
         }
         let question = (arguments["question"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -874,24 +885,29 @@ enum NativeAgentTools {
             parts: [.imageDataPart(data, mimeType: mime, detail: .high)]
         )
         let request = OpenRouterRequest(apiKey: apiKey, model: visionModel, messages: [message], settings: settings)
-        let client = OpenRouterClient()
         var text = ""
         var visionUsage: ChatUsage?
-        defer { if visionUsage != nil { Task { @MainActor in UsageLedger.shared.record(.agentVision, model: visionModel, usage: visionUsage) } } }
+        // No event for validation failures or cancellation before dispatch.
+        try Task.checkCancellation()
         do {
             let stream = try await client.stream(request)
             for try await event in stream {
                 try Task.checkCancellation()
                 if case .usage(let value) = event { visionUsage = value }
+                if case .apiError(let error) = event { throw ToolError.message(error.message) }
                 if case .contentDelta(let choice, let delta) = event, choice == 0 {
                     text += delta
                 }
             }
+            try Task.checkCancellation()
         } catch is CancellationError {
+            await recordUsage(visionUsage)
             throw CancellationError()
         } catch {
+            await recordUsage(visionUsage)
             throw ToolError.message("Vision request failed: \(error.localizedDescription)")
         }
+        await recordUsage(visionUsage)
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else {
             throw ToolError.message("The vision model returned no description.")
@@ -977,12 +993,21 @@ enum NativeAgentTools {
     /// Web search via OpenRouter's `:online` models. No API keys beyond the
     /// user's OpenRouter key, no new dependencies: asks a cheap search model
     /// and returns its cited answer as the tool result.
-    private static func agentWebSearch(_ arguments: [String: Any]) async throws -> NativeAgentToolResult {
+    static func agentWebSearch(
+        _ arguments: [String: Any],
+        client: any OpenRouterClientProtocol = OpenRouterClient(),
+        credential: @Sendable () -> String? = { KeychainManager.getAPIKey() },
+        recordUsage: @Sendable (ChatUsage?) async -> Void = { usage in
+            await MainActor.run {
+                UsageLedger.shared.record(.agentWebSearch, model: "openai/gpt-4o-mini", usage: usage)
+            }
+        }
+    ) async throws -> NativeAgentToolResult {
         guard let query = (arguments["query"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines),
               !query.isEmpty else {
             throw ToolError.missing("query")
         }
-        guard let apiKey = KeychainManager.getAPIKey(), !apiKey.isEmpty else {
+        guard let apiKey = credential(), !apiKey.isEmpty else {
             throw ToolError.message("No OpenRouter API key configured. Add one in Settings → Accounts & Keys first.")
         }
         let count: Int = {
@@ -998,26 +1023,57 @@ enum NativeAgentTools {
             messages: [.init(role: "user", content: "Search the web and answer with citations: \(query)")],
             settings: settings
         )
-        let client = OpenRouterClient()
         var text = ""
+        var usage: ChatUsage?
+        try Task.checkCancellation()
         do {
             let stream = try await client.stream(request)
             for try await event in stream {
                 try Task.checkCancellation()
-                if case .contentDelta(let choice, let delta) = event, choice == 0 {
-                    text += delta
+                switch event {
+                case .contentDelta(let choice, let delta) where choice == 0: text += delta
+                case .usage(let value): usage = value
+                case .apiError(let error): throw ToolError.message(error.message)
+                default: break
                 }
             }
+            try Task.checkCancellation()
         } catch is CancellationError {
+            await recordUsage(usage)
             throw CancellationError()
         } catch {
+            await recordUsage(usage)
             throw ToolError.message("Web search failed: \(error.localizedDescription)")
         }
+        await recordUsage(usage)
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else {
             throw ToolError.message("Web search returned no answer.")
         }
         return .init(content: trimmed, isError: false)
+    }
+
+    /// Media services normally ledger their own response. If they fail before
+    /// that record (or return without one), conservatively retain unknown spend
+    /// for the invocation instead of treating an absent record as a free call.
+    /// This adds no second charge when the service already recorded usage.
+    static func accountedMediaHelper<T: Sendable>(
+        recordUnknown: @Sendable () async -> Void,
+        operation: @Sendable () async throws -> T
+    ) async throws -> T {
+        try Task.checkCancellation()
+        let collector = AgentHelperUsageCollector.current ?? AgentHelperUsageCollector()
+        let before = collector.snapshot.requestCount
+        return try await AgentHelperUsageCollector.$current.withValue(collector) {
+            do {
+                let value = try await operation()
+                if collector.snapshot.requestCount == before { await recordUnknown() }
+                return value
+            } catch {
+                if collector.snapshot.requestCount == before { await recordUnknown() }
+                throw error
+            }
+        }
     }
 
     /// TTS via `POST /audio/speech`, run synchronously on the MainActor
@@ -1046,7 +1102,11 @@ enum NativeAgentTools {
         let capturedRequest = request
         let speechService = await MainActor.run { SpeechService() }
         do {
-            (data, contentType) = try await speechService.synthesize(capturedRequest)
+            (data, contentType) = try await accountedMediaHelper(recordUnknown: {
+                await UsageLedger.shared.record(.speech, model: capturedRequest.model, cost: nil)
+            }) {
+                try await speechService.synthesize(capturedRequest)
+            }
         } catch is CancellationError {
             throw CancellationError()
         } catch {
@@ -1091,7 +1151,11 @@ enum NativeAgentTools {
         let capturedImageRequest = request
         let imageService = await MainActor.run { ImageGenService() }
         do {
-            attachments = try await imageService.generate(capturedImageRequest)
+            attachments = try await accountedMediaHelper(recordUnknown: {
+                await UsageLedger.shared.record(.images, model: capturedImageRequest.model, cost: nil)
+            }) {
+                try await imageService.generate(capturedImageRequest)
+            }
         } catch is CancellationError {
             throw CancellationError()
         } catch {

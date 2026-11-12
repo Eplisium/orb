@@ -554,12 +554,13 @@ struct ApprovalSheet: View {
 /// Observes the presenter directly so the sheet appears the moment a request is queued.
 struct ApprovalSheetModifier: ViewModifier {
     @ObservedObject var presenter: ApprovalPresenter
+    var isPresentationHost = true
 
     func body(content: Content) -> some View {
         content.sheet(item: Binding(
-            get: { presenter.queue.current },
+            get: { isPresentationHost ? presenter.queue.current : nil },
             // Any dismissal that is not an explicit button press is a denial.
-            set: { if $0 == nil, let id = presenter.queue.current?.id { presenter.decide(id, .denied) } }
+            set: { if isPresentationHost, $0 == nil, let id = presenter.queue.current?.id { presenter.decide(id, .denied) } }
         )) { request in
             ApprovalSheet(request: request, waiting: presenter.queue.waiting) { presenter.decide(request.id, $0) }
         }

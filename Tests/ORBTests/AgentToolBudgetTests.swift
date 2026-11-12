@@ -60,7 +60,7 @@ struct AgentToolBudgetTests {
             prompt: "long task", modelId: "m", apiKey: "k", workspace: "/tmp",
             fullComputerAccess: true, history: [], client: client,
             maximumTurns: budget,
-            toolExecutor: { try await executor.execute($0) },
+            toolExecutor: { try await executor.execute($0) }, missingApproval: .autoApprove,
             onEvent: { _ in }
         )
 
@@ -85,7 +85,7 @@ struct AgentToolBudgetTests {
             prompt: "task", modelId: "m", apiKey: "k", workspace: "/tmp",
             fullComputerAccess: true, history: [], client: client,
             maximumTurns: budget,
-            toolExecutor: { _ in .init(content: "ok", isError: false) },
+            toolExecutor: { _ in .init(content: "ok", isError: false) }, missingApproval: .autoApprove,
             onEvent: { _ in }
         )
         let requests = await client.requests
@@ -118,7 +118,7 @@ struct AgentToolBudgetTests {
             prompt: "task", modelId: "m", apiKey: "k", workspace: "/tmp",
             fullComputerAccess: true, history: [], client: client,
             maximumTurns: budget,
-            toolExecutor: { _ in .init(content: "ok", isError: false) },
+            toolExecutor: { _ in .init(content: "ok", isError: false) }, missingApproval: .autoApprove,
             onEvent: { await log.record($0) }
         )
         #expect(await log.sawFinalizing)
@@ -134,7 +134,7 @@ struct AgentToolBudgetTests {
             prompt: "quick", modelId: "m", apiKey: "k", workspace: "/tmp",
             fullComputerAccess: true, history: [], client: client,
             maximumTurns: 50,
-            toolExecutor: { _ in .init(content: "ok", isError: false) },
+            toolExecutor: { _ in .init(content: "ok", isError: false) }, missingApproval: .autoApprove,
             onEvent: { _ in }
         )
         #expect(result.hitToolBudget == false)
@@ -155,7 +155,7 @@ struct AgentToolBudgetTests {
             prompt: "task", modelId: "m", apiKey: "k", workspace: "/tmp",
             fullComputerAccess: true, history: [], client: client,
             maximumTurns: budget,
-            toolExecutor: { _ in .init(content: "ok", isError: false) },
+            toolExecutor: { _ in .init(content: "ok", isError: false) }, missingApproval: .autoApprove,
             onEvent: { _ in }
         )
         // Unpaired tool_calls would 400 the next request.

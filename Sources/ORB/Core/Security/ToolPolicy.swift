@@ -38,7 +38,7 @@ enum ToolCapability: String, Codable, Sendable, CaseIterable {
 /// The single authorization point for the native agent's toolbox.
 struct ToolPolicy: Sendable, Equatable {
     let capabilities: Set<ToolCapability>
-    /// MCP servers (by sanitized slug, as it appears in qualified tool names)
+    /// MCP servers (by collision-free key, as it appears in qualified tool names)
     /// explicitly approved for this session.
     var approvedMCPServers: Set<String>
     /// Workspace-constrained modes resolve every file path through
@@ -94,7 +94,7 @@ struct ToolPolicy: Sendable, Equatable {
         if opMode { policy = policy.adding(.orbControl) }
         guard policy.capabilities.contains(.mcp) else { return policy }
         policy.approvedMCPServers = Set(
-            mcpServers.filter(\.isEnabled).map { MCPToolNaming.sanitize($0.name) }
+            mcpServers.filter(\.isEnabled).map { MCPToolNaming.serverKey($0.name) }
         )
         return policy
     }

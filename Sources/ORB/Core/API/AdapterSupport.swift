@@ -310,8 +310,13 @@ enum AdapterStreamPump {
                             if dispatch(try map(payload)) { break pump }
                         }
                     }
-                    for payload in try framer.finish() {
-                        if dispatch(try map(payload)) { break }
+                    // A terminal event ends consumption before upstream EOF.
+                    // Residual bytes may be a fragmented trailing sentinel;
+                    // only validate EOF framing if no terminal was dispatched.
+                    if !terminal {
+                        for payload in try framer.finish() {
+                            if dispatch(try map(payload)) { break }
+                        }
                     }
                     guard terminal else { throw AdapterStreamError.abruptEOF }
                     continuation.finish()

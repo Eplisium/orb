@@ -35,7 +35,7 @@ struct MCPToolNamingTests {
     func roundTrip() throws {
         let name = MCPToolNaming.qualify(server: "File System", tool: "read_file")
         let route = try #require(MCPToolNaming.resolve(name))
-        #expect(route.server == "File-System")
+        #expect(route.server == MCPToolNaming.serverKey("File System"))
         #expect(route.tool == "read_file")
     }
 

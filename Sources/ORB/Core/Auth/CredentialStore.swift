@@ -1,5 +1,6 @@
 import Foundation
 import Security
+import Combine
 
 // MARK: - Credential roles and profiles
 //
@@ -47,11 +48,42 @@ struct CredentialProfile: Codable, Sendable, Equatable, Identifiable {
     }
 }
 
+// MARK: - Credential revisions
+
+/// In-process invalidation, scoped to a backing store and reference. Only
+/// opaque revisions and reference names are retained/emitted, never secrets
+/// or key-derived hashes. Each in-memory store has its own isolated source;
+/// all wrappers of the production Keychain share one source.
+final class CredentialChanges: @unchecked Sendable {
+    static let keychain = CredentialChanges()
+    private let lock = NSLock()
+    private var revisions: [String: UUID] = [:]
+    private let subject = PassthroughSubject<String, Never>()
+
+    var publisher: AnyPublisher<String, Never> { subject.eraseToAnyPublisher() }
+
+    func revision(for reference: String) -> UUID? {
+        lock.lock(); defer { lock.unlock() }
+        return revisions[reference]
+    }
+
+    func recordChange(for reference: String) {
+        lock.lock()
+        revisions[reference] = UUID()
+        lock.unlock()
+        // Subscribers can re-read presence/revisions; never call them locked.
+        subject.send(reference)
+    }
+}
+
 // MARK: - Secret storage seam
 
 /// Storage for secret bytes, addressed by role reference. Implementations must
 /// never log or persist secrets outside their secure store.
 protocol CredentialSecretStore: Sendable {
+    /// Shared by all handles to the same backing store. Custom stores that
+    /// support external writes should expose a source and record mutations.
+    var credentialChanges: CredentialChanges? { get }
     func secret(forReference reference: String) -> String?
     /// Returns nil on success or a diagnostic error string on failure. Failed
     /// updates must leave the previous secret intact.
@@ -62,11 +94,16 @@ protocol CredentialSecretStore: Sendable {
     func hasSecret(forReference reference: String) -> Bool
 }
 
+extension CredentialSecretStore {
+    var credentialChanges: CredentialChanges? { nil }
+}
+
 /// macOS Keychain-backed store. All mechanics live in `KeychainSecrets`:
-/// saves go to the open-access v2 service (prompt-free) and legacy items from
-/// older builds are read at most once to mirror across, then never touched —
-/// so no path can raise the legacy keychain dialogs.
+/// saves use the ORB-only v3 service, and confirmed-missing slots can mirror
+/// dormant items without ever modifying them.
 struct KeychainCredentialStore: CredentialSecretStore {
+    var credentialChanges: CredentialChanges? { .keychain }
+
     func secret(forReference reference: String) -> String? {
         KeychainSecrets.read(reference)
     }
@@ -88,6 +125,7 @@ struct KeychainCredentialStore: CredentialSecretStore {
 final class InMemoryCredentialStore: CredentialSecretStore, @unchecked Sendable {
     private let lock = NSLock()
     private var secrets: [String: String] = [:]
+    let credentialChanges: CredentialChanges? = CredentialChanges()
 
     func secret(forReference reference: String) -> String? {
         lock.lock()
@@ -97,15 +135,17 @@ final class InMemoryCredentialStore: CredentialSecretStore, @unchecked Sendable 
 
     func saveSecret(_ secret: String, forReference reference: String) -> String? {
         lock.lock()
-        defer { lock.unlock() }
         secrets[reference] = secret
+        lock.unlock()
+        credentialChanges?.recordChange(for: reference)
         return nil
     }
 
     func deleteSecret(forReference reference: String) -> Bool {
         lock.lock()
-        defer { lock.unlock() }
         secrets.removeValue(forKey: reference)
+        lock.unlock()
+        credentialChanges?.recordChange(for: reference)
         return true // absent afterwards, whether or not it existed
     }
 

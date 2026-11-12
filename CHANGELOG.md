@@ -4,6 +4,17 @@ All notable changes to ORB are listed here. The format is based on [Keep a Chang
 
 ## [Unreleased] — 1.1.0
 
+### Backend reliability and safety
+- Fail-closed missing approvals, explicit Agent OP Mode opt-in, and per-run Test Suite command approvals with safe cancellation/navigation handling.
+- Checked conversation reads, transactional edit truncation, and lossless SQLite text/streaming Unicode handling.
+- Credential migration preserves unavailable current items and deletion tombstones; account services invalidate stale data and late responses across key changes.
+- Missing model-turn prices remain unknown; web-search helper usage is recorded separately. Failed ledger writes expose an in-memory retry queue in Usage Settings.
+- Checked integer conversions and file offsets prevent malformed-input crashes; advanced adapters honor terminal events before residual framing validation.
+
+- Collision-resistant bounded MCP names preserve routing/approval separation without exceeding provider limits. Nonblocking ordered stdin writes honor cancellation and deadlines; changed live configurations restart safely and obsolete results are rejected.
+- Failed asset/Library saves preserve retry inputs; remote file deletion requires confirmation for the requested file. Shared Image/Video catalog refreshes survive departing callers.
+- Video polls validate job identity before state changes and preserve known costs through sparse/resumed responses, including explicit zero.
+
 ### Repository and packaging
 - GitHub Actions CI on macOS: build, unique-warning count in the job summary, test, ad-hoc packaged `ORB.app` artifact, and uploaded logs.
 - `build_app.sh` hardening: strict mode, `swift build --show-bin-path` instead of searching `.build`, and `--release`, `--build`, `--adhoc` (automatic under `CI`), and `--output` options.

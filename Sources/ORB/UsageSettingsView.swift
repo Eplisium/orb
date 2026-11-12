@@ -1,8 +1,8 @@
 import SwiftUI
 import Charts
 
-/// Settings → Usage: lifetime spend, requests, and tokens from the permanent
-/// usage ledger, broken down by app feature, model, and day.
+/// Settings → Usage: saved spend, requests, and tokens from the local ledger,
+/// plus observable pending-write failures and an explicit retry action.
 struct UsageSettingsView: View {
     @ObservedObject private var ledger = UsageLedger.shared
     @State private var range: Range = .allTime
@@ -45,8 +45,8 @@ struct UsageSettingsView: View {
             HStack {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Usage & Cost").font(.title3.weight(.semibold))
-                    Text(firstDate.map { "Tracked since \($0.formatted(date: .abbreviated, time: .omitted)). Stored permanently on this Mac." }
-                         ?? "Every paid request is recorded here permanently on this Mac.")
+                    Text(firstDate.map { "Saved usage since \($0.formatted(date: .abbreviated, time: .omitted)). Stored locally on this Mac." }
+                         ?? "Successfully saved requests appear here. Local totals may not include every request.")
                         .font(.caption).foregroundStyle(.secondary)
                 }
                 Spacer()
@@ -64,6 +64,18 @@ struct UsageSettingsView: View {
                      icon: "star.circle.fill")
             }
 
+            if let warning = ledger.persistenceWarning {
+                VStack(alignment: .leading, spacing: 8) {
+                    Label(warning, systemImage: "exclamationmark.triangle.fill")
+                        .font(.callout).foregroundStyle(.orange)
+                    if let error = ledger.persistenceError {
+                        Text(error).font(.caption).foregroundStyle(.secondary)
+                    }
+                    Button("Retry saving usage") { ledger.retryPendingEvents() }
+                        .buttonStyle(.bordered)
+                }
+            }
+
             if unpriced > 0 {
                 Text("\(unpriced) request\(unpriced == 1 ? "" : "s") had no cost reported by the provider (for example speech audio), so real spend may be higher than shown.")
                     .font(.caption).foregroundStyle(.orange)
@@ -72,7 +84,7 @@ struct UsageSettingsView: View {
             if !features.isEmpty { charts }
 
             if features.isEmpty {
-                Text("No usage recorded in this range yet. New requests appear here automatically.")
+                Text("No saved usage in this range yet. Only successfully saved requests appear in these totals.")
                     .font(.callout).foregroundStyle(.secondary).padding(.vertical, 24)
             } else {
                 section("By app feature", features, showShare: true)

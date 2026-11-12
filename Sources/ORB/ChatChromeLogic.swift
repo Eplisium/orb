@@ -548,9 +548,17 @@ final class ApprovalPresenter: ObservableObject {
     private var waiting: [UUID: CheckedContinuation<ApprovalCoordinator.Decision, Never>] = [:]
 
     func present(_ request: ApprovalCoordinator.Request) async -> ApprovalCoordinator.Decision {
-        await withCheckedContinuation { continuation in
-            waiting[request.id] = continuation
-            queue.enqueue(request)
+        await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                guard !Task.isCancelled else {
+                    continuation.resume(returning: .denied)
+                    return
+                }
+                waiting[request.id] = continuation
+                queue.enqueue(request)
+            }
+        } onCancel: {
+            Task { @MainActor in self.decide(request.id, .denied) }
         }
     }
 

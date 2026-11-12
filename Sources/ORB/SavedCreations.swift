@@ -98,13 +98,15 @@ final class SavedCreationsStore: ObservableObject {
     }
 
     /// Saves a file already on disk (a streamed download) without loading it
-    /// into memory. The source file is moved into the library on success and
-    /// left in place on failure so the caller can retry or export it.
+    /// into memory. The source is consumed only after asset metadata AND the
+    /// manifest commit, and left in place on failure for retry or export.
     func save(fileAt source: URL, mimeType: String, kind: SavedCreation.Kind, modelID: String, prompt: String?) async throws -> SavedCreation {
         try await serialized { [self] in
             if let loadError { throw loadError }
-            let asset = try await assetStore.store(fileAt: source, mimeType: mimeType)
-            return try indexNewCreation(asset: asset, mimeType: mimeType, kind: kind, modelID: modelID, prompt: prompt)
+            let asset = try await assetStore.store(fileAt: source, mimeType: mimeType, consumeSource: false)
+            let creation = try indexNewCreation(asset: asset, mimeType: mimeType, kind: kind, modelID: modelID, prompt: prompt)
+            assetStore.consumeSourceFile(source, afterStoring: asset)
+            return creation
         }
     }
 
