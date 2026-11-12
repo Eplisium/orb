@@ -39,6 +39,48 @@ enum ImageGallery {
         }
         return result
     }
+
+    /// The seed each chunk's request sends. Every chunk reusing the same
+    /// seed would return the same images (and bill for each copy), so a
+    /// chunk's seed is the base seed plus the number of images requested
+    /// before it: with one image per request that is seed, seed+1, seed+2…
+    /// The run stays reproducible from the seed the user typed. No seed
+    /// means every request stays unseeded.
+    static func chunkSeeds(base: Int?, chunks: [Int]) -> [Int?] {
+        guard let base else { return chunks.map { _ in nil } }
+        var offset = 0
+        return chunks.map { size in
+            defer { offset += max(0, size) }
+            return base &+ offset
+        }
+    }
+}
+
+/// Tracks the endpoint lookup for the selected image model. Options are
+/// filtered through the endpoint list, so generating while a lookup is in
+/// flight would silently drop the provider pin, aspect, quality, resolution
+/// and seed. Each lookup gets a token; only the newest one may publish its
+/// result, so a superseded lookup can neither apply stale endpoints nor
+/// report its own cancellation as an error.
+struct ImageEndpointLookup: Equatable {
+    private(set) var current: UUID?
+
+    var isInFlight: Bool { current != nil }
+
+    /// Starts a lookup, superseding any earlier one.
+    mutating func begin() -> UUID {
+        let token = UUID()
+        current = token
+        return token
+    }
+
+    /// Ends a lookup. Returns whether it was still the current one, i.e.
+    /// whether its endpoints or error may be shown.
+    mutating func finish(_ token: UUID) -> Bool {
+        guard current == token else { return false }
+        current = nil
+        return true
+    }
 }
 
 /// Outcome of one multi-request image run, summarised for the user.

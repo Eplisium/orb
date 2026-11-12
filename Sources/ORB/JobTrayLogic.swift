@@ -16,7 +16,11 @@ struct JobPresentation: Equatable {
     let actions: [Action]
     let costText: String?
 
-    static func make(_ job: JobRecord) -> JobPresentation {
+    /// - Parameter hasLiveRun: whether a poll loop in this process owns the
+    ///   job right now. A record can still say `.polling` with no loop
+    ///   behind it (ORB quit mid-render); that is presented as stopped, with
+    ///   Resume, never as Running with a Stop that has nothing to stop.
+    static func make(_ job: JobRecord, hasLiveRun: Bool = true) -> JobPresentation {
         let cost = job.usageCost.map { TestResultsTable.costText($0, zeroAsDash: false) }
         let error = job.recoverableError.map { " \($0)" } ?? ""
 
@@ -33,6 +37,11 @@ struct JobPresentation: Equatable {
         }
 
         switch job.pollingState {
+        case .polling where !hasLiveRun:
+            return JobPresentation(
+                label: "Stopped checking",
+                detail: "ORB is not checking this job right now, but it is probably still running at the provider and may still bill. Resume to pick it up." + error,
+                symbol: "pause.circle", status: .interrupted, actions: job.isResumable ? [.resume] : [.dismiss], costText: cost)
         case .polling:
             return JobPresentation(label: "Running", detail: job.lastRemoteStatus.map { "Provider status: \($0)." } ?? "Waiting for the provider.",
                                    symbol: "arrow.triangle.2.circlepath", status: .running, actions: [.stop], costText: cost)
@@ -68,6 +77,8 @@ struct JobPresentation: Equatable {
 
 enum JobTray {
     private static func group(_ job: JobRecord) -> Int {
+        // A rejected submission never became a job: it needs attention, it is not active.
+        if job.submissionState == .failed { return 1 }
         switch job.pollingState {
         case .polling, .stoppedLocally, .idle: return 0
         case .failed, .cancelled, .expired: return 1
@@ -117,6 +128,8 @@ struct JobTrayButton: View {
     var onDownload: (JobRecord) -> Void = { _ in }
     var onOpen: (JobRecord) -> Void = { _ in }
     var isDownloading: (JobRecord) -> Bool = { _ in false }
+    /// Whether a poll loop currently owns the job (see `JobPresentation.make`).
+    var hasLiveRun: (JobRecord) -> Bool = { _ in true }
 
     var body: some View {
         Button { jobs = reload(); open.toggle() } label: {
@@ -144,7 +157,7 @@ struct JobTrayButton: View {
     }
 
     private func jobRow(_ job: JobRecord) -> some View {
-        let p = JobPresentation.make(job)
+        let p = JobPresentation.make(job, hasLiveRun: hasLiveRun(job))
         return VStack(alignment: .leading, spacing: 4) {
             HStack {
                 ORBStatusPill(status: p.status)

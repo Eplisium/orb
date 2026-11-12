@@ -34,6 +34,11 @@ struct TranscriptionRequest: Encodable {
     var temperature: Double? = nil
     var timestampGranularities: [String]? = nil
 
+    /// Whether the response carries timestamps, segments and usage worth
+    /// keeping as JSON. Decided by the format this request asks for, never
+    /// by a picker that can change while the request is in flight.
+    var wantsStructuredTranscript: Bool { responseFormat == "verbose_json" }
+
     /// Multipart is limited to 25 MB; the documented JSON input_audio form
     /// accepts larger files. Keep threshold independently testable without
     /// allocating a giant fixture.
@@ -83,7 +88,7 @@ struct TranscriptionRequest: Encodable {
         if let temperature { field("temperature", String(temperature)) }
         for granularity in timestampGranularities ?? [] { field("timestamp_granularities[]", granularity) }
         append("--\(boundary)\r\n")
-        append("Content-Disposition: form-data; name=\"file\"; filename=\"\(filename)\"\r\n")
+        append("Content-Disposition: form-data; name=\"file\"; filename=\"\(FileService.safeMultipartFilename(filename))\"\r\n")
         append("Content-Type: \(mimeType)\r\n\r\n")
         body.append(audioData)
         append("\r\n--\(boundary)--\r\n")

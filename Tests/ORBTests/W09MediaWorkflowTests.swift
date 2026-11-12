@@ -109,7 +109,7 @@ struct VideoResumeTests {
         } catch is CancellationError {
             Issue.record("A remote failure must not surface as local cancellation.")
         } catch {
-            #expect(error is MediaServiceError)
+            #expect(error is VideoJobFailure)
         }
         #expect(transport.submissions().isEmpty)
         let terminal = try #require(controller.record(remoteID: "job-resume-fail"))

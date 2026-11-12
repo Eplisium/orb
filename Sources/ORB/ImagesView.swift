@@ -127,6 +127,8 @@ struct ImagesView: View {
     @StudioState("ImagesView.runSummary") private var runSummary: String? = nil
     /// Preset staged by Apply; consumed (when it matches) by the model/provider reset handlers.
     @State private var pendingPreset: ImagePresetValues? = nil
+    /// The endpoint lookup for the selected model; Generate waits for it.
+    @State private var endpointLookup = ImageEndpointLookup()
     @EnvironmentObject private var shell: ShellController
 
     private let accent = ORBTheme.accent
@@ -168,8 +170,19 @@ struct ImagesView: View {
             imageCount = o.count
             selectedProviderSlug = o.provider
             guard !selectedModelId.isEmpty else { return }
-            do { endpoints = try await service.fetchImageModelEndpoints(modelID: selectedModelId) }
-            catch { endpointError = error.localizedDescription }
+            let requested = selectedModelId
+            let lookup = endpointLookup.begin()
+            let outcome: Result<[ImageModelEndpoint], Error>
+            do { outcome = .success(try await service.fetchImageModelEndpoints(modelID: requested)) }
+            catch { outcome = .failure(error) }
+            // A quick model switch supersedes this lookup: its endpoints are
+            // stale and its cancellation is not a failure worth a banner.
+            guard endpointLookup.finish(lookup), !Task.isCancelled, selectedModelId == requested else { return }
+            switch outcome {
+            case .success(let fetched): endpoints = fetched
+            case .failure(let error):
+                if !(error is CancellationError) { endpointError = error.localizedDescription }
+            }
         }
         .task { CreationActions.pruneStaging(); Self.cleanEditReferences(keeping: referenceURLs) }
         .onChange(of: selectedProviderSlug) { _, _ in
@@ -296,6 +309,13 @@ struct ImagesView: View {
                     PlaygroundErrorBanner(message: runSummary) { self.runSummary = nil }
                 }
 
+                if endpointLookup.isInFlight {
+                    HStack(spacing: 6) {
+                        ProgressView().controlSize(.small)
+                        Text("Checking model options…").font(.caption).foregroundStyle(.secondary)
+                    }
+                    .accessibilityElement(children: .combine)
+                }
                 StudioPrimaryButton(title: "Generate", busyTitle: "Generating…", isBusy: pendingImages > 0,
                                     isEnabled: canGenerate, accent: accent, action: generate)
                     .keyboardShortcut(.return, modifiers: .command)
@@ -568,7 +588,9 @@ struct ImagesView: View {
     // MARK: Actions
 
     private var canGenerate: Bool {
-        !prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        // Options are filtered through the endpoint list, so wait for it.
+        !endpointLookup.isInFlight
+            && !prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             && !selectedModelId.isEmpty && pendingImages + imageCount <= Self.maxPendingImages
             && KeychainManager.hasAPIKey && capabilities.referenceError(count: referenceURLs.count) == nil
             && (referenceURLs.isEmpty || selectedImageModel?.architecture?.takesReferenceImages == true)
@@ -660,12 +682,16 @@ struct ImagesView: View {
                 return
             }
             let template = base
+            // Each split request gets its own seed; a shared one would return
+            // (and bill for) the same images once per request.
+            let seeds = ImageGallery.chunkSeeds(base: template.seed, chunks: chunks)
             var summary = ImageRunSummary(requested: total)
             await withTaskGroup(of: (Int, Result<(images: [ChatImageAttachment], usage: ImageGenUsage?), Error>).self) { group in
-                for size in chunks {
+                for (size, seed) in zip(chunks, seeds) {
                     group.addTask { @MainActor in
                         var request = template
                         request.n = size > 1 ? size : nil
+                        request.seed = seed
                         do { return (size, .success(try await service.generateWithUsage(request))) }
                         catch { return (size, .failure(error)) }
                     }

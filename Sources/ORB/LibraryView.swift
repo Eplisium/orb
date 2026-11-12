@@ -5,21 +5,9 @@ import UniformTypeIdentifiers
 
 // Local outputs are intentionally not mixed with OpenRouter's remote Files API.
 func creationExtension(_ creation: SavedCreation) -> String {
-    let mime = creation.mimeType.components(separatedBy: ";")[0].lowercased()
-    switch mime {
-    case "image/png": return "png"
-    case "image/jpeg": return "jpg"
-    case "image/webp": return "webp"
-    case "video/mp4": return "mp4"
-    case "video/webm": return "webm"
-    case "audio/wav", "audio/x-wav": return "wav"
-    case "audio/pcm", "audio/l16": return "pcm"
-    case "audio/aac": return "aac"
-    case "audio/ogg": return "ogg"
-    case "audio/mpeg", "audio/mp3": return "mp3"
-    case "application/json": return "json"
-    default: return "txt"
-    }
+    // Same table the asset store names files with; only a type it does not
+    // know falls back to a plain-text name.
+    MediaFileExtension.forMIMEType(creation.mimeType) ?? "txt"
 }
 
 @MainActor

@@ -250,10 +250,215 @@ struct JobRecoveryTests {
         } catch is CancellationError {
             Issue.record("A remote failure must not surface as local cancellation.")
         } catch {
-            #expect(error is MediaServiceError)
+            #expect(error is VideoJobFailure)
         }
         let record = try #require(controller.record(remoteID: "job-fail-record"))
         #expect(record.pollingState == .failed)
         #expect(record.recoverableError == "Provider quota exceeded")
+    }
+
+    // MARK: Quit or crash while polling
+
+    @Test("a job that was polling when ORB quit is demoted at launch and resumes to completion")
+    func restartWhilePollingIsResumable() async throws {
+        let database = DatabaseManager()
+        let controller = JobController(database: database)
+        let transport = MockMediaTransport(responses: [
+            .json(#"{"id":"job-quit","status":"queued"}"#), // submit
+            .hang                                           // poll in flight when ORB quits
+        ])
+        let service = VideoGenService(transport: transport, jobController: controller)
+        let run = Task {
+            try await service.submitAndPoll(
+                VideoGenRequest(model: "m", prompt: "a long render"),
+                pollInterval: .milliseconds(5)
+            )
+        }
+        #expect(await waitForCondition { transport.sentCount() >= 2 })
+
+        // ORB "quits" mid-render: the loop dies without stopPolling(), so
+        // nothing records a local stop and storage still says polling.
+        run.cancel()
+        _ = try? await run.value
+        #expect(controller.record(remoteID: "job-quit")?.pollingState == .polling)
+
+        // The next launch starts from the same store with no loop running.
+        let relaunched = JobController.launched(database: database)
+        let record = try #require(relaunched.record(remoteID: "job-quit"))
+        #expect(record.pollingState == .stoppedLocally)
+        #expect(record.lastRemoteStatus == "queued", "the last known remote status is kept")
+        #expect(record.prompt == "a long render")
+        #expect(relaunched.resumableJobs().map(\.remoteID) == ["job-quit"])
+        // Never "Running" with a Stop that has nothing to stop.
+        #expect(JobPresentation.make(record).actions == [.resume])
+
+        // Resume polls the existing job (no second paid submit) and the
+        // finished result becomes downloadable.
+        let resumedTransport = MockMediaTransport(responses: [
+            .json(#"{"id":"job-quit","status":"completed","usage":{"cost":0.2}}"#)
+        ])
+        let revived = VideoGenService(transport: resumedTransport, jobController: relaunched)
+        let finished = try await revived.resume(record, pollInterval: .milliseconds(1))
+        #expect(finished.isSuccess)
+        #expect(resumedTransport.submissions().isEmpty)
+        #expect(relaunched.record(remoteID: "job-quit")?.pollingState == .completed)
+        #expect(revived.downloadableRecords.map(\.remoteID) == ["job-quit"])
+    }
+
+    @Test("launch recovery leaves every other state alone")
+    func launchRecoveryOnlyTouchesPollingRecords() throws {
+        let database = DatabaseManager()
+        let controller = JobController(database: database)
+        _ = controller.recordVideoSubmission(remoteID: "job-done", modelID: "m", remoteStatus: "completed")
+        _ = controller.recordVideoSubmission(remoteID: "job-failed", modelID: "m", remoteStatus: "failed", error: "nope")
+        _ = controller.recordVideoSubmission(remoteID: "job-stopped", modelID: "m", remoteStatus: "queued")
+        controller.recordPollFailure(remoteID: "job-stopped", error: "Stopped checking: offline.")
+        let unknown = try #require(controller.recordUnknownSubmission(modelID: "m", error: "timed out"))
+        _ = controller.recordVideoSubmission(remoteID: "job-live", modelID: "m", remoteStatus: "in_progress")
+
+        // A job a loop in this process still owns is not interrupted.
+        #expect(controller.demoteInterruptedPolls(excluding: ["job-live"]) == 0)
+        #expect(controller.record(remoteID: "job-live")?.pollingState == .polling)
+
+        let relaunched = JobController.launched(database: database)
+        #expect(relaunched.record(remoteID: "job-live")?.pollingState == .stoppedLocally)
+        #expect(relaunched.record(remoteID: "job-done")?.pollingState == .completed)
+        #expect(relaunched.record(remoteID: "job-failed")?.pollingState == .failed)
+        let stopped = try #require(relaunched.record(remoteID: "job-stopped"))
+        #expect(stopped.pollingState == .stoppedLocally)
+        #expect(stopped.recoverableError == "Stopped checking: offline.")
+        #expect(relaunched.record(id: unknown.id)?.submissionState == .outcomeUnknown)
+        #expect(relaunched.record(id: unknown.id)?.pollingState == .idle)
+    }
+
+    @Test("a polling record with no loop behind it offers Resume, and Stop demotes it")
+    func orphanedPollingRecordIsNeverADeadEnd() throws {
+        let controller = JobController(database: DatabaseManager())
+        _ = controller.recordVideoSubmission(remoteID: "job-orphan", modelID: "m", remoteStatus: "in_progress")
+        let service = VideoGenService(transport: MockMediaTransport(responses: []), jobController: controller)
+        let record = try #require(controller.record(remoteID: "job-orphan"))
+        #expect(record.pollingState == .polling)
+        #expect(!service.isRunInFlight(for: record))
+
+        let presentation = JobPresentation.make(record, hasLiveRun: service.isRunInFlight(for: record))
+        #expect(presentation.actions == [.resume])
+        #expect(presentation.label != "Running")
+        // With a live loop the same record is Running with Stop.
+        #expect(JobPresentation.make(record, hasLiveRun: true).actions == [.stop])
+
+        service.stopPolling(remoteID: "job-orphan")
+        #expect(controller.record(remoteID: "job-orphan")?.pollingState == .stoppedLocally)
+    }
+
+    // MARK: Stop racing a poll response
+
+    @Test("a non-terminal poll update after Stop does not flip the record back to polling")
+    func latePollUpdateKeepsStoppedState() throws {
+        let controller = JobController(database: DatabaseManager())
+        _ = controller.recordVideoSubmission(remoteID: "job-race", modelID: "m", remoteStatus: "queued")
+        controller.recordStoppedLocally(remoteID: "job-race")
+
+        controller.recordPollUpdate(remoteID: "job-race", remoteStatus: "in_progress", error: nil, cost: nil)
+        let late = try #require(controller.record(remoteID: "job-race"))
+        #expect(late.pollingState == .stoppedLocally)
+        #expect(late.lastRemoteStatus == "in_progress", "the newer status is still worth keeping")
+
+        // Only a loop that owns the job again makes it poll.
+        controller.recordPollingStarted(remoteID: "job-race")
+        #expect(controller.record(remoteID: "job-race")?.pollingState == .polling)
+
+        // A terminal answer always lands, stopped or not.
+        controller.recordStoppedLocally(remoteID: "job-race")
+        controller.recordPollUpdate(remoteID: "job-race", remoteStatus: "completed", error: nil, cost: 0.3)
+        #expect(controller.record(remoteID: "job-race")?.pollingState == .completed)
+        // And a finished job is never revived.
+        controller.recordPollingStarted(remoteID: "job-race")
+        #expect(controller.record(remoteID: "job-race")?.pollingState == .completed)
+    }
+
+    @Test("a poll response that lands just after Stop is not reported and leaves the job stopped")
+    func pollResponseLandingAfterStopIsDropped() async throws {
+        let controller = JobController(database: DatabaseManager())
+        let transport = LatePollTransport()
+        let service = VideoGenService(transport: transport, jobController: controller)
+        let updates = JobUpdateCollector()
+        let run = Task {
+            try await service.submitAndPoll(
+                VideoGenRequest(model: "m", prompt: nil), pollInterval: .milliseconds(1)
+            ) { updates.append($0) }
+        }
+        #expect(await waitForCondition { transport.pollCount >= 1 })
+
+        // Stop while the poll is in flight, then let its response arrive.
+        service.stopPolling(remoteID: "job-late")
+        transport.release()
+        do {
+            _ = try await run.value
+            Issue.record("Expected the stopped run to end with CancellationError.")
+        } catch {
+            #expect(error is CancellationError)
+        }
+
+        let record = try #require(controller.record(remoteID: "job-late"))
+        #expect(record.pollingState == .stoppedLocally)
+        #expect(record.isResumable)
+        #expect(!service.isRunInFlight(for: record))
+        #expect(service.activeJob?.status == "queued")
+        #expect(updates.all.map(\.status) == ["queued"])
+        #expect(transport.pollCount == 1)
+    }
+}
+
+/// Transport whose poll answer is held back until `release()`, and then
+/// delivered even though the request was cancelled in the meantime: the
+/// response had already landed when Stop was pressed.
+private final class LatePollTransport: MediaTransport, @unchecked Sendable {
+    private let lock = NSLock()
+    private var waiting: CheckedContinuation<Void, Never>?
+    private var released = false
+    private var polls = 0
+
+    init() {
+        super.init(session: URLSession(configuration: .ephemeral), apiKeyProvider: { "test-key" })
+    }
+
+    var pollCount: Int {
+        lock.lock(); defer { lock.unlock() }
+        return polls
+    }
+
+    func release() {
+        lock.lock()
+        released = true
+        let pending = waiting
+        waiting = nil
+        lock.unlock()
+        pending?.resume()
+    }
+
+    private func notePoll() {
+        lock.lock(); defer { lock.unlock() }
+        polls += 1
+    }
+
+    /// Parks `continuation` until `release()`, or resumes it at once.
+    private func park(_ continuation: CheckedContinuation<Void, Never>) {
+        lock.lock()
+        if released {
+            lock.unlock()
+            continuation.resume()
+        } else {
+            waiting = continuation
+            lock.unlock()
+        }
+    }
+
+    override func send<T: Decodable>(_ request: URLRequest, as type: T.Type) async throws -> T {
+        if request.httpMethod == "POST" {
+            return try JSONDecoder().decode(T.self, from: Data(#"{"id":"job-late","status":"queued"}"#.utf8))
+        }
+        notePoll()
+        await withCheckedContinuation { park($0) }
+        return try JSONDecoder().decode(T.self, from: Data(#"{"id":"job-late","status":"in_progress"}"#.utf8))
     }
 }

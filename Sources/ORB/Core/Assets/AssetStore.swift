@@ -104,7 +104,7 @@ final class AssetStore {
         // Dedupe by checksum: identical content already stored returns the
         // same relative path and never overwrites the existing file.
         if let existing = database.findAssetRecord(checksum: checksum) {
-            guard existing.relativePath == Self.relativePath(forChecksum: checksum, mimeType: existing.mimeType) else {
+            guard Self.isContentAddressed(existing, checksum: checksum) else {
                 throw AssetStoreError.invalidPath(existing.relativePath)
             }
             try verifyStoredFile(existing)
@@ -176,7 +176,7 @@ final class AssetStore {
             throw AssetStoreError.storageFailure(error.localizedDescription)
         }
         if let existing = database.findAssetRecord(checksum: checksum) {
-            guard existing.relativePath == Self.relativePath(forChecksum: checksum, mimeType: existing.mimeType) else {
+            guard Self.isContentAddressed(existing, checksum: checksum) else {
                 throw AssetStoreError.invalidPath(existing.relativePath)
             }
             try verifyStoredFile(existing)
@@ -352,20 +352,16 @@ final class AssetStore {
     }
 
     private static func fileExtension(forMimeType mimeType: String?) -> String? {
-        switch mimeType?.lowercased() {
-        case "image/png": return "png"
-        case "image/jpeg", "image/jpg": return "jpg"
-        case "image/webp": return "webp"
-        case "image/gif": return "gif"
-        case "video/mp4": return "mp4"
-        case "video/webm": return "webm"
-        case "audio/mpeg": return "mp3"
-        case "audio/wav", "audio/wave", "audio/x-wav": return "wav"
-        case "audio/mp4": return "m4a"
-        case "application/json": return "json"
-        case "text/plain": return "txt"
-        default: return nil
-        }
+        MediaFileExtension.forMIMEType(mimeType)
+    }
+
+    /// A stored record must sit at a content-addressed path for its own
+    /// checksum: the current layout, or the extension-less one used before
+    /// its MIME type had a known extension (kept valid so adding an
+    /// extension never strands assets that are already on disk).
+    private static func isContentAddressed(_ record: AssetRecord, checksum: String) -> Bool {
+        record.relativePath == relativePath(forChecksum: checksum, mimeType: record.mimeType)
+            || record.relativePath == relativePath(forChecksum: checksum, mimeType: nil)
     }
 
     /// Check both lexical and filesystem containment. Foundation's lexical
@@ -402,5 +398,34 @@ final class AssetStore {
             throw AssetStoreError.invalidPath(relativePath)
         }
         return url
+    }
+}
+
+/// File extensions for the media types ORB stores and exports. One table,
+/// so the stored asset, Library exports, Quick Look copies and drags agree
+/// on a name. `nil` means the type is unknown, never "treat it as text".
+enum MediaFileExtension {
+    static func forMIMEType(_ mimeType: String?) -> String? {
+        // "audio/mpeg; charset=binary" names the same type as "audio/mpeg".
+        let type = mimeType?.components(separatedBy: ";").first?
+            .trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        switch type {
+        case "image/png": return "png"
+        case "image/jpeg", "image/jpg": return "jpg"
+        case "image/webp": return "webp"
+        case "image/gif": return "gif"
+        case "video/mp4": return "mp4"
+        case "video/webm": return "webm"
+        case "video/quicktime": return "mov"
+        case "audio/mpeg", "audio/mp3": return "mp3"
+        case "audio/wav", "audio/wave", "audio/x-wav": return "wav"
+        case "audio/mp4": return "m4a"
+        case "audio/pcm", "audio/l16": return "pcm"
+        case "audio/aac": return "aac"
+        case "audio/ogg": return "ogg"
+        case "application/json": return "json"
+        case "text/plain": return "txt"
+        default: return nil
+        }
     }
 }

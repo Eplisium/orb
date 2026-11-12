@@ -113,6 +113,81 @@ struct VideoSubmissionOutcomeTests {
         #expect(!recordedError.lowercased().contains("test-key"))
     }
 
+    @Test("an HTTP 4xx rejection records a failed submission, not an unconfirmed one")
+    func clientErrorRecordsRejectedSubmission() async throws {
+        let transport = MockMediaTransport(responses: [
+            .status(400, #"{"error":{"message":"Prompt was flagged by moderation"}}"#)
+        ])
+        let database = DatabaseManager()
+        let (service, controller) = makeService(transport: transport, database: database)
+        let request = VideoGenRequest(model: "test/video-model", prompt: "clip")
+
+        do {
+            _ = try await service.submitAndPoll(request)
+            Issue.record("Expected the submit to throw.")
+        } catch let error as MediaServiceError {
+            // The original error reaches the caller unchanged.
+            #expect(error == .http(status: 400, message: "Prompt was flagged by moderation"))
+        }
+
+        let jobs = controller.allJobs()
+        #expect(jobs.count == 1)
+        let record = try #require(jobs.first)
+        #expect(record.submissionState == .failed)
+        #expect(record.pollingState == .idle)
+        #expect(record.remoteID == nil)
+        #expect(record.modelID == "test/video-model")
+        #expect(record.recoverableError?.contains("Prompt was flagged by moderation") == true)
+        #expect(record.isResumable == false)
+        // Exactly one POST: a rejection is never retried on the user's behalf.
+        #expect(transport.submissions().count == 1)
+
+        // The tray says nothing was billed, and does not count it as active.
+        let presentation = JobPresentation.make(record)
+        #expect(presentation.label == "Not submitted")
+        #expect(presentation.detail.contains("nothing was billed"))
+        #expect(presentation.status == .failed)
+        #expect(JobTray.activeCount(jobs) == 0)
+        #expect(JobTray.summary(jobs) == "0 active, 0 finished, 1 needs attention")
+
+        // It survives a restart as a rejection.
+        let relaunched = JobController.launched(database: database)
+        #expect(relaunched.record(id: record.id)?.submissionState == .failed)
+    }
+
+    @Test("a 5xx answer or an undecodable body stays outcome-unknown")
+    func serverErrorStaysOutcomeUnknown() async throws {
+        for error in [MediaServiceError.http(status: 503, message: "upstream unavailable"),
+                      MediaServiceError.decoding("unexpected body")] {
+            let (service, controller) = makeService(transport: ThrowingSendMediaTransport(error: error))
+            do {
+                _ = try await service.submitAndPoll(VideoGenRequest(model: "test/video-model", prompt: "clip"))
+                Issue.record("Expected the submit to throw.")
+            } catch let thrown as MediaServiceError {
+                #expect(thrown == error)
+            }
+            let record = try #require(controller.allJobs().first)
+            #expect(controller.allJobs().count == 1)
+            #expect(record.submissionState == .outcomeUnknown)
+            #expect(JobPresentation.make(record).label == "Submission unconfirmed")
+        }
+    }
+
+    @Test("only an HTTP 4xx answer counts as a definitive rejection")
+    func definitiveRejectionClassification() {
+        for status in [400, 401, 402, 403, 404, 413, 422, 429] {
+            #expect(VideoGenService.isDefinitiveRejection(MediaServiceError.http(status: status, message: "")))
+        }
+        // 408 says the server gave up waiting, not that nothing was accepted.
+        for status in [408, 500, 502, 503, 504] {
+            #expect(!VideoGenService.isDefinitiveRejection(MediaServiceError.http(status: status, message: "")))
+        }
+        #expect(!VideoGenService.isDefinitiveRejection(MediaServiceError.transport("offline")))
+        #expect(!VideoGenService.isDefinitiveRejection(MediaServiceError.decoding("x")))
+        #expect(!VideoGenService.isDefinitiveRejection(CancellationError()))
+        #expect(!VideoGenService.isDefinitiveRejection(URLError(.timedOut)))
+    }
+
     @Test("a request-build failure records nothing — nothing was sent")
     func requestBuildFailureRecordsNothing() async throws {
         let (service, controller) = makeService(transport: KeylessMediaTransport())

@@ -180,6 +180,30 @@ struct VideoJob: Decodable, Sendable, Equatable {
     }
 }
 
+/// A video job that ended at the provider without a result (`failed`,
+/// `cancelled` or `expired`). Deliberately not a `MediaServiceError`
+/// transport failure: the request reached OpenRouter and the provider said
+/// no (a moderation refusal, for example), so it is never retried as a
+/// network problem and never worded like one.
+struct VideoJobFailure: Error, LocalizedError, Equatable {
+    /// Terminal remote status as reported by the provider.
+    let status: String
+    /// The provider's own explanation, when it sent one.
+    let reason: String?
+
+    var errorDescription: String? {
+        let lead: String
+        switch status {
+        case "cancelled": lead = "The provider cancelled this video job"
+        case "expired": lead = "This video job expired at the provider"
+        default: lead = "The provider could not generate this video"
+        }
+        let detail = reason.map(ErrorCopy.fragment) ?? ""
+        return (detail.isEmpty ? "\(lead)." : "\(lead): \(detail).")
+            + " Submitting again starts a new job, which is billed separately."
+    }
+}
+
 /// Retry policy for transient poll failures (network errors, 5xx, 429).
 /// One failed poll must not end polling while the tray still says Running.
 struct PollRetryPolicy: Sendable, Equatable {
@@ -266,8 +290,9 @@ final class VideoGenService: ObservableObject {
     /// The polling loop runs in a task this service owns (keyed by remote
     /// job ID), so `stopPolling(remoteID:)` cancels exactly that loop. Other
     /// jobs keep polling. Local cancellation surfaces as `CancellationError`
-    /// and never claims the remote job was cancelled; remote failures throw
-    /// `MediaServiceError`.
+    /// and never claims the remote job was cancelled; a job the provider
+    /// ended without a result throws `VideoJobFailure`, and request failures
+    /// throw `MediaServiceError`.
     func submitAndPoll(
         _ request: VideoGenRequest,
         pollInterval: Duration = .seconds(5),
@@ -279,19 +304,27 @@ final class VideoGenService: ObservableObject {
         do {
             job = try await transport.send(submit)
         } catch {
-            // W01/W06 honesty: the POST /videos was SENT, so the outcome is
-            // genuinely unknown — a remote (possibly paid) job may or may not
-            // exist. Record exactly that durably — never an automatic
+            // W01/W06 honesty: the POST /videos was SENT. A definitive HTTP
+            // rejection means no job exists and nothing was billed, so it is
+            // recorded as a failed submission. Anything else leaves the
+            // outcome genuinely unknown — a remote (possibly paid) job may or
+            // may not exist. Record exactly that durably — never an automatic
             // resubmission candidate — and rethrow unchanged. Failures thrown
             // ABOVE this point (request building, JSON encoding) sent nothing
-            // and must not record an unknown outcome. The localized
-            // description carries no key material: these errors are built
-            // from server messages and URLError descriptions, never from
-            // request headers.
-            jobController.recordUnknownSubmission(
-                modelID: request.model,
-                error: error.localizedDescription
-            )
+            // and must not record anything. The localized description
+            // carries no key material: these errors are built from server
+            // messages and URLError descriptions, never from request headers.
+            if Self.isDefinitiveRejection(error) {
+                jobController.recordRejectedSubmission(
+                    modelID: request.model,
+                    error: error.localizedDescription
+                )
+            } else {
+                jobController.recordUnknownSubmission(
+                    modelID: request.model,
+                    error: error.localizedDescription
+                )
+            }
             throw error
         }
         activeJob = job
@@ -310,6 +343,16 @@ final class VideoGenService: ObservableObject {
         return try await runOwnedPollLoop(
             from: job, modelID: request.model, pollInterval: pollInterval, onUpdate: onUpdate
         )
+    }
+
+    /// True when a submit error proves the provider refused the request, so
+    /// no remote job exists: an HTTP 4xx answer. Transport failures,
+    /// cancellation, 5xx and undecodable bodies stay outcome-unknown, as
+    /// does 408 (the server gave up waiting, which says nothing certain
+    /// about what an intermediary already forwarded).
+    static func isDefinitiveRejection(_ error: Error) -> Bool {
+        guard case MediaServiceError.http(let status, _) = error else { return false }
+        return (400...499).contains(status) && status != 408
     }
 
     /// Resumes polling for a durable job record (W09): restarts the owned
@@ -371,6 +414,9 @@ final class VideoGenService: ObservableObject {
         }
         pollTasks[remoteID] = (generation, loop)
         inFlightRemoteIDs.insert(remoteID)
+        // A resumed record (stopped locally, or left over from a previous
+        // run) reads as running from the moment a loop owns it again.
+        jobController.recordPollingStarted(remoteID: remoteID)
         defer {
             if pollTasks[remoteID]?.generation == generation {
                 pollTasks[remoteID] = nil
@@ -423,6 +469,10 @@ final class VideoGenService: ObservableObject {
                 jobController.recordPollFailure(remoteID: job.id, error: note)
                 throw mapped
             }
+            // A response that lands just after Stop belongs to a cancelled
+            // loop: do not report it as progress. A terminal answer is still
+            // recorded below, because the job really did finish.
+            if Task.isCancelled && !job.isTerminal { throw CancellationError() }
             activeJob = job
             jobController.recordPollUpdate(
                 remoteID: job.id, remoteStatus: job.status, error: job.error, cost: job.cost
@@ -439,7 +489,7 @@ final class VideoGenService: ObservableObject {
         )
         AppToasts.jobFinished(JobPollingState(remoteStatus: job.status), kind: "video")
         guard job.isSuccess else {
-            throw MediaServiceError.transport(job.error ?? "Video generation \(job.status).")
+            throw VideoJobFailure(status: job.status, reason: job.error)
         }
         return job
     }
@@ -527,9 +577,12 @@ final class VideoGenService: ObservableObject {
 
     /// Cancels one job's owned poll loop. The remote job keeps running and
     /// the durable record is marked `.stoppedLocally` — explicitly distinct
-    /// from remote failure/cancellation and still resumable.
+    /// from remote failure/cancellation and still resumable. A record that
+    /// still says polling although no loop in this process owns it is
+    /// demoted too, so Stop always leaves a job that can be resumed.
     func stopPolling(remoteID: String) {
-        guard pollTasks[remoteID] != nil else { return }
+        guard pollTasks[remoteID] != nil
+            || jobController.record(remoteID: remoteID)?.pollingState == .polling else { return }
         jobController.recordStoppedLocally(remoteID: remoteID)
         AppToasts.jobFinished(.stoppedLocally, kind: "video")
         cancelLoop(remoteID: remoteID)

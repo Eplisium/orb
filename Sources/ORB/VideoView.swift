@@ -81,6 +81,9 @@ struct VideoView: View {
     /// Placeholder prompt for rows whose durable record predates prompt storage.
     private static let unknownPrompt = "(resumed from a previous session)"
 
+    /// Row status for a submit the provider refused (no job, nothing billed).
+    private static let rejectedStatus = "not submitted"
+
 
     private var controlsColumn: some View {
         ScrollView {
@@ -295,7 +298,8 @@ struct VideoView: View {
                         CreationActions.reveal(creation, in: saved)
                     }
                 },
-                isDownloading: { record in record.remoteID.map { service.downloadingRemoteIDs.contains($0) } ?? false }
+                isDownloading: { record in record.remoteID.map { service.downloadingRemoteIDs.contains($0) } ?? false },
+                hasLiveRun: { service.isRunInFlight(for: $0) }
             )
             .padding(.horizontal, 14).padding(.top, 10)
             jobsColumnBody
@@ -382,7 +386,7 @@ struct VideoView: View {
     }
 
     private func resumableRow(_ record: JobRecord) -> some View {
-        let p = JobPresentation.make(record)
+        let p = JobPresentation.make(record, hasLiveRun: service.isRunInFlight(for: record))
         return HStack(alignment: .top, spacing: 8) {
             VStack(alignment: .leading, spacing: 3) {
                 HStack(spacing: 6) {
@@ -533,6 +537,9 @@ struct VideoView: View {
                 if let failure = downloadErrors[record.id] {
                     Text("Not saved: \(failure)").font(.caption).foregroundStyle(.orange)
                 }
+            } else if record.job.status == Self.rejectedStatus {
+                Text("The provider rejected the request, so no job exists and nothing was billed.")
+                    .font(.caption).foregroundStyle(.secondary)
             } else if record.job.status == "submission uncertain" {
                 Text("Submission outcome unknown. Check recoverable jobs before attempting another paid run.")
                     .font(.caption).foregroundStyle(.orange)
@@ -561,7 +568,7 @@ struct VideoView: View {
 
     private func statusPill(_ status: String) -> some View {
         let color: Color = status == "completed" ? .green
-            : status == "failed" || status == "expired" || status == "cancelled" ? .red : .orange
+            : status == "failed" || status == "expired" || status == "cancelled" || status == Self.rejectedStatus ? .red : .orange
         return Text(status.uppercased())
             .orbFont(size: 11, weight: .bold)
             .padding(.horizontal, 7).padding(.vertical, 3)
@@ -654,9 +661,12 @@ struct VideoView: View {
                 errorMessage = error.localizedDescription
                 // Poll/network failure does not mean the paid remote job failed.
                 // Keep its last known status and durable resume affordance.
+                // A row still carrying its local ID never got a remote job:
+                // either the provider refused it outright, or the outcome is unknown.
                 if let index = jobs.firstIndex(where: { $0.id == recordId }),
                    jobs[index].job.id == recordId {
-                    jobs[index].job = VideoJob(id: recordId, status: "submission uncertain", pollingURL: nil,
+                    let status = VideoGenService.isDefinitiveRejection(error) ? Self.rejectedStatus : "submission uncertain"
+                    jobs[index].job = VideoJob(id: recordId, status: status, pollingURL: nil,
                         generationId: nil, unsignedURLs: nil, error: error.localizedDescription, cost: nil)
                 }
                 refreshResumableRecords()

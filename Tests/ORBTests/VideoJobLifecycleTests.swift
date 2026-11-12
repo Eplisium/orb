@@ -156,8 +156,10 @@ struct VideoJobLifecycleTests {
         } catch is CancellationError {
             Issue.record("A remote failure must not surface as local cancellation.")
         } catch {
-            #expect(error is MediaServiceError)
+            #expect(error is VideoJobFailure)
             #expect(error.localizedDescription.contains("Provider quota exceeded"))
+            // The request reached the provider: this is not a connectivity problem.
+            #expect(!error.localizedDescription.contains("Network error"))
         }
         #expect(service.activeJob?.status == "failed")
     }

@@ -339,7 +339,9 @@ struct SpeechView: View {
                 let response = try await service.transcribe(request)
                 transcript = response.text
                 lastTranscription = response
-                let structured = transcriptionFormat == "verbose_json"
+                // The picker may have changed while the request was in flight;
+                // save the shape that was actually asked for.
+                let structured = request.wantsStructuredTranscript
                 var details: [String: Any] = ["text": response.text]
                 if let language = response.language { details["language"] = language }
                 if let duration = response.duration { details["duration"] = duration }

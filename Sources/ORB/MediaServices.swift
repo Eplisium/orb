@@ -308,7 +308,10 @@ final class FileService: ObservableObject {
         return try await transport.send(request)
     }
 
-    private static func safeMultipartFilename(_ name: String) -> String {
+    /// A filename safe to quote inside a multipart `Content-Disposition`
+    /// header: quotes, backslashes and line breaks would end the quoted
+    /// string or the header itself. Shared by every multipart upload.
+    nonisolated static func safeMultipartFilename(_ name: String) -> String {
         name.replacingOccurrences(of: "\\", with: "_")
             .replacingOccurrences(of: "\"", with: "_")
             .replacingOccurrences(of: "\r", with: "_")
@@ -431,6 +434,9 @@ final class DirectoryService: ObservableObject {
     @Published var providers: [ProviderInfo] = []
     @Published var keyInfo: KeyInfo?
     @Published var lastError: String?
+    /// The message `fetchKeyInfo` last put in `lastError`, so a later
+    /// successful key lookup clears its own error and not a providers one.
+    private var keyInfoError: String?
 
     private let transport: MediaTransport
 
@@ -461,10 +467,17 @@ final class DirectoryService: ObservableObject {
             let request = try transport.request(path: "key")
             struct Envelope: Decodable { let data: KeyInfo }
             keyInfo = try await transport.send(request, as: Envelope.self).data
+            if lastError == keyInfoError { lastError = nil }
+            keyInfoError = nil
         } catch is CancellationError {
             // Leave prior key info in place; a cancelled refresh is not an error.
         } catch {
+            // The details on screen describe whichever key answered last. If
+            // the current key cannot be read (replaced, revoked, removed),
+            // they must not stay up as though they were still its details.
+            keyInfo = nil
             lastError = error.localizedDescription
+            keyInfoError = lastError
         }
     }
 }

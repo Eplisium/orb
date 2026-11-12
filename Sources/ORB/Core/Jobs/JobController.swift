@@ -105,8 +105,20 @@ struct JobRecord: Equatable, Identifiable, Sendable {
 @MainActor
 final class JobController {
     /// The controller used by the default view path. Backed by the shared
-    /// database so records survive restarts.
-    static let shared = JobController()
+    /// database so records survive restarts. Created once per process and
+    /// before any poll loop can start, so it runs the launch recovery.
+    static let shared = JobController.launched()
+
+    /// Builds the controller a fresh process starts with. A record still
+    /// marked `.polling` in storage was being polled when the previous run
+    /// quit or crashed; no loop owns it any more, so it is demoted to
+    /// `.stoppedLocally`. Left alone it would read "Running" forever, with
+    /// Stop as its only action and nothing to stop.
+    static func launched(database: DatabaseManager = .shared) -> JobController {
+        let controller = JobController(database: database)
+        controller.demoteInterruptedPolls()
+        return controller
+    }
 
     private let database: DatabaseManager
     private(set) var lastPersistenceError: String?
@@ -169,12 +181,26 @@ final class JobController {
     /// resubmission candidate).
     @discardableResult
     func recordUnknownSubmission(kind: String = "video", modelID: String?, error: String?) -> JobRecord? {
+        recordUnsubmitted(.outcomeUnknown, kind: kind, modelID: modelID, error: error)
+    }
+
+    /// Records a submission the provider definitively rejected: no remote
+    /// job exists and nothing was billed, so it is safe to correct the
+    /// request and submit again.
+    @discardableResult
+    func recordRejectedSubmission(kind: String = "video", modelID: String?, error: String?) -> JobRecord? {
+        recordUnsubmitted(.failed, kind: kind, modelID: modelID, error: error)
+    }
+
+    private func recordUnsubmitted(
+        _ state: JobSubmissionState, kind: String, modelID: String?, error: String?
+    ) -> JobRecord? {
         let now = Date()
         let record = JobRecord(
             id: UUID(),
             remoteID: nil,
             kind: kind,
-            submissionState: .outcomeUnknown,
+            submissionState: state,
             pollingState: .idle,
             lastRemoteStatus: nil,
             conversationID: nil,
@@ -192,17 +218,33 @@ final class JobController {
     /// Updates polling state after a successful poll. Terminal remote
     /// statuses are recorded immediately; non-terminal statuses never
     /// regress a terminal local state.
+    ///
+    /// A non-terminal status also never revives a `.stoppedLocally` record:
+    /// a response that lands just after Stop belongs to a loop that is
+    /// already cancelled, and flipping the record back to `.polling` would
+    /// leave it "Running" with nothing polling it. Only an owned loop
+    /// starting (`recordPollingStarted`) makes a stopped record poll again.
     func recordPollUpdate(remoteID: String, remoteStatus: String, error: String?, cost: Double?) {
         update(remoteID: remoteID) { record in
             record.lastRemoteStatus = remoteStatus
-            record.recoverableError = error
             if let cost { record.usageCost = cost }
             let mapped = JobPollingState(remoteStatus: remoteStatus)
             if mapped.isTerminal {
                 record.pollingState = mapped
-            } else if record.pollingState == .idle || record.pollingState == .stoppedLocally {
+                record.recoverableError = error
+            } else if record.pollingState != .stoppedLocally {
                 record.pollingState = .polling
+                record.recoverableError = error
             }
+        }
+    }
+
+    /// Marks the record as polled by a live loop. Called when a poll loop
+    /// starts (first submit or Resume), so a resumed job reads as running
+    /// from the moment it is picked up. No-op for a terminal job.
+    func recordPollingStarted(remoteID: String) {
+        update(remoteID: remoteID) { record in
+            record.pollingState = .polling
         }
     }
 
@@ -235,6 +277,22 @@ final class JobController {
             record.pollingState = .stoppedLocally
             record.recoverableError = error
         }
+    }
+
+    /// Demotes every record still marked `.polling` to `.stoppedLocally`,
+    /// except those whose remote ID is in `live` (jobs a loop in this
+    /// process is polling right now). The last known remote status is kept
+    /// and the remote job is never claimed stopped, failed or cancelled.
+    /// Returns how many records were demoted.
+    @discardableResult
+    func demoteInterruptedPolls(excluding live: Set<String> = []) -> Int {
+        var demoted = 0
+        for record in allJobs() where record.pollingState == .polling {
+            guard let remoteID = record.remoteID, !live.contains(remoteID) else { continue }
+            recordStoppedLocally(remoteID: remoteID)
+            demoted += 1
+        }
+        return demoted
     }
 
     /// Links a finished job to the saved creation made from its output. Set
