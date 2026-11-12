@@ -383,4 +383,13 @@ struct OpenRouterClientTests {
         await #expect(throws: CancellationError.self) { _ = try await task.value }
         #expect(await transport.requestCount == 1)
     }
+
+    @Test("offline sends fail fast instead of waiting for connectivity")
+    func failsFastOffline() {
+        // Waiting for connectivity suspends the request timeout, so an
+        // offline send would hang until the one-hour resource timeout.
+        // Failing immediately hands it to the bounded not-connected retry.
+        let configuration = OpenRouterClient.makeConfiguration()
+        #expect(configuration.waitsForConnectivity == false)
+    }
 }

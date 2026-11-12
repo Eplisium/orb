@@ -17,19 +17,22 @@ struct ChatView: View {
     @State private var unread = UnreadTracker()
     @AppStorage("playground.requireCommandToSend") private var requireCommandToSend = false
     @StudioState("ChatView.undoSnapshot") private var undoSnapshot: UndoToastItem<[StoredConversation]>? = nil
-    /// Last edit, for Undo and to carry its attachments into the resend.
-    @StudioState("ChatView.pendingEdit") private var pendingEdit: UndoToastItem<ChatService.ConversationEdit>? = nil
+    /// The edit in progress. Nothing is removed until it is sent, so it has
+    /// no timer: it lasts until Send or Cancel Edit.
+    @StudioState("ChatView.pendingEdit") private var pendingEdit: ChatService.ConversationEdit? = nil
     /// Attachments of the message being edited; resent unless removed.
     @StudioState("ChatView.carriedParts") private var carriedParts: [MessageContentPart]? = nil
     @State private var dropTargeted = false
-    @State private var temperatureIsModelDefault = false
+    // Sampling and advanced settings persist like the Agent's sliders, so a
+    // section switch or a relaunch keeps them.
+    @AppStorage("playground.chatTemperatureIsModelDefault") private var temperatureIsModelDefault = false
     @StateObject private var pins = ConversationPinStore(key: "orb.pinned.chat")
     @State private var selectedSessionIDs = Set<UUID>()
     @State private var selectedModelId = ""
     @AppStorage(PlaygroundModelDefaults.chatKey) private var defaultModelId = ""
-    @State private var temperature = 0.7
-    @State private var maxTokens: Double = 0
-    @State private var settings = GenerationSettings.default
+    @AppStorage("playground.chatTemperature") private var temperature = 0.7
+    @AppStorage("playground.chatMaxTokens") private var maxTokens: Double = 0
+    @AppStorage("playground.chatSettings") private var storedSettings = StoredGenerationSettings(.default)
     @State private var showSettings = false
     @State private var showAdvancedSettings = false
     @State private var showModelPicker = false
@@ -51,6 +54,16 @@ struct ChatView: View {
     @State private var pasteMonitor = ComposerPasteMonitor()
 
     private let accent = PlaygroundTheme.chatAccent
+
+    private var settings: GenerationSettings { storedSettings.value }
+
+    /// The edit in progress, when it belongs to the conversation on screen
+    /// and its message still exists.
+    private var activeEdit: (edit: ChatService.ConversationEdit, replacedCount: Int)? {
+        guard let edit = pendingEdit, edit.conversationID == chatService.activeConversation?.id,
+              let replaced = chatService.messagesReplaced(by: edit) else { return nil }
+        return (edit, replaced.count)
+    }
 
     /// Folds the two quick-access sliders into the full settings object so the
     /// simple controls and the advanced panel stay in sync.
@@ -81,6 +94,7 @@ struct ChatView: View {
         .onDisappear { pasteMonitor.remove() }
         .task {
             chatService.activateConversation(for: .chat)
+            if activeEdit == nil { endEdit() }
             selectedModelId = PlaygroundModelDefaults.initialSelection(
                 activeModelId: chatService.activeConversation?.modelId,
                 preferredModelId: preferredModelId
@@ -96,6 +110,9 @@ struct ChatView: View {
         }
         .onChange(of: chatService.activeConversation?.id) { _, _ in
             resetFollowState()
+            // An edit belongs to one conversation; leaving it ends the edit
+            // (nothing was removed, so nothing needs restoring).
+            if activeEdit == nil { endEdit() }
             // Session switches (sidebar select, delete, branch, activate) must
             // bring the composer's model along; otherwise the next send hands
             // the stale model to prepareActiveConversation, which overwrites
@@ -132,16 +149,6 @@ struct ChatView: View {
                     token: toast.id,
                     undo: { chatService.restore(toast.payload); undoSnapshot = nil },
                     dismiss: { undoSnapshot = nil }
-                )
-                .padding(.bottom, 80)
-                .transition(.move(edge: .bottom).combined(with: .opacity))
-            } else if let toast = pendingEdit {
-                UndoToastView(
-                    message: UndoToast.editMessage(removed: toast.payload.removedCount),
-                    symbol: "pencil",
-                    token: toast.id,
-                    undo: { undoEdit(toast.payload) },
-                    dismiss: { pendingEdit = nil }
                 )
                 .padding(.bottom, 80)
                 .transition(.move(edge: .bottom).combined(with: .opacity))
@@ -325,7 +332,7 @@ struct ChatView: View {
             .buttonStyle(.plain)
             .accessibilityLabel("Session settings")
             .sheet(isPresented: $showAdvancedSettings) {
-                AdvancedSettingsView(accent: accent, settings: $settings)
+                AdvancedSettingsView(accent: accent, settings: $storedSettings.value)
             }
         }
         .padding(.horizontal, 18)
@@ -563,7 +570,9 @@ struct ChatView: View {
                             updateFollowsLatest(viewportHeight: viewport.size.height)
                         }
 
-                        if !followsLatest && (conversationIsRunning || unread.unread > 0) {
+                        // Offered whenever the latest message is out of view,
+                        // not only while a reply streams or arrives.
+                        if !followsLatest {
                             Button {
                                 scrollIntent.reset()
                                 followsLatest = true
@@ -591,6 +600,10 @@ struct ChatView: View {
                         guard followsLatest else { return }
                         requestFollowScroll(proxy)
                     }
+                    // Open at the latest message. The follow-scroll above
+                    // only reacts to changes, so without this a reopened
+                    // conversation showed its first message.
+                    .task(id: conversation.id) { await openAtLatest(proxy) }
                     .onDisappear { pendingFollowScroll?.cancel(); pendingFollowScroll = nil }
                 }
             }
@@ -675,6 +688,10 @@ struct ChatView: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
 
+            if let active = activeEdit {
+                EditBanner(message: ConversationEditCopy.banner(replacing: active.replacedCount), cancel: cancelEdit)
+            }
+
             SlashCommandMenu(entries: SlashCommand.suggestions(for: messageText)) { entry in
                 messageText = "/" + entry.name + (entry.name == "clear" ? "" : " ")
             }
@@ -688,7 +705,7 @@ struct ChatView: View {
                     .padding(.horizontal, 14)
                     .padding(.top, 12)
                     .padding(.bottom, 9)
-                    .onSubmit { if ComposerKeyPolicy.shouldSend(command: NSEvent.modifierFlags.contains(.command), shift: NSEvent.modifierFlags.contains(.shift), requireCommand: requireCommandToSend) { sendMessage() } }
+                    .composerReturnKey(requireCommand: requireCommandToSend, send: sendMessage)
 
                 HStack(spacing: 9) {
                     Button(action: chooseAttachments) {
@@ -878,7 +895,9 @@ struct ChatView: View {
         let settings = requestSettings
         let carried = carriedParts ?? []
         carriedParts = nil
-        pendingEdit = nil
+        // Sending the edit is what replaces the old messages; until then the
+        // edit stays cancellable, including when the attachments fail to load.
+        let edit = activeEdit?.edit
         guard drafts.isEmpty else {
             // Build parts first (off-main); the draft is cleared only once the
             // attachments were read, so a failed read never loses the text.
@@ -888,7 +907,8 @@ struct ChatView: View {
                 do {
                     let wireParts = try await ChatAttachmentBuilder.buildParts(for: drafts)
                     clearComposer(ifUnchanged: sentText, drafts: drafts)
-                    chatService.sendMessage(prompt, modelId: modelId, settings: settings, parts: carried + wireParts)
+                    pendingEdit = nil
+                    chatService.sendMessage(prompt, modelId: modelId, settings: settings, parts: carried + wireParts, replacing: edit)
                 } catch {
                     if !carried.isEmpty, carriedParts == nil { carriedParts = carried }
                     chatService.lastError = "Could not read attachments: \(error.localizedDescription). Your message was kept."
@@ -897,23 +917,30 @@ struct ChatView: View {
             return
         }
         clearComposer(ifUnchanged: sentText, drafts: drafts)
-        chatService.sendMessage(prompt, modelId: modelId, settings: settings, parts: carried.isEmpty ? nil : carried)
+        pendingEdit = nil
+        chatService.sendMessage(prompt, modelId: modelId, settings: settings, parts: carried.isEmpty ? nil : carried, replacing: edit)
     }
 
     private func beginEdit(_ messageID: UUID, in conversationID: UUID) {
         guard let edit = chatService.beginEdit(from: messageID, in: conversationID) else { return }
-        pendingEdit = UndoToastItem(edit)
+        pendingEdit = edit
         messageText = edit.text
         carriedParts = edit.parts
         inputFocused = true
     }
 
-    private func undoEdit(_ edit: ChatService.ConversationEdit) {
-        if chatService.undoEdit(edit) {
-            if messageText == edit.text { messageText = "" }
-            carriedParts = nil
-        }
+    /// Cancel Edit: the conversation was never changed, so this only puts the
+    /// composer back. Text the user rewrote is kept as an ordinary draft.
+    private func cancelEdit() {
+        if let edit = pendingEdit, messageText == edit.text { messageText = "" }
+        endEdit()
+    }
+
+    /// Drops the edit and the attachments it carried from the original message.
+    private func endEdit() {
+        guard pendingEdit != nil else { return }
         pendingEdit = nil
+        carriedParts = nil
     }
 
     /// Clears what was sent, keeping anything typed while attachments loaded.
@@ -1037,6 +1064,19 @@ struct ChatView: View {
         scrollIntent.reset()
         bottomOffset = .infinity
         lastScrollRequest = nil
+    }
+
+    /// Scrolls a just-opened conversation to its latest message. Lazy rows are
+    /// measured only as they are realized, so the first jump can land short
+    /// of the true end; the later passes settle it. They stop as soon as the
+    /// user scrolls away.
+    private func openAtLatest(_ proxy: ScrollViewProxy) async {
+        proxy.scrollTo("chat-message-bottom", anchor: .bottom)
+        for delay in [Duration.milliseconds(60), .milliseconds(240)] {
+            do { try await Task.sleep(for: delay) } catch { return }
+            guard followsLatest else { return }
+            proxy.scrollTo("chat-message-bottom", anchor: .bottom)
+        }
     }
 
     /// Issues a throttled, animation-free scroll-to-bottom. Animation is

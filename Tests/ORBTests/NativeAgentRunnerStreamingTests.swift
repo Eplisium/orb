@@ -203,6 +203,56 @@ struct NativeAgentRunnerStreamingTests {
         #expect(abs((result.usage?.cost ?? 0) - 0.3) < 0.000_001)
     }
 
+    @Test("a tool-call id reused on a later turn is renamed and every call stays paired")
+    func reusedIdsAreRenamed() async throws {
+        let client = AgentFixtureClient([[
+            .toolCallFragment(choiceIndex: 0, toolIndex: 0, id: "call_0", type: "function", name: "run_command", arguments: "{}"),
+            .finishReason(choiceIndex: 0, reason: "tool_calls")
+        ], [
+            .toolCallFragment(choiceIndex: 0, toolIndex: 0, id: "call_0", type: "function", name: "run_command", arguments: "{}"),
+            .finishReason(choiceIndex: 0, reason: "tool_calls")
+        ], [.contentDelta(choiceIndex: 0, text: "ok"), .done]])
+        let tools = ToolRecorder()
+        let result = try await NativeAgentRunner.run(
+            prompt: "go", modelId: "test/model", apiKey: "test-key", workspace: "/tmp",
+            fullComputerAccess: true, history: [], client: client,
+            toolExecutor: { try await tools.execute($0) }, onEvent: { _ in }
+        )
+
+        // Each turn keeps its own id, so the UI and the rebuilt history can
+        // still key on it.
+        #expect(await tools.calls.map(\.id) == ["call_0", "call_0_turn2"])
+        // And every assistant tool_calls entry is paired with its tool message.
+        let assistantCalls = result.history.flatMap { ($0.toolCalls ?? []).map(\.id) }
+        let toolResults = result.history.compactMap(\.toolCallId)
+        #expect(assistantCalls == ["call_0", "call_0_turn2"])
+        #expect(toolResults == assistantCalls)
+    }
+
+    @Test("an id reused after a rejected call is renamed and its tool message is paired")
+    func reusedIdAfterRejection() async throws {
+        let client = AgentFixtureClient([[
+            .toolCallFragment(choiceIndex: 0, toolIndex: 0, id: "t1", type: "function", name: "run_command", arguments: #"{\"#),
+            .finishReason(choiceIndex: 0, reason: "tool_calls")
+        ], [
+            .toolCallFragment(choiceIndex: 0, toolIndex: 0, id: "t1", type: "function", name: "run_command", arguments: "{}"),
+            .finishReason(choiceIndex: 0, reason: "tool_calls")
+        ], [.contentDelta(choiceIndex: 0, text: "ok"), .done]])
+        let tools = ToolRecorder()
+        let result = try await NativeAgentRunner.run(
+            prompt: "go", modelId: "test/model", apiKey: "test-key", workspace: "/tmp",
+            fullComputerAccess: true, history: [], client: client,
+            toolExecutor: { try await tools.execute($0) }, onEvent: { _ in }
+        )
+
+        #expect(await tools.calls.map(\.id) == ["t1_turn2"])
+        let assistantCalls = result.history.flatMap { ($0.toolCalls ?? []).map(\.id) }
+        let toolResults = result.history.compactMap(\.toolCallId)
+        #expect(assistantCalls == ["t1", "t1_turn2"])
+        // The rejected first call must still have its tool error message.
+        #expect(toolResults == assistantCalls)
+    }
+
     @Test("system prompt refreshes workspace/access and appends custom instructions")
     func refreshedSystemPrompt() async throws {
         let old = AgentAPIMessage(role: "system", content: "old unsafe workspace")

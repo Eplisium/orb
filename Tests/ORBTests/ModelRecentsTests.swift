@@ -101,7 +101,9 @@ struct ModelCatalogSectionTests {
 
     private let cheap = model(id: "cheap", name: "Cheap", promptCost: "0.000001")
     private let pricey = model(id: "pricey", name: "Pricey", promptCost: "0.01")
-    private let unknown = model(id: "unknown", name: "Unknown Cost", promptCost: nil)
+    // "-1" is the catalog's variable/unknown price sentinel: a nil prompt is
+    // "0", which under the browser rule means free, not missing.
+    private let unknown = model(id: "unknown", name: "Unknown Cost", promptCost: "-1")
 
     @Test("defaults keep the classic behavior: favorites then all, alphabetical")
     func defaultsMatchClassicBehavior() {
@@ -179,5 +181,37 @@ struct ModelCatalogSectionTests {
         let models = [model(id: "b", name: "Bravo"), model(id: "a", name: "alpha"), model(id: "c", name: "Charlie")]
         #expect(AgentModelCatalog.sort(models, by: .name, order: .ascending).map(\.name) == ["alpha", "Bravo", "Charlie"])
         #expect(AgentModelCatalog.sort(models, by: .name, order: .descending).map(\.name) == ["Charlie", "Bravo", "alpha"])
+    }
+
+    @Test("input and output cost sort free models first and variable prices last")
+    func freeModelsSortFirstByCost() {
+        let free = model(id: "free", promptCost: "0", completionCost: "0")
+        let paid = model(id: "paid", promptCost: "0.000010", completionCost: "0.000020")
+        let variable = model(id: "variable", promptCost: "-1", completionCost: "-1")
+        let models = [variable, paid, free]
+        // Free is price 0, so it comes before paid in both cost sorts; a
+        // variable (-1) or unknown price is missing and always sorts last.
+        #expect(AgentModelCatalog.sort(models, by: .promptCost, order: .ascending).map(\.id) == ["free", "paid", "variable"])
+        #expect(AgentModelCatalog.sort(models, by: .completionCost, order: .ascending).map(\.id) == ["free", "paid", "variable"])
+        #expect(AgentModelCatalog.sort(models, by: .promptCost, order: .descending).map(\.id) == ["paid", "free", "variable"])
+    }
+
+    @Test("an empty catalog is distinguished from a search with no matches")
+    func emptyStates() {
+        #expect(AgentModelCatalog.emptyState(catalogIsEmpty: true, hasResults: true) == nil)
+        #expect(AgentModelCatalog.emptyState(catalogIsEmpty: false, hasResults: true) == nil)
+        #expect(AgentModelCatalog.emptyState(catalogIsEmpty: true, hasResults: false) == .catalogNotLoaded)
+        #expect(AgentModelCatalog.emptyState(catalogIsEmpty: false, hasResults: false) == .noMatches)
+    }
+
+    @Test("Return selects the first row in display order")
+    func firstResultIsTopRow() {
+        let a = model(id: "a", name: "Alpha")
+        let b = model(id: "b", name: "Beta")
+        let sections = AgentModelCatalog.sections(
+            models: [b, a], favoriteIds: [], searchText: "", toolCapableOnly: false
+        )
+        #expect(AgentModelCatalog.firstResult(in: sections)?.id == "a")
+        #expect(AgentModelCatalog.firstResult(in: []) == nil)
     }
 }

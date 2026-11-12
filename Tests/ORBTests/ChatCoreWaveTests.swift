@@ -47,6 +47,14 @@ actor WaveScriptedClient: TimedOpenRouterStreaming {
     }
 }
 
+private enum CountingStoreError: LocalizedError {
+    case remove(String)
+
+    var errorDescription: String? {
+        switch self { case .remove(let reason): return reason }
+    }
+}
+
 /// Distinguishes full rewrites from incremental saves.
 @MainActor
 final class CountingConversationStore: ConversationStore {
@@ -80,8 +88,14 @@ final class CountingConversationStore: ConversationStore {
         }
         records[record.conversation.id] = existing
     }
-    func removeConversation(_ id: UUID) throws { records[id] = nil }
+    /// Set to make removals fail, for edit-commit failure tests.
+    var removeError: String?
+    func removeConversation(_ id: UUID) throws {
+        if let removeError { throw CountingStoreError.remove(removeError) }
+        records[id] = nil
+    }
     func removeMessage(_ id: UUID) throws {
+        if let removeError { throw CountingStoreError.remove(removeError) }
         for key in records.keys { records[key]?.conversation.messages.removeAll { $0.id == id } }
     }
     func recoverInterruptedRecords() throws {}
@@ -494,8 +508,8 @@ struct MessageMetadataTests {
 @Suite("Wave1: edit and resend")
 @MainActor
 struct EditResendTests {
-    @Test("an edit can be undone and carries the original attachments")
-    func undoAndParts() async throws {
+    @Test("an edit starts without removing anything and carries the original attachments")
+    func beginsWithoutTruncating() async throws {
         let store = CountingConversationStore()
         let service = ChatService(client: WaveScriptedClient([]), store: store, apiKeyProvider: { "fixture" })
         let image = MessageContentPart.image(url: "data:image/png;base64,AA==")
@@ -509,26 +523,107 @@ struct EditResendTests {
         let edit = try #require(service.beginEdit(from: conversation.messages[0].id, in: conversation.id))
         #expect(edit.text == "look")
         #expect(edit.parts == [image])
-        #expect(edit.removedCount == 4)
-        #expect(service.activeConversation?.messages.isEmpty == true)
-
-        #expect(service.undoEdit(edit))
-        #expect(service.activeConversation?.messages.map(\.id) == conversation.messages.map(\.id))
+        // Starting the edit changes nothing: every message is still there,
+        // in memory and in the store.
+        #expect(service.messagesReplaced(by: edit)?.count == 4)
+        #expect(service.activeConversation?.messages.count == 4)
         #expect(store.records[conversation.id]?.conversation.messages.count == 4)
-        #expect(!service.undoEdit(edit), "undo is idempotent")
     }
 
-    @Test("undo is refused once the edited conversation moved on")
-    func undoRefusedAfterResend() async throws {
+    @Test("an edit can be cancelled after any wait and the conversation is untouched")
+    func cancelAfterALongWait() async throws {
+        let store = CountingConversationStore()
+        let service = ChatService(client: WaveScriptedClient([]), store: store, apiKeyProvider: { "fixture" })
+        service.sendMessage("first", modelId: "test/model")
+        try await waitUntilIdle(service)
+        service.sendMessage("second", modelId: "test/model")
+        try await waitUntilIdle(service)
+        let conversation = try #require(service.activeConversation)
+        let before = conversation.messages.map(\.id)
+        let edit = try #require(service.beginEdit(from: conversation.messages[0].id, in: conversation.id))
+
+        // Cancelling is just abandoning the edit; anything longer than the
+        // old 8-second undo window must still keep the messages.
+        try await Task.sleep(for: .milliseconds(50))
+        #expect(service.messagesReplaced(by: edit) == before)
+        #expect(service.activeConversation?.messages.map(\.id) == before)
+        #expect(store.records[conversation.id]?.conversation.messages.map(\.id) == before)
+    }
+
+    @Test("sending an edit replaces the edited message and everything after it")
+    func sendingReplacesFromTheEdit() async throws {
+        let service = ChatService(client: WaveScriptedClient([]), store: CountingConversationStore(), apiKeyProvider: { "fixture" })
+        service.sendMessage("first", modelId: "test/model")
+        try await waitUntilIdle(service)
+        service.sendMessage("second", modelId: "test/model")
+        try await waitUntilIdle(service)
+        let conversation = try #require(service.activeConversation)
+        let edit = try #require(service.beginEdit(from: conversation.messages[0].id, in: conversation.id))
+
+        service.sendMessage("first revised", modelId: "test/model", replacing: edit)
+        try await waitUntilIdle(service)
+        #expect(service.activeConversation?.messages.map(\.content) == ["first revised", "ok"])
+    }
+
+    @Test("an edit whose message is gone no longer applies and the send appends")
+    func staleEditAppends() async throws {
         let service = ChatService(client: WaveScriptedClient([]), store: CountingConversationStore(), apiKeyProvider: { "fixture" })
         service.sendMessage("a", modelId: "test/model")
         try await waitUntilIdle(service)
         let conversation = try #require(service.activeConversation)
         let edit = try #require(service.beginEdit(from: conversation.messages[0].id, in: conversation.id))
-        service.sendMessage("a2", modelId: "test/model", parts: edit.parts)
+        // Everything from the edited message on is removed after the edit
+        // began: the edit no longer applies.
+        #expect(service.truncateConversation(from: conversation.messages[0].id, in: conversation.id) != nil)
+        #expect(service.messagesReplaced(by: edit) == nil)
+        service.sendMessage("a2", modelId: "test/model", replacing: edit)
         try await waitUntilIdle(service)
-        #expect(!service.undoEdit(edit), "restoring would interleave old and new turns")
         #expect(service.activeConversation?.messages.map(\.content) == ["a2", "ok"])
+    }
+
+    @Test("undoing a delete of a running session does not restore a permanently streaming message")
+    func undoDeleteSettlesStreaming() async throws {
+        let client = WaveScriptedClient([.init(events: [.contentDelta(choiceIndex: 0, text: "ok"), .done], delay: .milliseconds(120))])
+        let store = CountingConversationStore()
+        let service = ChatService(client: client, store: store, apiKeyProvider: { "fixture" })
+        service.sendMessage("long", modelId: "test/model")
+        // Mid-stream, before the reply finishes.
+        for _ in 0..<100 where service.activeConversation?.messages.last?.status != .streaming {
+            try await Task.sleep(for: .milliseconds(2))
+        }
+        #expect(service.activeConversation?.messages.last?.status == .streaming)
+
+        let snapshot = service.deleteConversationsUndoable(ids: [service.activeConversation!.id])
+        service.restore(try #require(snapshot))
+        try await waitUntilIdle(service)
+
+        let restored = try #require(service.activeConversation?.messages.last)
+        #expect(restored.status != .streaming, "the reply can never finish again, so it must not read as running")
+        #expect(restored.status == .interrupted)
+        #expect(restored.finishReason == "cancelled")
+        #expect((restored.toolCalls ?? []).contains(where: \.isExecuting) == false, "no tool card is left spinning")
+        #expect(store.records[service.activeConversation!.id]?.conversation.messages.last?.status == .interrupted)
+    }
+
+    @Test("a failed removal aborts the send instead of interleaving turns")
+    func failedRemovalAbortsTheSend() async throws {
+        let store = CountingConversationStore()
+        store.removeError = "database is locked"
+        let client = WaveScriptedClient([])
+        let service = ChatService(client: client, store: store, apiKeyProvider: { "fixture" })
+        service.sendMessage("a", modelId: "test/model")
+        try await waitUntilIdle(service)
+        store.removeError = nil
+        service.sendMessage("b", modelId: "test/model")
+        try await waitUntilIdle(service)
+        let conversation = try #require(service.activeConversation)
+        let edit = try #require(service.beginEdit(from: conversation.messages[0].id, in: conversation.id))
+        store.removeError = "database is locked"
+
+        service.sendMessage("a2", modelId: "test/model", replacing: edit)
+        try await waitUntilIdle(service)
+        #expect(service.lastError?.contains("Could not edit the conversation") == true, "the send is aborted and the edit survives")
+        #expect(service.activeConversation?.messages.map(\.content) == conversation.messages.map(\.content))
     }
 }
 

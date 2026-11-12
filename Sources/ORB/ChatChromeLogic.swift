@@ -376,8 +376,40 @@ enum UndoToast {
         "Deleted \(count) session\(count == 1 ? "" : "s")"
     }
 
-    static func editMessage(removed count: Int) -> String {
-        "Editing — removed \(count) message\(count == 1 ? "" : "s")"
+}
+
+// MARK: Edit in progress
+
+enum ConversationEditCopy {
+    /// Banner text while a message is being edited. `count` is how many
+    /// messages sending will replace: the edited one plus everything after.
+    static func banner(replacing count: Int) -> String {
+        let following = count - 1
+        guard following > 0 else { return "Editing your message. Sending replaces it." }
+        return "Editing an earlier message. Sending replaces it and the \(following) message\(following == 1 ? "" : "s") after it."
+    }
+}
+
+// MARK: Stored generation settings
+
+/// `GenerationSettings` as an `@AppStorage` value (JSON text), so Chat's
+/// advanced settings survive a section switch and a relaunch like the Agent's
+/// sliders do. Text that no longer decodes (a field added by an update) reads
+/// as nil, which makes `@AppStorage` fall back to its default.
+struct StoredGenerationSettings: RawRepresentable, Equatable {
+    var value: GenerationSettings
+
+    init(_ value: GenerationSettings) { self.value = value }
+
+    init?(rawValue: String) {
+        guard let data = rawValue.data(using: .utf8),
+              let decoded = try? JSONDecoder().decode(GenerationSettings.self, from: data) else { return nil }
+        value = decoded
+    }
+
+    var rawValue: String {
+        guard let data = try? JSONEncoder().encode(value) else { return "" }
+        return String(decoding: data, as: UTF8.self)
     }
 }
 
@@ -476,10 +508,28 @@ struct ApprovalQueue {
 // MARK: Composer keys
 
 enum ComposerKeyPolicy {
+    /// What a Return key press in the composer does.
+    enum ReturnAction: Equatable {
+        case send
+        /// Insert a line break at the cursor.
+        case newline
+        /// Leave the key to the text field.
+        case passThrough
+    }
+
     /// Shift-Return is always a newline. With `requireCommand`, plain Return is too.
     static func shouldSend(command: Bool, shift: Bool, requireCommand: Bool) -> Bool {
         if shift { return false }
         return requireCommand ? command : true
+    }
+
+    /// Decides a Return press. Two cases belong to the text field: an input
+    /// method uses Return to commit its composition (`composing`), and
+    /// Option-Return is the field's own line break.
+    static func returnAction(command: Bool, shift: Bool, option: Bool, composing: Bool, requireCommand: Bool) -> ReturnAction {
+        if composing { return .passThrough }
+        if option, !command { return .passThrough }
+        return shouldSend(command: command, shift: shift, requireCommand: requireCommand) ? .send : .newline
     }
 
     static func hint(requireCommand: Bool) -> String {

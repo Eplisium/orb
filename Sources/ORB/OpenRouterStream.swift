@@ -141,7 +141,7 @@ struct ServerSentEventDecoder {
                 return [.apiError(.init(
                     code: error.code,
                     message: error.message,
-                    errorType: error.metadata?.errorType,
+                    errorType: error.metadata?.errorType ?? error.codeText,
                     providerName: error.metadata?.providerName
                 ))]
             }
@@ -260,8 +260,38 @@ private struct StreamFunctionFragment: Decodable {
 
 private struct StreamAPIError: Decodable {
     let code: Int?
+    /// A non-numeric code (`"rate_limit_exceeded"`), kept as the error type
+    /// when the provider sent no `metadata.error_type`.
+    let codeText: String?
     let message: String
     let metadata: StreamErrorMetadata?
+
+    private enum CodingKeys: String, CodingKey { case code, message, metadata }
+
+    /// Lenient on purpose: providers send `code` as a number or a string, and
+    /// a mid-stream error must reach the user as its message, never as a
+    /// "malformed event" dump of the raw JSON.
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        if let number = try? container.decode(Int.self, forKey: .code) {
+            code = number
+            codeText = nil
+        } else if let text = try? container.decode(String.self, forKey: .code) {
+            code = Int(text.trimmingCharacters(in: .whitespaces))
+            codeText = code == nil && !text.isEmpty ? text : nil
+        } else {
+            code = nil
+            codeText = nil
+        }
+        metadata = try? container.decodeIfPresent(StreamErrorMetadata.self, forKey: .metadata)
+        if let text = try? container.decode(String.self, forKey: .message), !text.isEmpty {
+            message = text
+        } else {
+            message = codeText.map { "The provider returned an error (\($0))." }
+                ?? code.map { "The provider returned an error (code \($0))." }
+                ?? "The provider returned an error."
+        }
+    }
 }
 
 private struct StreamErrorMetadata: Decodable {

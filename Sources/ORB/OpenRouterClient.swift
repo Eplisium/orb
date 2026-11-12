@@ -113,17 +113,7 @@ final class URLSessionStreamingTransport: NSObject, HTTPStreamingTransport, URLS
     private let lock = NSLock()
     private var continuations: [Int: AsyncThrowingStream<Data, Error>.Continuation] = [:]
     private var responders: [Int: CheckedContinuation<URLResponse, Error>] = [:]
-    private lazy var session: URLSession = {
-        let configuration = URLSessionConfiguration.ephemeral
-        // Long-lived SSE connections must not be killed by the resource timeout.
-        configuration.timeoutIntervalForRequest = NetworkTimeouts.request
-        configuration.timeoutIntervalForResource = 3_600
-        configuration.waitsForConnectivity = true
-        // Streaming is latency-critical, so bypass any URL cache entirely.
-        configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
-        configuration.urlCache = nil
-        return URLSession(configuration: configuration, delegate: self, delegateQueue: nil)
-    }()
+    private lazy var session = URLSession(configuration: OpenRouterClient.makeConfiguration(), delegate: self, delegateQueue: nil)
 
     override init() { super.init() }
 
@@ -225,6 +215,22 @@ final class URLSessionStreamingTransport: NSObject, HTTPStreamingTransport, URLS
 
 final class OpenRouterClient: OpenRouterClientProtocol, @unchecked Sendable {
     typealias Sleeper = @Sendable (Duration) async throws -> Void
+
+    /// Shared by the streaming transport. Long-lived SSE connections must not
+    /// be killed by the resource timeout, and an offline send must fail fast:
+    /// waiting for connectivity suspends the request timeout, so it would sit
+    /// in "Connecting…" for up to the one-hour resource timeout instead of
+    /// handing the error to the bounded not-connected retry below.
+    static func makeConfiguration() -> URLSessionConfiguration {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.timeoutIntervalForRequest = NetworkTimeouts.request
+        configuration.timeoutIntervalForResource = 3_600
+        configuration.waitsForConnectivity = false
+        // Streaming is latency-critical, so bypass any URL cache entirely.
+        configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
+        configuration.urlCache = nil
+        return configuration
+    }
 
     private let endpoint = URL(string: "https://openrouter.ai/api/v1/chat/completions")!
     private let transport: any HTTPStreamingTransport

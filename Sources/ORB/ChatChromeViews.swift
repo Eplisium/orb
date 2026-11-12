@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 // MARK: - Chat and Agent chrome components (Phase 5)
@@ -384,7 +385,63 @@ struct UndoToastView: View {
     }
 }
 
+/// Shown above the composer while a message is being edited. It stays until
+/// the edit is sent or cancelled — nothing is removed before the send, so
+/// there is no timer.
+struct EditBanner: View {
+    let message: String
+    let cancel: () -> Void
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "pencil").accessibilityHidden(true)
+            Text(message)
+                .fixedSize(horizontal: false, vertical: true)
+            Spacer(minLength: 8)
+            Button("Cancel Edit", action: cancel)
+                .buttonStyle(.link)
+                .help("Stop editing and keep the conversation as it is")
+        }
+        .font(ORBFont.footnote.weight(.medium))
+        .foregroundStyle(.secondary)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 7)
+        .background(.orbSurface(0.05), in: RoundedRectangle(cornerRadius: 9))
+    }
+}
+
 extension View {
+    /// Return-key handling for the multi-line composers.
+    ///
+    /// A vertical `TextField` submits on every Return, Shift-Return included,
+    /// and inserts no line break, so the key is taken before the field editor
+    /// sees it: send, or insert the line break at the cursor.
+    func composerReturnKey(requireCommand: Bool, send: @escaping () -> Void) -> some View {
+        onKeyPress(.return, phases: .down) { press in
+            let editor = NSApp.keyWindow?.firstResponder
+            switch ComposerKeyPolicy.returnAction(
+                command: press.modifiers.contains(.command),
+                shift: press.modifiers.contains(.shift),
+                option: press.modifiers.contains(.option),
+                composing: (editor as? NSTextView)?.hasMarkedText() == true,
+                requireCommand: requireCommand
+            ) {
+            case .send:
+                send()
+            case .newline:
+                _ = editor?.tryToPerform(#selector(NSResponder.insertNewlineIgnoringFieldEditor(_:)), with: nil)
+            case .passThrough:
+                return .ignored
+            }
+            return .handled
+        }
+        // Submits that do not arrive as a Return key press (keypad Enter).
+        .onSubmit {
+            let flags = NSEvent.modifierFlags
+            if ComposerKeyPolicy.shouldSend(command: flags.contains(.command), shift: flags.contains(.shift), requireCommand: requireCommand) { send() }
+        }
+    }
+
     /// Dashed accent outline while files are dragged over.
     func fileDropHighlight(_ targeted: Bool, accent: Color) -> some View {
         overlay {

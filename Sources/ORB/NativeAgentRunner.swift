@@ -126,7 +126,11 @@ enum NativeAgentRunner {
         var usedTools: [String] = []
         var displays: [ToolCallDisplay] = []
         var toolMessages: [ChatMessage] = []
-        var seenCallIDs = Set<String>()
+        // Tool-call ids already used in this conversation. Providers only
+        // promise uniqueness within one response (`call_0`,
+        // `functions.read_file:0`), while the UI and the rebuilt history key
+        // on the id, so a reused id is renamed locally (see `localCallID`).
+        var seenCallIDs = Set(history.flatMap { ($0.toolCalls ?? []).map(\.id) + [$0.toolCallId].compactMap { $0 } })
         // Counts turns that ended with only chain-of-thought (no visible answer,
         // no tool call). Bounds the recovery nudge so a model that never
         // converges still terminates with a clear error instead of looping.
@@ -174,7 +178,9 @@ enum NativeAgentRunner {
                     await emit(.reasoningDetails(details), timed.arrivedAt)
                 case .toolCallFragment(let choice, let index, let id, let type, let name, let arguments) where choice == 0:
                     var builder = fragments[index] ?? ToolBuilder(index: index)
-                    if let id, builder.id.isEmpty { builder.id = id }
+                    // Renamed before the first preview event, so every
+                    // consumer sees the same id for this call.
+                    if let id, builder.id.isEmpty { builder.id = Self.localCallID(id, turn: turn, taken: seenCallIDs) }
                     if let type, builder.type.isEmpty { builder.type = type }
                     if let name { builder.name += name }
                     if let arguments { builder.arguments += arguments }
@@ -241,6 +247,15 @@ enum NativeAgentRunner {
                 }
             }
 
+            // Ids must be unique within the turn: two calls sharing one could
+            // not be paired with their results. Earlier turns are covered by
+            // the local rename above.
+            var turnCallIDs = Set<String>()
+            for call in calls + rejected.map(\.call) {
+                guard turnCallIDs.insert(call.id).inserted else { throw NativeAgentError.duplicateToolCallID(call.id) }
+            }
+            seenCallIDs.formUnion(turnCallIDs)
+
             let apiCalls = (calls + rejected.map(\.call)).map {
                 AgentToolCall(id: $0.id, type: $0.type, function: .init(name: $0.name, arguments: $0.arguments))
             }
@@ -252,7 +267,6 @@ enum NativeAgentRunner {
             ))
 
             for (call, reason) in rejected {
-                guard seenCallIDs.insert(call.id).inserted else { continue }
                 let result = NativeAgentToolResult(
                     content: "Tool call rejected: \(reason). Re-issue this call with a single valid JSON object as arguments.",
                     isError: true
@@ -310,7 +324,6 @@ enum NativeAgentRunner {
 
             for call in calls {
                 try Task.checkCancellation()
-                guard seenCallIDs.insert(call.id).inserted else { throw NativeAgentError.duplicateToolCallID(call.id) }
                 usedTools.append(call.name)
                 displays.append(.init(
                     id: call.id,
@@ -440,6 +453,23 @@ enum NativeAgentRunner {
             toolNames: usedTools, toolCallDisplays: displays, toolMessages: toolMessages,
             hitToolBudget: true, finishReason: finalFinishReason
         )
+    }
+
+    /// The id ORB uses for a tool call. A provider id that was already used
+    /// earlier in the conversation gets a turn suffix, so every assistant
+    /// `tool_calls` entry, its tool message, and its UI card share one id
+    /// that nothing else in the conversation has. The suffix stays within
+    /// `[A-Za-z0-9_]`, which every provider accepts in an id.
+    static func localCallID(_ id: String, turn: Int, taken: Set<String>) -> String {
+        guard taken.contains(id) else { return id }
+        let base = "\(id)_turn\(turn + 1)"
+        var candidate = base
+        var attempt = 2
+        while taken.contains(candidate) {
+            candidate = "\(base)_\(attempt)"
+            attempt += 1
+        }
+        return candidate
     }
 
     /// Compatibility entry point for the test-suite runner UI.

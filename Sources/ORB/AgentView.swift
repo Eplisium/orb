@@ -19,8 +19,9 @@ struct AgentView: View {
     @State private var unread = UnreadTracker()
     @AppStorage("playground.requireCommandToSend") private var requireCommandToSend = false
     @StudioState("AgentView.undoSnapshot") private var undoSnapshot: UndoToastItem<[StoredConversation]>? = nil
-    /// Last edit, for Undo and to carry its attachments into the resend.
-    @StudioState("AgentView.pendingEdit") private var pendingEdit: UndoToastItem<ChatService.ConversationEdit>? = nil
+    /// The edit in progress. Nothing is removed until it is sent, so it has
+    /// no timer: it lasts until Send or Cancel Edit.
+    @StudioState("AgentView.pendingEdit") private var pendingEdit: ChatService.ConversationEdit? = nil
     @State private var dropTargeted = false
     @StateObject private var pins = ConversationPinStore(key: "orb.pinned.agent")
     @State private var selectedSessionIDs = Set<UUID>()
@@ -76,6 +77,7 @@ struct AgentView: View {
         .onDisappear { pasteMonitor.remove() }
         .task {
             chatService.activateConversation(for: .agent)
+            if activeEdit == nil { pendingEdit = nil }
             selectedModelId = PlaygroundModelDefaults.initialSelection(
                 activeModelId: chatService.activeConversation?.modelId,
                 preferredModelId: preferredModelId
@@ -92,6 +94,9 @@ struct AgentView: View {
         }
         .onChange(of: chatService.activeConversation?.id) { _, _ in
             resetFollowState()
+            // An edit belongs to one conversation; leaving it ends the edit
+            // (nothing was removed, so nothing needs restoring).
+            if activeEdit == nil { pendingEdit = nil }
             // Session switches (sidebar select, delete, branch, activate) must
             // bring the composer's model along; otherwise the next send hands
             // the stale model to prepareActiveConversation, which overwrites
@@ -139,16 +144,6 @@ struct AgentView: View {
                     token: toast.id,
                     undo: { chatService.restore(toast.payload); undoSnapshot = nil },
                     dismiss: { undoSnapshot = nil }
-                )
-                .padding(.bottom, 80)
-                .transition(.move(edge: .bottom).combined(with: .opacity))
-            } else if let toast = pendingEdit {
-                UndoToastView(
-                    message: UndoToast.editMessage(removed: toast.payload.removedCount),
-                    symbol: "pencil",
-                    token: toast.id,
-                    undo: { undoEdit(toast.payload) },
-                    dismiss: { pendingEdit = nil }
                 )
                 .padding(.bottom, 80)
                 .transition(.move(edge: .bottom).combined(with: .opacity))
@@ -592,7 +587,9 @@ struct AgentView: View {
                             updateFollowsLatest(viewportHeight: viewport.size.height)
                         }
 
-                        if !followsLatest && (conversationIsRunning || unread.unread > 0) {
+                        // Offered whenever the latest message is out of view,
+                        // not only while a run streams or a reply arrives.
+                        if !followsLatest {
                             Button {
                                 scrollIntent.reset()
                                 followsLatest = true
@@ -620,6 +617,10 @@ struct AgentView: View {
                         guard followsLatest else { return }
                         requestFollowScroll(proxy)
                     }
+                    // Open at the latest message. The follow-scroll above
+                    // only reacts to changes, so without this a reopened
+                    // session showed its first message.
+                    .task(id: conversation.id) { await openAtLatest(proxy) }
                     .onDisappear { pendingFollowScroll?.cancel(); pendingFollowScroll = nil }
                 }
             }
@@ -719,6 +720,10 @@ struct AgentView: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
 
+            if let active = activeEdit {
+                EditBanner(message: ConversationEditCopy.banner(replacing: active.replacedCount), cancel: cancelEdit)
+            }
+
             SlashCommandMenu(entries: SlashCommand.suggestions(for: messageText)) { entry in
                 messageText = "/" + entry.name + (entry.name == "clear" ? "" : " ")
             }
@@ -732,7 +737,7 @@ struct AgentView: View {
                     .padding(.horizontal, 14)
                     .padding(.top, 12)
                     .padding(.bottom, 9)
-                    .onSubmit { if ComposerKeyPolicy.shouldSend(command: NSEvent.modifierFlags.contains(.command), shift: NSEvent.modifierFlags.contains(.shift), requireCommand: requireCommandToSend) { sendMessage() } }
+                    .composerReturnKey(requireCommand: requireCommandToSend, send: sendMessage)
 
                 HStack(spacing: 9) {
                     Button(action: chooseAttachments) {
@@ -963,7 +968,9 @@ struct AgentView: View {
             return
         }
 
-        pendingEdit = nil
+        // Sending the edit is what replaces the old messages; until then the
+        // edit stays cancellable, including when the attachments fail to load.
+        let edit = activeEdit?.edit
         let sentText = messageText
         let basePrompt = sentText.trimmingCharacters(in: .whitespacesAndNewlines)
         let sentAttachments = attachments
@@ -993,12 +1000,14 @@ struct AgentView: View {
             if messageText == sentText { messageText = "" }
             attachments.removeAll { sentAttachments.contains($0) }
             if attachments.isEmpty { attachmentContextSummary = nil }
+            pendingEdit = nil
             await chatService.sendAgentMessage(
                 prompt,
                 modelId: modelId,
                 workspace: workspace,
                 fullComputerAccess: fullComputerAccess,
-                settings: settings
+                settings: settings,
+                replacing: edit
             )
         }
     }
@@ -1054,13 +1063,23 @@ struct AgentView: View {
         // Agent attachments are inlined into the prompt text, so the edited
         // text already carries them.
         guard let edit = chatService.beginEdit(from: messageID, in: conversationID) else { return }
-        pendingEdit = UndoToastItem(edit)
+        pendingEdit = edit
         messageText = edit.text
         inputFocused = true
     }
 
-    private func undoEdit(_ edit: ChatService.ConversationEdit) {
-        if chatService.undoEdit(edit), messageText == edit.text { messageText = "" }
+    /// The edit in progress, when it belongs to the session on screen and its
+    /// message still exists.
+    private var activeEdit: (edit: ChatService.ConversationEdit, replacedCount: Int)? {
+        guard let edit = pendingEdit, edit.conversationID == chatService.activeConversation?.id,
+              let replaced = chatService.messagesReplaced(by: edit) else { return nil }
+        return (edit, replaced.count)
+    }
+
+    /// Cancel Edit: the session was never changed, so this only puts the
+    /// composer back. Text the user rewrote is kept as an ordinary draft.
+    private func cancelEdit() {
+        if let edit = pendingEdit, messageText == edit.text { messageText = "" }
         pendingEdit = nil
     }
 
@@ -1173,6 +1192,19 @@ struct AgentView: View {
         scrollIntent.reset()
         bottomOffset = .infinity
         lastScrollRequest = nil
+    }
+
+    /// Scrolls a just-opened session to its latest message. Lazy rows are
+    /// measured only as they are realized, so the first jump can land short
+    /// of the true end; the later passes settle it. They stop as soon as the
+    /// user scrolls away.
+    private func openAtLatest(_ proxy: ScrollViewProxy) async {
+        proxy.scrollTo("agent-message-bottom", anchor: .bottom)
+        for delay in [Duration.milliseconds(60), .milliseconds(240)] {
+            do { try await Task.sleep(for: delay) } catch { return }
+            guard followsLatest else { return }
+            proxy.scrollTo("agent-message-bottom", anchor: .bottom)
+        }
     }
 
     /// Issues a throttled, animation-free scroll-to-bottom. Animation is

@@ -327,4 +327,42 @@ struct ComposerKeyTests {
         #expect(ComposerKeyPolicy.hint(requireCommand: false) == "↩ send · ⇧↩ new line")
         #expect(ComposerKeyPolicy.hint(requireCommand: true) == "⌘↩ send · ↩ new line")
     }
+
+    @Test("Return sends, and the key that should break a line really does")
+    func returnAction() {
+        #expect(ComposerKeyPolicy.returnAction(command: false, shift: false, option: false, composing: false, requireCommand: false) == .send)
+        #expect(ComposerKeyPolicy.returnAction(command: false, shift: true, option: false, composing: false, requireCommand: false) == .newline)
+        #expect(ComposerKeyPolicy.returnAction(command: true, shift: false, option: false, composing: false, requireCommand: false) == .send)
+        // Command-to-send mode: plain Return breaks the line, Command-Return sends.
+        #expect(ComposerKeyPolicy.returnAction(command: false, shift: false, option: false, composing: false, requireCommand: true) == .newline)
+        #expect(ComposerKeyPolicy.returnAction(command: true, shift: false, option: false, composing: false, requireCommand: true) == .send)
+        // Option-Return stays the text field's own line break.
+        #expect(ComposerKeyPolicy.returnAction(command: false, shift: false, option: true, composing: false, requireCommand: false) == .passThrough)
+        // Return commits an input method's composition instead of sending.
+        #expect(ComposerKeyPolicy.returnAction(command: false, shift: false, option: false, composing: true, requireCommand: false) == .passThrough)
+        #expect(ComposerKeyPolicy.returnAction(command: true, shift: false, option: false, composing: true, requireCommand: true) == .passThrough)
+    }
+}
+
+@Suite("Phase 5 management: error banner summary")
+struct ErrorBannerSummaryTests {
+    @Test("a missing key is not told its key was rejected")
+    func missingKey() {
+        let missing = PlaygroundErrorSummary.summarize(
+            "Add your OpenRouter API key in Settings → Accounts & Keys before using Chat."
+        )
+        #expect(missing.headline == "Add your OpenRouter API key")
+        let none = PlaygroundErrorSummary.summarize("No API key configured. Add one in Settings → Accounts & Keys.")
+        #expect(none.headline == "Add your OpenRouter API key")
+    }
+
+    @Test("a real rejection still reads as rejected")
+    func rejectedKey() {
+        let rejected = PlaygroundErrorSummary.summarize(
+            "OpenRouter rejected the API key. Check it in Settings → Accounts & Keys."
+        )
+        #expect(rejected.headline == "OpenRouter rejected your API key")
+        let unauthorized = PlaygroundErrorSummary.summarize("OpenRouter HTTP 401: invalid key")
+        #expect(unauthorized.headline == "OpenRouter rejected your API key")
+    }
 }

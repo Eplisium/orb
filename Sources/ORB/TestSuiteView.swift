@@ -479,23 +479,23 @@ struct TestSuiteView: View {
             }
             Spacer(minLength: 16)
 
-            if !customTests.isEmpty || selectedCategory != nil {
-                Button {
-                    showCreateTest = true
-                } label: {
-                    HStack(spacing: 5) {
-                        Image(systemName: "plus")
-                        Text("New Test")
-                    }
-                    .orbFont(size: 11, weight: .semibold)
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 6)
-                    .background(accent.opacity(0.12))
-                    .clipShape(RoundedRectangle(cornerRadius: controlRadius))
+            // Always available: hiding it until a custom test existed made
+            // the first custom test impossible to create from "All Tests".
+            Button {
+                showCreateTest = true
+            } label: {
+                HStack(spacing: 5) {
+                    Image(systemName: "plus")
+                    Text("New Test")
                 }
-                .buttonStyle(.plain)
-                .help("Create a custom test with your own prompt")
+                .orbFont(size: 11, weight: .semibold)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 6)
+                .background(accent.opacity(0.12))
+                .clipShape(RoundedRectangle(cornerRadius: controlRadius))
             }
+            .buttonStyle(.plain)
+            .help("Create a custom test with your own prompt")
 
             // No implicit category-wide paid inference.
         }

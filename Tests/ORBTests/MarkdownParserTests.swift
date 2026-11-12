@@ -103,3 +103,107 @@ struct MarkdownParserTests {
         #expect(items.map(\.checked) == [true, false, nil])
     }
 }
+
+@Suite("Markdown fences and table cells")
+struct MarkdownFenceTableTests {
+    private typealias Code = (language: String?, source: String, isClosed: Bool)
+
+    private func codeBlock(_ text: String) throws -> Code {
+        for block in MarkdownParser.parse(text) {
+            if case .code(let language, let source, let isClosed) = block {
+                return (language, source, isClosed)
+            }
+        }
+        throw FenceTestError.noCodeBlock
+    }
+
+    private enum FenceTestError: Error { case noCodeBlock }
+
+    @Test("a longer fence can wrap shorter backtick fences")
+    func nestedBacktickFences() throws {
+        let source = """
+        ````python
+        ```js
+        const x = 1
+        ```
+        ````
+
+        after
+        """
+        let code = try codeBlock(source)
+        #expect(code.language == "python")
+        #expect(code.isClosed)
+        #expect(code.source.contains("const x = 1"))
+        #expect(code.source.contains("```js"))
+        // The prose after the fence must not be swallowed by it.
+        #expect(MarkdownParser.parse(source).contains(.paragraph("after")))
+    }
+
+    @Test("tilde fences parse and close only on tildes")
+    func tildeFences() throws {
+        let code = try codeBlock("~~~swift\n```\nlet x = 1\n~~~\ndone")
+        #expect(code.language == "swift")
+        #expect(code.isClosed)
+        #expect(code.source.contains("```"))
+        #expect(code.source.contains("let x = 1"))
+    }
+
+    @Test("a one-line backtick run is paragraph text, not a fence")
+    func oneLineInlineCode() throws {
+        let blocks = MarkdownParser.parse("``` 1 + 1 ```\n\nstill prose")
+        #expect(!blocks.contains { block in
+            if case .code = block { return true }
+            return false
+        })
+        #expect(blocks.contains(.paragraph("``` 1 + 1 ```")))
+        #expect(blocks.contains(.paragraph("still prose")))
+    }
+
+    @Test("table cells keep backslashes that do not escape a pipe")
+    func tableBackslashesSurvive() throws {
+        let table = try #require(
+            MarkdownParser.parse("| path | pattern |\n| --- | --- |\n| C:\\Users\\orb | a\\|b |").first
+        )
+        guard case .table(let value) = table else {
+            Issue.record("expected a table")
+            return
+        }
+        #expect(value.rows.first == ["C:\\Users\\orb", "a|b"])
+    }
+
+    @Test("the cached streaming parse matches a full parse at every prefix")
+    @MainActor
+    func streamingCacheMatchesFullParse() {
+        let cache = MarkdownRenderCache()
+        let source = """
+        # Heading
+
+        ```
+        code
+        ```
+
+        | a | b |
+        | --- | --- |
+        | 1 | 2 |
+
+        ~~strike~~
+
+        ````md
+        ```inner
+        ```
+        ````
+
+        tail paragraph
+        """
+        // Chunks grow the way a stream does: the document only ever gets
+        // longer, so the cached stable prefix must never go stale.
+        var soFar = ""
+        var next = source.startIndex
+        while next < source.endIndex {
+            let step = source.index(next, offsetBy: 3, limitedBy: source.endIndex) ?? source.endIndex
+            soFar += source[next..<step]
+            next = step
+            #expect(cache.blocks(for: soFar) == MarkdownParser.parse(soFar), "prefix \(soFar.count) chars")
+        }
+    }
+}

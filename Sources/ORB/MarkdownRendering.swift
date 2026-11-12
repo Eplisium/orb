@@ -88,14 +88,13 @@ enum MarkdownParser {
             let line = lines[index]
             let trimmed = line.trimmingCharacters(in: .whitespaces)
 
-            if trimmed.hasPrefix("```") {
+            if let fence = openingFence(trimmed) {
                 flushAll()
-                let language = String(trimmed.dropFirst(3)).trimmingCharacters(in: .whitespaces)
                 var source: [String] = []
                 var closed = false
                 index += 1
                 while index < lines.count {
-                    if lines[index].trimmingCharacters(in: .whitespaces).hasPrefix("```") {
+                    if fence.isClosed(by: lines[index].trimmingCharacters(in: .whitespaces)) {
                         closed = true
                         index += 1
                         break
@@ -104,7 +103,7 @@ enum MarkdownParser {
                     index += 1
                 }
                 blocks.append(.code(
-                    language: language.isEmpty ? nil : language,
+                    language: fence.info.isEmpty ? nil : fence.info,
                     source: source.joined(separator: "\n"),
                     isClosed: closed
                 ))
@@ -182,6 +181,34 @@ enum MarkdownParser {
         return blocks
     }
 
+    /// The marker that opened a code block. A fence closes only on a line made
+    /// of at least as many of the same character, so a four-backtick fence can
+    /// wrap a three-backtick example and a tilde fence can wrap backticks.
+    struct Fence: Equatable {
+        let marker: Character
+        let count: Int
+        /// Text after the marker (normally the language).
+        let info: String
+
+        func isClosed(by trimmedLine: String) -> Bool {
+            trimmedLine.count >= count && trimmedLine.allSatisfy { $0 == marker }
+        }
+    }
+
+    /// Reads a whitespace-trimmed line as an opening fence: three or more
+    /// backticks or tildes, then an optional info string. A backtick fence
+    /// whose info string contains a backtick is inline code written on one
+    /// line (three backticks, code, three backticks), not a block — treating
+    /// it as one swallowed everything after it.
+    static func openingFence(_ trimmedLine: String) -> Fence? {
+        guard let marker = trimmedLine.first, marker == "`" || marker == "~" else { return nil }
+        let run = trimmedLine.prefix { $0 == marker }
+        guard run.count >= 3 else { return nil }
+        let info = trimmedLine.dropFirst(run.count).trimmingCharacters(in: .whitespaces)
+        if marker == "`", info.contains("`") { return nil }
+        return Fence(marker: marker, count: run.count, info: info)
+    }
+
     private static func makeList(_ run: [RawListItem]) -> MarkdownBlock {
         // Normalise arbitrary indent widths (2, 3, 4 spaces, tabs) into depths.
         var stack: [Int] = []
@@ -255,12 +282,24 @@ enum MarkdownParser {
         if text.hasSuffix("|") && !text.hasSuffix("\\|") { text.removeLast() }
         var cells: [String] = []
         var current = ""
-        var escaped = false
-        for character in text {
-            if escaped { current.append(character); escaped = false; continue }
-            if character == "\\" { escaped = true; continue }
-            if character == "|" { cells.append(current.trimmingCharacters(in: .whitespaces)); current = ""; continue }
-            current.append(character)
+        var index = text.startIndex
+        while index < text.endIndex {
+            let character = text[index]
+            let next = text.index(after: index)
+            // `\|` is the only escape a table row owns. Every other backslash
+            // (a Windows path, a regex) is cell text and must survive.
+            if character == "\\", next < text.endIndex, text[next] == "|" {
+                current.append("|")
+                index = text.index(after: next)
+                continue
+            }
+            if character == "|" {
+                cells.append(current.trimmingCharacters(in: .whitespaces))
+                current = ""
+            } else {
+                current.append(character)
+            }
+            index = next
         }
         cells.append(current.trimmingCharacters(in: .whitespaces))
         return cells
@@ -359,7 +398,9 @@ final class MarkdownRenderCache {
     private func stableBoundary(in text: String, from start: Int) -> Int {
         let utf8 = text.utf8
         var boundary = start
-        var inFence = false
+        // Same fence rules as `MarkdownParser.parse`, or the two disagree
+        // about where a code block ends and the cached prefix goes stale.
+        var fence: MarkdownParser.Fence?
         var lineStart = utf8.index(utf8.startIndex, offsetBy: start)
         var offset = start
         var previousBlank = false
@@ -367,8 +408,12 @@ final class MarkdownRenderCache {
         while index < utf8.endIndex {
             if utf8[index] == 0x0A {
                 let line = text[lineStart..<index].trimmingCharacters(in: .whitespaces)
-                if line.hasPrefix("```") { inFence.toggle() }
-                let blank = line.isEmpty && !inFence
+                if let open = fence {
+                    if open.isClosed(by: line) { fence = nil }
+                } else {
+                    fence = MarkdownParser.openingFence(line)
+                }
+                let blank = line.isEmpty && fence == nil
                 if blank && !previousBlank { boundary = offset + 1 }
                 previousBlank = blank
                 lineStart = utf8.index(after: index)

@@ -335,58 +335,82 @@ final class ChatService: ObservableObject {
         return text
     }
 
-    /// What an edit removed, so the UI can offer Undo, plus the original
-    /// attachments so the resend keeps them.
+    /// An edit in progress: which user message is being rewritten, its text
+    /// for the composer, and its attachments so the resend keeps them.
+    ///
+    /// Starting an edit changes nothing. The message and everything after it
+    /// are only replaced when the edited text is actually sent, so an edit can
+    /// be cancelled at any time (or abandoned by quitting) without losing the
+    /// rest of the conversation.
     struct ConversationEdit: Equatable {
         let conversationID: UUID
+        let messageID: UUID
         let text: String
         let parts: [MessageContentPart]?
-        fileprivate let removed: [ChatMessage]
-        /// Message count left after the cut; undo requires nothing was added.
-        fileprivate let keptCount: Int
-        var removedCount: Int { removed.count }
     }
 
-    /// Non-destructive edit: truncates from the user message (as before) but
-    /// returns everything needed to undo it and to resend with attachments.
+    /// Starts editing a user message. Nothing is removed until the edit is
+    /// sent (`sendMessage(…, replacing:)` / `sendAgentMessage(…, replacing:)`).
     func beginEdit(from messageID: UUID, in conversationID: UUID) -> ConversationEdit? {
-        guard let index = conversations.firstIndex(where: { $0.id == conversationID }),
-              let cut = conversations[index].messages.firstIndex(where: { $0.id == messageID }) else { return nil }
-        let removed = Array(conversations[index].messages[cut...])
-        let parts = conversations[index].messages[cut].parts
-        guard let text = truncateConversation(from: messageID, in: conversationID) else { return nil }
-        return ConversationEdit(conversationID: conversationID, text: text, parts: parts, removed: removed, keptCount: cut)
+        guard !isRunning(conversationID: conversationID),
+              let conversation = conversations.first(where: { $0.id == conversationID }),
+              let message = conversation.messages.first(where: { $0.id == messageID }),
+              message.role == "user" else { return nil }
+        return ConversationEdit(conversationID: conversationID, messageID: messageID, text: message.content, parts: message.parts)
     }
 
-    /// Restores the messages an edit removed. Refused once the conversation
-    /// moved on (a new message was sent) or while it is running.
-    @discardableResult
-    func undoEdit(_ edit: ConversationEdit) -> Bool {
-        guard !isRunning(conversationID: edit.conversationID),
-              let index = conversations.firstIndex(where: { $0.id == edit.conversationID }) else { return false }
-        let existing = Set(conversations[index].messages.map(\.id))
-        guard conversations[index].messages.count == edit.keptCount,
-              !edit.removed.contains(where: { existing.contains($0.id) }) else { return false }
-        conversations[index].messages += edit.removed
-        rebuildAgentHistory(for: edit.conversationID)
-        synchronizeActive(edit.conversationID)
-        do { try saveRecord(edit.conversationID) } catch {
-            lastError = "Could not undo the edit: \(error.localizedDescription)"
-            return false
-        }
-        return true
+    /// IDs of the messages sending `edit` would replace: the edited message
+    /// and everything after it. Nil once the edit no longer applies (the
+    /// message or its conversation was deleted).
+    func messagesReplaced(by edit: ConversationEdit) -> [UUID]? {
+        guard let conversation = conversations.first(where: { $0.id == edit.conversationID }),
+              let cut = conversation.messages.firstIndex(where: { $0.id == edit.messageID }) else { return nil }
+        return conversation.messages[cut...].map(\.id)
+    }
+
+    /// Applies an edit at send time. False only when the removal failed (the
+    /// error is in `lastError` and nothing changed); an edit whose message is
+    /// already gone is a no-op, so the send simply appends.
+    private func commitEdit(_ edit: ConversationEdit?, in conversationID: UUID) -> Bool {
+        guard let edit, edit.conversationID == conversationID, messagesReplaced(by: edit) != nil else { return true }
+        return truncateConversation(from: edit.messageID, in: conversationID) != nil
     }
 
     /// Bulk delete that hands back what it removed so the UI can offer Undo.
     /// Only conversations whose removal succeeded are in the snapshot.
     func deleteConversationsUndoable(ids: Set<UUID>) -> [StoredConversation]? {
         let targets = conversations.filter { ids.contains($0.id) }
-        let snapshot = targets.map { StoredConversation(conversation: $0, agentHistory: agentHistories[$0.id] ?? []) }
+        // A running session is stopped by the delete, but its task records the
+        // interruption only after the conversation is gone. Snapshot the row
+        // as interrupted so Undo never brings back a permanently "Streaming"
+        // message.
+        let snapshot = targets.map {
+            StoredConversation(conversation: Self.settled($0), agentHistory: agentHistories[$0.id] ?? [])
+        }
         let removed = deleteConversations(ids: ids)
         guard removed > 0 else { return nil }
         let survivors = Set(conversations.map(\.id))
         let result = snapshot.filter { !survivors.contains($0.conversation.id) }
         return result.isEmpty ? nil : result
+    }
+
+    /// The conversation as it reads once nothing is running: live rows become
+    /// interrupted (cancelled) and no tool card is left executing.
+    static func settled(_ conversation: ChatConversation) -> ChatConversation {
+        var copy = conversation
+        for index in copy.messages.indices {
+            if copy.messages[index].status == .streaming {
+                copy.messages[index].status = .interrupted
+                copy.messages[index].finishReason = "cancelled"
+            }
+            guard let calls = copy.messages[index].toolCalls, calls.contains(where: \.isExecuting) else { continue }
+            copy.messages[index].toolCalls = calls.map { call in
+                var call = call
+                call.isExecuting = false
+                return call
+            }
+        }
+        return copy
     }
 
     /// Puts deleted conversations back (idempotent) and re-saves them.
@@ -399,6 +423,12 @@ final class ChatService: ObservableObject {
             catch { lastError = "Could not restore a session: \(error.localizedDescription)" }
         }
         conversations.sort { $0.createdAt > $1.createdAt }
+        // Undo restores into the set the delete left: re-activate a restored
+        // session so it is the one on screen again.
+        if activeConversation == nil || !conversations.contains(where: { $0.id == activeConversation?.id }) {
+            activeConversation = records.lazy.map(\.conversation.mode).first
+                .flatMap { mode in conversations.first(where: { $0.mode == mode }) }
+        }
     }
 
     /// Bound to a TextEditor, so this fires per keystroke. Memory updates
@@ -432,9 +462,10 @@ final class ChatService: ObservableObject {
         _ text: String,
         modelId: String,
         settings: GenerationSettings = .default,
-        parts: [MessageContentPart]? = nil
+        parts: [MessageContentPart]? = nil,
+        replacing edit: ConversationEdit? = nil
     ) {
-        _ = startDirectMessage(text, modelId: modelId, settings: settings, appendUser: true, parts: parts)
+        _ = startDirectMessage(text, modelId: modelId, settings: settings, appendUser: true, parts: parts, replacing: edit)
     }
 
     private func startDirectMessage(
@@ -443,18 +474,20 @@ final class ChatService: ObservableObject {
         settings: GenerationSettings,
         appendUser: Bool,
         replacingAssistant: ChatMessage? = nil,
-        parts: [MessageContentPart]? = nil
+        parts: [MessageContentPart]? = nil,
+        replacing edit: ConversationEdit? = nil
     ) -> PlaygroundRunContext? {
         guard !isStreaming else { lastError = "A generation is already running."; return nil }
         guard let apiKey = apiKeyProvider(), !apiKey.isEmpty else {
-            lastError = "No API key configured. Go to Account to add one."
+            lastError = "No API key configured. Add one in Settings → Accounts & Keys."
             return nil
         }
         ModelRecentsStore().record(modelId)
         flushPendingEdits()
         prepareActiveConversation(modelId: modelId, mode: .chat)
         guard let conversationID = activeConversation?.id,
-              let conversationIndex = conversations.firstIndex(where: { $0.id == conversationID }) else { return nil }
+              let conversationIndex = conversations.firstIndex(where: { $0.id == conversationID }),
+              commitEdit(edit, in: conversationID) else { return nil }
 
         if appendUser {
             let userMessage: ChatMessage
@@ -873,7 +906,7 @@ final class ChatService: ObservableObject {
     func regenerateLastResponse(modelId: String, settings: GenerationSettings = .default) async {
         guard !isStreaming else { return }
         guard let apiKey = apiKeyProvider(), !apiKey.isEmpty else {
-            lastError = "No API key configured. Go to Account to add one."
+            lastError = "No API key configured. Add one in Settings → Accounts & Keys."
             return
         }
         guard let conversationID = activeConversation?.id,
@@ -900,7 +933,8 @@ final class ChatService: ObservableObject {
         modelId: String,
         workspace: String,
         fullComputerAccess: Bool,
-        settings: GenerationSettings = .agentDefault
+        settings: GenerationSettings = .agentDefault,
+        replacing edit: ConversationEdit? = nil
     ) async {
         guard !isStreaming else { lastError = "A generation is already running."; return }
         guard let apiKey = apiKeyProvider(), !apiKey.isEmpty else {
@@ -911,7 +945,8 @@ final class ChatService: ObservableObject {
         flushPendingEdits()
         prepareActiveConversation(modelId: modelId, mode: .agent)
         guard let conversationID = activeConversation?.id,
-              let index = conversations.firstIndex(where: { $0.id == conversationID }) else { return }
+              let index = conversations.firstIndex(where: { $0.id == conversationID }),
+              commitEdit(edit, in: conversationID) else { return }
         conversations[index].messages.append(ChatMessage(role: "user", content: text))
         if conversations[index].messages.count == 1 { conversations[index].title = Self.derivedTitle(text) }
         let assistant = ChatMessage(role: "assistant", content: "", status: .streaming)

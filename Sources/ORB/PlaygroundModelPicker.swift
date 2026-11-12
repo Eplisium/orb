@@ -21,6 +21,7 @@ struct PlaygroundModelPicker: View {
     @State private var sortField: SortField = .name
     @State private var sortOrder: SortOrder = .ascending
     @State private var recentIds: [String] = []
+    @FocusState private var searchFocused: Bool
 
     private var toolFilter: Bool { toolCapableOnly?.wrappedValue ?? false }
 
@@ -64,6 +65,12 @@ struct PlaygroundModelPicker: View {
                         .foregroundStyle(.secondary)
                     TextField("Search models, providers, or IDs", text: $searchText)
                         .textFieldStyle(.plain)
+                        .focused($searchFocused)
+                        // Return picks the first result, so the picker works
+                        // without the mouse: type, then press Return.
+                        .onSubmit {
+                            if let first = AgentModelCatalog.firstResult(in: sections) { select(first) }
+                        }
                     if !searchText.isEmpty {
                         Button {
                             searchText = ""
@@ -99,11 +106,12 @@ struct PlaygroundModelPicker: View {
 
             Divider()
 
-            if sections.isEmpty {
+            if let empty = AgentModelCatalog.emptyState(catalogIsEmpty: models.isEmpty, hasResults: !sections.isEmpty) {
+                // An empty catalog is not a failed search: say which it is.
                 ContentUnavailableView(
-                    "No matching models",
-                    systemImage: "cpu",
-                    description: Text("Try another search or include models without function calling.")
+                    empty.title,
+                    systemImage: empty == .catalogNotLoaded ? "arrow.clockwise" : "cpu",
+                    description: Text(empty.guidance(toolCapableOnly: toolFilter))
                 )
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
@@ -142,7 +150,13 @@ struct PlaygroundModelPicker: View {
         .frame(width: 440, height: 540)
         .onAppear {
             recentIds = ModelRecentsStore().recentIds()
+            searchFocused = true
         }
+    }
+
+    private func select(_ model: ModelInfo) {
+        selectedModelId = model.id
+        dismiss()
     }
 
     // MARK: - Sorting controls
@@ -196,8 +210,7 @@ struct PlaygroundModelPicker: View {
         let isDefault = defaultModelId?.wrappedValue == model.id
         return HStack(spacing: 10) {
             Button {
-                selectedModelId = model.id
-                dismiss()
+                select(model)
             } label: {
                 HStack(spacing: 10) {
                     ZStack {

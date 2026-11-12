@@ -149,6 +149,22 @@ struct OpenRouterStreamTests {
         #expect(events == [.apiError(.init(code: 429, message: "rate limited", errorType: "rate_limit", providerName: "fixture"))])
     }
 
+    @Test("an error whose code is a string still reads as a typed error")
+    func stringErrorCode() throws {
+        var decoder = ServerSentEventDecoder()
+        let json = "data: {\"error\":{\"code\":\"rate_limit_exceeded\",\"message\":\"slow down\"}}\n\n"
+        let events = try decoder.consume(Data(json.utf8))
+        #expect(events == [.apiError(.init(code: nil, message: "slow down", errorType: "rate_limit_exceeded", providerName: nil))])
+    }
+
+    @Test("a numeric code in a string is read as the code")
+    func numericStringErrorCode() throws {
+        var decoder = ServerSentEventDecoder()
+        let json = "data: {\"error\":{\"code\":\"503\",\"message\":\"busy\"}}\n\n"
+        let events = try decoder.consume(Data(json.utf8))
+        #expect(events == [.apiError(.init(code: 503, message: "busy", errorType: nil, providerName: nil))])
+    }
+
     @Test("fragmented tool name and arguments remain ordered fragments")
     func toolFragments() throws {
         var decoder = ServerSentEventDecoder()

@@ -67,9 +67,48 @@ enum AgentModelCatalog {
         return sections
     }
 
+    /// Why the picker has nothing to list.
+    enum EmptyState: Equatable {
+        /// The catalog itself is empty: not loaded yet, or the load failed.
+        case catalogNotLoaded
+        /// Models exist, but none pass the search and filters.
+        case noMatches
+
+        var title: String {
+            switch self {
+            case .catalogNotLoaded: return "Models are not loaded yet"
+            case .noMatches: return "No matching models"
+            }
+        }
+
+        func guidance(toolCapableOnly: Bool) -> String {
+            switch self {
+            case .catalogNotLoaded:
+                return "Choose Go ▸ Refresh Models (⌘R) to load the catalog. If the list stays empty, check your network connection."
+            case .noMatches:
+                return toolCapableOnly
+                    ? "Try another search or include models without function calling."
+                    : "Try another search."
+            }
+        }
+    }
+
+    /// Nil when there are results to show.
+    static func emptyState(catalogIsEmpty: Bool, hasResults: Bool) -> EmptyState? {
+        if hasResults { return nil }
+        return catalogIsEmpty ? .catalogNotLoaded : .noMatches
+    }
+
+    /// The model Return selects: the first row in display order.
+    static func firstResult(in sections: [AgentModelSection]) -> ModelInfo? {
+        sections.lazy.compactMap(\.models.first).first
+    }
+
     /// Sorts a section's models by the chosen field and direction. Missing
     /// values always sort last (in both directions) and ties break on name,
-    /// so the comparison is consistent in every direction. Pure — unit-tested
+    /// so the comparison is consistent in every direction. Prices follow the
+    /// model browser's rule (`ModelSorter.sortablePrice`): free counts as 0,
+    /// and only variable or unknown prices are missing. Pure — unit-tested
     /// directly.
     static func sort(
         _ models: [ModelInfo],
@@ -95,8 +134,6 @@ enum AgentModelCatalog {
         switch field {
         case .name, .provider: return false
         case .contextLength: return model.contextLength == nil
-        case .promptCost: return model.promptCostPer1M == nil
-        case .completionCost: return model.completionCostPer1M == nil
         case .created: return model.created == nil
         case .designElo: return model.bestDesignElo == nil
         default: return ModelSorter.key(model, field) == nil
@@ -112,10 +149,6 @@ enum AgentModelCatalog {
             return lhs.provider.localizedCaseInsensitiveCompare(rhs.provider)
         case .contextLength:
             return compareValues(lhs.contextLength, rhs.contextLength)
-        case .promptCost:
-            return compareValues(lhs.promptCostPer1M, rhs.promptCostPer1M)
-        case .completionCost:
-            return compareValues(lhs.completionCostPer1M, rhs.completionCostPer1M)
         case .created:
             return compareValues(lhs.created, rhs.created)
         case .designElo:

@@ -968,20 +968,15 @@ extension PlaygroundMessageView {
 
 // MARK: - Error Banner
 
-/// Shared inline error banner for Agent and Chat.
-///
-/// Presents a short human-readable headline with the raw technical detail behind
-/// a disclosure, instead of dumping an internal string like
-/// "invalid JSON arguments for chatcmpl-tool-…" across the top of the window.
-struct PlaygroundErrorBanner: View {
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    let message: String
-    let onDismiss: () -> Void
-    @State private var showsDetail = false
-
-    /// Maps known failure shapes to plain language plus a suggested next step.
-    private var summary: (headline: String, hint: String?) {
+/// Maps known failure shapes to plain language plus a suggested next step.
+enum PlaygroundErrorSummary {
+    static func summarize(_ message: String) -> (headline: String, hint: String?) {
         let lowered = message.lowercased()
+        // No key saved is not a rejected key: nothing was sent to OpenRouter.
+        // Checked first because these messages mention "API key" too.
+        if lowered.contains("add your openrouter api key") || lowered.contains("no api key") {
+            return ("Add your OpenRouter API key", "Open Settings → Accounts & Keys and paste your key.")
+        }
         if lowered.contains("api key") || lowered.contains("401") {
             return ("OpenRouter rejected your API key", "Update it in Settings → Accounts & Keys.")
         }
@@ -1005,6 +1000,20 @@ struct PlaygroundErrorBanner: View {
         }
         return ("Something went wrong", nil)
     }
+}
+
+/// Shared inline error banner for Agent and Chat.
+///
+/// Presents a short human-readable headline with the raw technical detail behind
+/// a disclosure, instead of dumping an internal string like
+/// "invalid JSON arguments for chatcmpl-tool-…" across the top of the window.
+struct PlaygroundErrorBanner: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    let message: String
+    let onDismiss: () -> Void
+    @State private var showsDetail = false
+
+    private var summary: (headline: String, hint: String?) { PlaygroundErrorSummary.summarize(message) }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {

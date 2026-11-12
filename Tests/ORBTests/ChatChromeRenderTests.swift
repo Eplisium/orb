@@ -62,6 +62,14 @@ struct ChatChromeRenderTests {
         }
     }
 
+    @Test("edit banner renders in both appearances")
+    func editBanner() {
+        for scheme in [ColorScheme.light, .dark] {
+            let banner = EditBanner(message: ConversationEditCopy.banner(replacing: 3), cancel: {})
+            #expect(render(banner, scheme: scheme).map(isNotBlank) == true, "\(scheme)")
+        }
+    }
+
     @Test("Approval sheet stays renderable at a very large text size")
     func largeText() {
         let view = ApprovalSheet(request: request, waiting: 0) { _ in }.environment(\.dynamicTypeSize, .accessibility3)
