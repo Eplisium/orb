@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import UniformTypeIdentifiers
 
 // MARK: - Assistant image rendering
 //
@@ -24,6 +25,30 @@ enum AssistantImageLoader {
               let image = NSImage(data: data) else { return nil }
         cache.setObject(image, forKey: attachment.dataURL as NSString)
         return image
+    }
+}
+
+/// Encoded card export, separate from the save panel for offline verification.
+@MainActor
+struct AssistantImageExport {
+    let data: Data
+    let fileExtension: String
+    var contentType: UTType { fileExtension == "jpg" ? .jpeg : .png }
+
+    init(image: NSImage, attachment: ChatImageAttachment) throws {
+        let isJPEG = attachment.fileExtension == "jpg"
+        guard let tiff = image.tiffRepresentation,
+              let rep = NSBitmapImageRep(data: tiff),
+              let data = rep.representation(using: isJPEG ? .jpeg : .png,
+                                            properties: [:]) else {
+            throw CocoaError(.fileWriteUnknown)
+        }
+        self.data = data
+        fileExtension = isJPEG ? "jpg" : "png"
+    }
+
+    func write(to destination: URL, store: SavedCreationsStore) throws {
+        try store.export(data: data, to: destination)
     }
 }
 
@@ -53,6 +78,7 @@ private struct AssistantImageCard: View {
     @State private var nsImage: NSImage?
     @State private var isLoading = true
     @State private var showSaved = false
+    @State private var exportError: String?
     @State private var promptExpanded = false
     @State private var promptCopied = false
 
@@ -134,23 +160,34 @@ private struct AssistantImageCard: View {
                     .disabled(nsImage == nil)
                     .help("Save a copy of this image to a folder on your Mac")
                 }
+                if let exportError {
+                    Text(exportError)
+                        .font(.caption)
+                        .foregroundStyle(.red)
+                        .textSelection(.enabled)
+                }
             }
         }
     }
 
     private func saveImage() {
         guard let nsImage else { return }
-        let panel = NSSavePanel()
-        panel.title = "Export Image"
-        panel.nameFieldStringValue = "orb-image.\(image.fileExtension)"
-        if panel.runModal() == .OK, let url = panel.url {
-            guard let tiff = nsImage.tiffRepresentation,
-                  let rep = NSBitmapImageRep(data: tiff) else { return }
-            let fileType: NSBitmapImageRep.FileType = image.fileExtension == "jpg" ? .jpeg : .png
-            guard let data = rep.representation(using: fileType, properties: [:]) else { return }
-            try? data.write(to: url)
-            showSaved = true
-            DispatchQueue.main.asyncAfter(deadline: .now() + 2) { showSaved = false }
+        showSaved = false
+        exportError = nil
+        do {
+            let export = try AssistantImageExport(image: nsImage, attachment: image)
+            let panel = NSSavePanel()
+            panel.title = "Export Image"
+            panel.nameFieldStringValue = "orb-image.\(export.fileExtension)"
+            panel.allowedContentTypes = [export.contentType]
+            panel.allowsOtherFileTypes = false
+            if panel.runModal() == .OK, let url = panel.url {
+                try export.write(to: url, store: .shared)
+                showSaved = true
+                DispatchQueue.main.asyncAfter(deadline: .now() + 2) { showSaved = false }
+            }
+        } catch {
+            exportError = "Export failed: \(error.localizedDescription)"
         }
     }
 }

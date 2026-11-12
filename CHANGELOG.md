@@ -28,6 +28,7 @@ All notable changes to ORB are listed here. The format is based on [Keep a Chang
 - Cancelling MCP resource/prompt discovery aborts startup instead of publishing a partially initialized connection; ordinary optional-discovery RPC errors remain tolerated.
 
 ### Library data protection
+- Chat/Agent assistant image-card exports now surface encoding/write failures and protect managed Library destinations through atomic staging. Re-encoded non-JPEG images are correctly named PNG instead of WebP/GIF/SVG.
 - Video saves retain the remote job identity in the Library manifest, so a failed separate job-link write can be retried after reopening without downloading/indexing a duplicate.
 - Asset cleanup aborts on failed/partial SQLite metadata reads or undecodable rows instead of removing metadata and orphaning bytes.
 - Keep shared asset bytes while another window still offers Undo. Attachment lookup failures stop cleanup rather than authorizing deletion.

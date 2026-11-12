@@ -36,8 +36,10 @@ Approval lifetime coverage additionally delays a UI handler until after cancella
 | E02 | Failed attachment lookup denies asset deletion | LibraryExtendedAuditTests |
 | E03 | Stage-and-rename export preserves old destinations and refuses managed files/aliases; Image/Speech recovery bytes use the same checks | LibraryExtendedAuditTests, SavedCreationFileURLTests |
 | E04 | Failed/partial SQLite asset reads or undecodable metadata rows stop cleanup before metadata/bytes change | AssetRemovalFailureTests |
+| E06 | Assistant image-card exports propagate write failures and share managed-destination protection; success is shown only after the write | AssistantImageExportTests |
+| E07 | Assistant card suffix/content type matches its re-encoded JPEG/PNG bytes | AssistantImageExportTests |
 
-Export protection here covers single-item Library/Video/Speech and generated Image/Speech actions, not every app exporter. Bulk export retains no-overwrite naming/copy behavior. Filesystem identities must be readable; unsupported destination filesystems fail closed. The distributed metadata/file deletion sequence is not a cross-store transaction.
+Export protection here covers single-item Library/Video/Speech, generated Image/Speech actions, and Chat/Agent assistant image cards, not every app exporter. Bulk export retains no-overwrite naming/copy behavior. Filesystem identities must be readable; unsupported destination filesystems fail closed. The distributed metadata/file deletion sequence is not a cross-store transaction.
 
 ## Extended video recovery audit
 
