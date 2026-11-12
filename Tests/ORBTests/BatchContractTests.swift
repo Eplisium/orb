@@ -239,6 +239,37 @@ struct BatchContractTests {
         #expect(request.value(forHTTPHeaderField: "Authorization") == "Bearer test-key")
     }
 
+    @Test("A01: per-item success requires an explicit 2xx status", arguments: [
+        "{}", "{\"status_code\":null}", "{\"status_code\":199}",
+        "{\"status_code\":200}", "{\"status_code\":204}", "{\"status_code\":299}",
+        "{\"status_code\":300}", "{\"status_code\":429}", "{\"status_code\":500}"
+    ])
+    func itemSuccessRequiresStatus(response: String) throws {
+        let item = try JSONDecoder().decode(BatchResultItem.self, from: Data(
+            "{\"custom_id\":\"fixture\",\"response\":\(response),\"error\":null}".utf8
+        ))
+        let expected = ["{\"status_code\":200}", "{\"status_code\":204}", "{\"status_code\":299}"].contains(response)
+        #expect(item.succeeded == expected)
+        // Decoding remains permissive; classification does not discard data.
+        #expect(item.response != nil)
+    }
+
+    @Test("A01: a completed batch can contain failed or malformed individual results")
+    func completedBatchDoesNotImplyItemSuccess() async throws {
+        let fixture = #"{"id":"batch_mixed","status":"completed","results":[{"custom_id":"http-error","response":{"status_code":500,"body":{"error":"retained"}}},{"custom_id":"missing-status","response":{}},{"custom_id":"both","response":{"status_code":200},"error":{"message":"conflict"}},{"custom_id":"neither"},{"custom_id":"valid","response":{"status_code":200,"body":["opaque",1]},"error":null}]}"#
+        let (adapter, mock) = makeAdapter(responses: [.json(fixture)])
+        let record = try await adapter.batch(id: "batch_mixed")
+        #expect(record.batchStatus == .completed)
+        for id in ["http-error", "missing-status", "both", "neither"] {
+            let item = try #require(record.result(for: id))
+            #expect(!item.succeeded)
+        }
+        #expect(record.result(for: "http-error")?.response?.body == .object(["error": .string("retained")]))
+        #expect(record.result(for: "valid")?.succeeded == true)
+        #expect(record.result(for: "valid")?.response?.body == .array([.string("opaque"), .number(1)]))
+        #expect(mock.sentRequests().count == 1)
+    }
+
     // MARK: List
 
     @Test("list applies the documented query parameters, including repeated status filters")

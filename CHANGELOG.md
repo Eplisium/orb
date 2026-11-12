@@ -5,6 +5,7 @@ All notable changes to ORB are listed here. The format is based on [Keep a Chang
 ## [Unreleased] — 1.1.0
 
 ### Backend reliability and safety
+- Batch result HTTP-success classification requires an explicit 2xx status and no per-item error; malformed or failed embedded responses no longer count as successes. Raw result bodies remain available.
 - Reasoning details retain unexpected known-field JSON shapes and explicit nulls through persistence and tool continuation, without displaying opaque values.
 - Responses/Messages SSE limits apply to the active line/event rather than an entire network delivery, so coalesced legal events no longer fail based on chunk boundaries.
 - Job core state and recovery fields now commit in one statement; failed parameter bindings cannot silently clear persisted values.

@@ -69,8 +69,62 @@ struct RemoteFileListTests {
         #expect(!listing.isFetchingPage)
     }
 
+    @Test("A departed refresh caller cannot cancel work needed by its replacement")
+    func replacementJoinsSharedRefresh() async throws {
+        let transport = RemoteFilesHeldTransport()
+        let listing = RemoteFileList(service: FileService(transport: transport))
+        let first = Task { await listing.refresh() }
+        await waitForRequests(1, transport)
+        first.cancel()
+        let joined = RemoteFilesJoinSignal()
+        let replacement = Task {
+            joined.started = true
+            await listing.refresh()
+            joined.finished = true
+        }
+        let deadline = ContinuousClock.now.advanced(by: .seconds(3))
+        while !joined.started, ContinuousClock.now < deadline { await Task.yield() }
+        #expect(joined.started)
+        #expect(!joined.finished)
+        #expect(listing.isFetchingPage)
+        #expect(await transport.gate.count == 1)
+        // The replacement has entered refresh on this actor and suspended on
+        // the shared page before the fixture response is released.
+        await transport.gate.release(0, body: #"{"data":[{"id":"shared"}]}"#)
+        await replacement.value
+        await first.value
+        #expect(joined.finished)
+        #expect(listing.files.map(\.id) == ["shared"])
+        #expect(!listing.isFetchingPage)
+        #expect(listing.pageError == nil)
+    }
+
+    @Test("An obsolete page cannot clear a replacement's loading state or publish errors", arguments: [false, true])
+    func obsoleteCompletionDuringReplacement(fails: Bool) async throws {
+        let transport = RemoteFilesHeldTransport()
+        let listing = RemoteFileList(service: FileService(transport: transport))
+        let oldPage = Task { await listing.refresh() }
+        await waitForRequests(1, transport)
+        let upload = Task { try await listing.upload(filename: "new.txt", mimeType: "text/plain", data: Data("new".utf8)) }
+        await waitForRequests(2, transport)
+        if fails {
+            await transport.gate.fail(0)
+        } else {
+            await transport.gate.release(0, body: #"{"data":[{"id":"obsolete"}]}"#)
+        }
+        await oldPage.value
+        #expect(listing.isFetchingPage)
+        #expect(listing.files.isEmpty)
+        #expect(listing.pageError == nil)
+        await transport.gate.release(1, body: #"{"data":[{"id":"uploaded"}]}"#)
+        _ = try await upload.value
+        #expect(listing.files.map(\.id) == ["uploaded"])
+        #expect(!listing.isFetchingPage)
+        #expect(listing.pageError == nil)
+    }
+
     private func waitForRequests(_ count: Int, _ transport: RemoteFilesHeldTransport) async {
-        let deadline = ContinuousClock.now.advanced(by: .seconds(1))
+        let deadline = ContinuousClock.now.advanced(by: .seconds(3))
         var current = await transport.gate.count
         while current < count, ContinuousClock.now < deadline {
             try? await Task.sleep(for: .milliseconds(1))
@@ -78,6 +132,12 @@ struct RemoteFileListTests {
         }
         #expect(current == count)
     }
+}
+
+@MainActor
+private final class RemoteFilesJoinSignal {
+    var started = false
+    var finished = false
 }
 
 /// The held transport deliberately ignores cancellation, exercising stale

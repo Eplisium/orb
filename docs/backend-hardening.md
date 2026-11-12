@@ -81,9 +81,10 @@ Endpoint collision coverage uses decoded payloads and an injected `APIService` r
 | ID | Repair | Primary regression suite |
 |---|---|---|
 | R01 | Preserve unexpected known-field shapes and explicit nulls in reasoning details through stream decode, SQLite, and continuation encoding; keep opaque values out of display | ReasoningUnexpectedFieldTests |
+| A01 | Batch per-item HTTP success requires explicit 2xx status and no error, preserving malformed/failure payloads for inspection | BatchContractTests |
 | A02 | Apply SSE bounds to the active line/event instead of aggregate network chunks; preserve fragmented UTF-8/CRLF and oversized-input rejection | AdapterSSEChunkTests |
 
-Responses/Messages remain adapter-only; Chat and Agent still use chat completions. These regressions use synthetic offline payloads, not evidence of malformed live provider output.
+Responses/Messages remain adapter-only; Chat and Agent still use chat completions. Batches also have no UI; item HTTP-success classification does not validate endpoint-specific body contents. These regressions use synthetic offline payloads, not evidence of malformed live provider output.
 
 ## Extended remote Files audit
 

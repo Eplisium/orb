@@ -243,7 +243,11 @@ struct BatchResultItem: Decodable, Equatable, Sendable {
         case customID = "custom_id"
     }
 
-    var succeeded: Bool { response != nil && error == nil }
+    /// HTTP-level success only; endpoint-specific body validation is separate.
+    var succeeded: Bool {
+        guard error == nil, let status = response?.statusCode else { return false }
+        return (200..<300).contains(status)
+    }
 }
 
 /// A batch record. On a completed batch, `results` arrives inline — there
