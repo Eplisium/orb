@@ -27,7 +27,7 @@ struct MCPHeldResponseTests {
         while ContinuousClock.now < deadline {
             if await connection.isRunning,
                let state = try? await connection.callTool(name: "state", arguments: .object([:])), state.content == method { return }
-            try await Task.sleep(for: .milliseconds(10))
+            await Task.yield()
         }
         throw MCPError.transport("Fixture did not receive held request")
     }
@@ -41,7 +41,7 @@ struct MCPHeldResponseTests {
         let registry = MCPRegistry(configProvider: { source.load() }, connectionFactory: { config in
             config == original ? old : MCPConnection(config: config, secretStore: InMemoryCredentialStore(), requestTimeout: .seconds(8))
         })
-        let startup = Task { await registry.startEnabledServers() }
+        let startup = MCPHeldTask { await registry.startEnabledServers() }
         do {
             try await waitForHeld("initialize", on: old)
             var replacement = original
@@ -49,7 +49,7 @@ struct MCPHeldResponseTests {
             replacement.args[2] = "replacement"
             source.replace(replacement)
             _ = try await old.callTool(name: "release", arguments: .object(["fail": .bool(fail)]))
-            await startup.value
+            try await startup.value()
             #expect(await old.isRunning == false)
             let status = try #require(await registry.status().first)
             #expect(status.connected)
@@ -62,8 +62,10 @@ struct MCPHeldResponseTests {
         } catch {
             startup.cancel()
             await old.shutdown()
-            await startup.value
-            await registry.shutdownAll()
+            await startup.drain()
+            let cleanup = MCPHeldTask { await registry.shutdownAll() }
+            await cleanup.drain()
+            cleanup.cancel()
             throw error
         }
     }
@@ -85,7 +87,7 @@ struct MCPHeldResponseTests {
         case "prompts/get": tool = MCPToolNaming.getPromptTool(server: original.name); args = #"{"name":"identity"}"#
         default: tool = MCPToolNaming.qualify(server: original.name, tool: "identity"); args = "{}"
         }
-        let call = Task { await registry.call(qualifiedName: tool, argumentsJSON: args) }
+        let call = MCPHeldTask { await registry.call(qualifiedName: tool, argumentsJSON: args) }
         do {
             try await waitForHeld(method, on: old)
             var replacement = original
@@ -93,7 +95,7 @@ struct MCPHeldResponseTests {
             replacement.args[2] = "replacement"
             source.replace(replacement)
             _ = try await old.callTool(name: "release", arguments: .object([:]))
-            let obsolete = await call.value
+            let obsolete = try await call.value()
             #expect(obsolete.isError)
             #expect(obsolete.content.contains("obsolete result was discarded"))
             await registry.startServer(named: original.name)
@@ -105,8 +107,10 @@ struct MCPHeldResponseTests {
         } catch {
             call.cancel()
             await old.shutdown()
-            _ = await call.value
-            await registry.shutdownAll()
+            await call.drain()
+            let cleanup = MCPHeldTask { await registry.shutdownAll() }
+            await cleanup.drain()
+            cleanup.cancel()
             throw error
         }
     }
@@ -117,51 +121,37 @@ struct MCPHeldResponseTests {
         let original = try config(holding: "initialize")
         let old = MCPConnection(config: original, secretStore: InMemoryCredentialStore(), requestTimeout: .seconds(8))
         let registry = MCPRegistry(configProvider: { [original] }, connectionFactory: { _ in old })
-        let startup = Task { await registry.startEnabledServers() }
+        let startup = MCPHeldTask { await registry.startEnabledServers() }
         let signal = MCPHeldWaiterSignal()
-        var pendingWaiter: Task<Void, Never>?
+        var pendingWaiter: MCPHeldTask<Void>?
         do {
             try await waitForHeld("initialize", on: old)
-            let waiter = Task {
-                await signal.markStarted()
-                switch operation {
-                case "definitions": #expect(await registry.toolDefinitions().isEmpty)
-                case "resources": #expect(await registry.availableResources().isEmpty)
-                case "prompts": #expect(await registry.availablePrompts().isEmpty)
-                case "status": #expect(await registry.status().isEmpty)
-                case "start": await registry.startEnabledServers()
-                case "targeted-start": await registry.startServer(named: original.name)
-                case "shutdown": await registry.shutdownAll()
-                case "stop": await registry.stopServer(named: original.name)
-                case "call":
-                    let result = await registry.call(qualifiedName: MCPToolNaming.qualify(server: original.name, tool: "identity"), argumentsJSON: "{}")
-                    #expect(result.isError)
-                default: #expect(await registry.availableTools().isEmpty)
-                }
-                await signal.markFinished()
+            let waiter = MCPHeldTask {
+                await registry.heldWaiter(operation, name: original.name, signal: signal)
             }
             pendingWaiter = waiter
-            while !(await signal.started) { await Task.yield() }
-            // Exercise a suspended waiter, not only a task cancelled before entry.
-            try await Task.sleep(for: .milliseconds(30))
+            try await mcpHeldWait("registry waiter entry") { signal.started.value == true }
+            #expect(await registry.heldWaiterBarrier(signal) == false,
+                    "Waiter must actually suspend behind held initialization")
             waiter.cancel()
-            let deadline = ContinuousClock.now + .seconds(1)
-            while !(await signal.finished) && ContinuousClock.now < deadline {
-                try await Task.sleep(for: .milliseconds(10))
-            }
-            #expect(await signal.finished, "Cancelled caller must finish before initialize is released")
+            try await waiter.value()
+            #expect(signal.finished.value == true, "Cancelled caller must finish before initialize is released")
+            try await waitForHeld("initialize", on: old)
             _ = try await old.callTool(name: "release", arguments: .object([:]))
-            await startup.value
-            await waiter.value
-            #expect(await registry.status().allSatisfy { $0.connected && $0.error == nil })
+            try await startup.value()
+            let status = await registry.status()
+            #expect(status.count == 1)
+            #expect(status.allSatisfy { $0.connected && $0.error == nil })
             await registry.shutdownAll()
         } catch {
             pendingWaiter?.cancel()
             startup.cancel()
-            await old.shutdown()
-            await startup.value
-            await pendingWaiter?.value
-            await registry.shutdownAll()
+            await old.shutdown() // close first, never await a held RPC first
+            await startup.drain()
+            await pendingWaiter?.drain()
+            let cleanup = MCPHeldTask { await registry.shutdownAll() }
+            await cleanup.drain()
+            cleanup.cancel()
             throw error
         }
     }
@@ -170,29 +160,39 @@ struct MCPHeldResponseTests {
           .enabled(if: Self.node != nil, "requires Node"))
     func cancelledFirstStartupRetries() async throws {
         let original = try config(holding: "initialize")
-        let source = MCPHeldConfigSource(original)
         let old = MCPConnection(config: original, secretStore: InMemoryCredentialStore(), requestTimeout: .seconds(8))
-        let registry = MCPRegistry(configProvider: { source.load() }, connectionFactory: { config in
-            config == original ? old : MCPConnection(config: config, secretStore: InMemoryCredentialStore(), requestTimeout: .seconds(8))
-        })
-        let startup = Task { await registry.startEnabledServers() }
+        let registry = MCPRegistry(configProvider: { [original] }, connectionFactory: { _ in old })
+        let startup = MCPHeldTask { await registry.startEnabledServers() }
+        var retry: MCPHeldTask<[MCPToolDescriptor]>?
         do {
             try await waitForHeld("initialize", on: old)
             startup.cancel()
-            await startup.value
+            try await startup.value()
             #expect(await old.isRunning == false)
+            #expect(await old.isReady == false)
             #expect(await registry.status().allSatisfy { !$0.connected && $0.error == nil })
-            var ready = original
-            ready.args[1] = "none"
-            source.replace(ready)
-            #expect(await registry.availableTools().count == 1)
-            #expect(await registry.status().allSatisfy { $0.connected && $0.error == nil })
+            // Same config AND same connection actor: no replacement can hide a
+            // poisoned process-presence guard or obsolete owner cleanup.
+            let retryTask = MCPHeldTask { await registry.availableTools() }
+            retry = retryTask
+            try await waitForHeld("initialize", on: old)
+            #expect(await old.isReady == false)
+            _ = try await old.callTool(name: "release", arguments: .object([:]))
+            #expect(try await retryTask.value().count == 1)
+            #expect(await old.isReady)
+            let status = await registry.status()
+            #expect(status.count == 1)
+            #expect(status.allSatisfy { $0.connected && $0.error == nil })
             await registry.shutdownAll()
         } catch {
             startup.cancel()
+            retry?.cancel()
             await old.shutdown()
-            await startup.value
-            await registry.shutdownAll()
+            await startup.drain()
+            await retry?.drain()
+            let cleanup = MCPHeldTask { await registry.shutdownAll() }
+            await cleanup.drain()
+            cleanup.cancel()
             throw error
         }
     }
@@ -217,9 +217,73 @@ struct MCPHeldResponseTests {
     }
 }
 
-private actor MCPHeldWaiterSignal {
-    var started = false
-    var finished = false
-    func markStarted() { started = true }
-    func markFinished() { finished = true }
+/// Completion probes make test teardown bounded even when a lifecycle
+/// continuation regresses. No test-owned continuation or unbounded task join.
+final class MCPHeldValue<Value: Sendable>: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storage: Value?
+    var value: Value? { lock.lock(); defer { lock.unlock() }; return storage }
+    func store(_ value: Value) { lock.lock(); defer { lock.unlock() }; storage = value }
+}
+
+struct MCPHeldTask<Value: Sendable>: Sendable {
+    private let result: MCPHeldValue<Value>
+    private let task: Task<Void, Never>
+
+    init(_ operation: @escaping @Sendable () async -> Value) {
+        let result = MCPHeldValue<Value>()
+        self.result = result
+        task = Task { result.store(await operation()) }
+    }
+
+    func cancel() { task.cancel() }
+    func value() async throws -> Value {
+        try await mcpHeldWait("task completion") { result.value != nil }
+        return try #require(result.value)
+    }
+    func drain() async {
+        do { _ = try await value() }
+        catch { Issue.record("Held fixture cleanup did not drain: \(error)") }
+    }
+}
+
+func mcpHeldWait(_ description: String, until predicate: () async -> Bool) async throws {
+    let deadline = ContinuousClock.now + .seconds(5)
+    while ContinuousClock.now < deadline {
+        if await predicate() { return }
+        await Task.yield()
+    }
+    throw MCPError.transport("Held fixture timed out waiting for \(description)")
+}
+
+private final class MCPHeldWaiterSignal: @unchecked Sendable {
+    let started = MCPHeldValue<Bool>()
+    let finished = MCPHeldValue<Bool>()
+}
+
+private extension MCPRegistry {
+    /// Announce entry on the operation's own actor, then run until it suspends.
+    /// A later actor barrier cannot observe a merely queued cross-actor hop.
+    func heldWaiter(_ operation: String, name: String, signal: MCPHeldWaiterSignal) async {
+        signal.started.store(true)
+        defer { signal.finished.store(true) }
+        switch operation {
+        case "definitions": #expect(await toolDefinitions().isEmpty)
+        case "resources": #expect(await availableResources().isEmpty)
+        case "prompts": #expect(await availablePrompts().isEmpty)
+        case "status": #expect(await status().isEmpty)
+        case "start": await startEnabledServers()
+        case "targeted-start": await startServer(named: name)
+        case "shutdown": await shutdownAll()
+        case "stop": await stopServer(named: name)
+        case "call":
+            let result = await call(qualifiedName: MCPToolNaming.qualify(server: name, tool: "identity"), argumentsJSON: "{}")
+            #expect(result.isError)
+        default: #expect(await availableTools().isEmpty)
+        }
+    }
+
+    func heldWaiterBarrier(_ signal: MCPHeldWaiterSignal) -> Bool {
+        signal.finished.value == true
+    }
 }

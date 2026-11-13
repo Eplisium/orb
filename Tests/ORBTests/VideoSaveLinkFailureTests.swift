@@ -34,7 +34,9 @@ struct VideoSaveLinkFailureTests {
 
         let first = try await service.downloadAndSave(remoteID: remoteID, store: store)
         #expect(controller.lastPersistenceError != nil)
-        #expect(controller.record(remoteID: remoteID)?.savedCreationID == nil)
+        #expect(try db.findJobRecordChecked(remoteID: remoteID)?.savedCreationID == nil)
+        #expect(controller.record(remoteID: remoteID)?.savedCreationID == first.id)
+        #expect(controller.unsavedRecordCount == 1)
         #expect(try await store.data(for: first) == transport.bytes)
         let repeated = try await service.downloadAndSave(remoteID: remoteID, store: store)
         #expect(repeated.id == first.id)
@@ -50,7 +52,9 @@ struct VideoSaveLinkFailureTests {
         #expect(stillUnlinked.id == first.id)
         #expect(transport.downloadCount == 1)
         #expect(reopenedController.lastPersistenceError != nil)
-        #expect(reopenedController.record(remoteID: remoteID)?.savedCreationID == nil)
+        #expect(try reopenedDB.findJobRecordChecked(remoteID: remoteID)?.savedCreationID == nil)
+        #expect(reopenedController.record(remoteID: remoteID)?.savedCreationID == first.id)
+        #expect(reopenedController.unsavedRecordCount == 1)
         try db.execChecked("DROP TRIGGER deny_video_link;")
         let recovered = try await reopenedService.downloadAndSave(remoteID: remoteID, store: reopenedStore)
         #expect(recovered.id == first.id)
@@ -58,6 +62,8 @@ struct VideoSaveLinkFailureTests {
         #expect(transport.downloadCount == 1)
         #expect(reopenedController.record(remoteID: remoteID)?.savedCreationID == first.id)
         #expect(reopenedController.lastPersistenceError == nil)
+        #expect(reopenedController.unsavedRecordCount == 0)
+        #expect(try reopenedDB.findJobRecordChecked(remoteID: remoteID)?.savedCreationID == first.id)
     }
 }
 

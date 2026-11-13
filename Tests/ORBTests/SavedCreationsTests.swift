@@ -143,7 +143,7 @@ struct SavedCreationsDeleteTests {
         return (root, AssetStore(baseDirectory: root.appendingPathComponent("Assets"), database: DatabaseManager()), root.appendingPathComponent("creations.json"))
     }
 
-    @Test("remove updates the index, restore brings it back in order, purge deletes bytes")
+    @Test("remove and restore update the index while expired Undo conservatively retains bytes")
     func lifecycle() async throws {
         let (root, assets, index) = try fixture()
         defer { try? FileManager.default.removeItem(at: root) }
@@ -155,7 +155,7 @@ struct SavedCreationsDeleteTests {
         #expect(removed == [a])
         #expect(store.creations.map(\.id) == [b.id])
         #expect(try SavedCreationsStore(assetStore: assets, indexURL: index).creations.map(\.id) == [b.id])
-        // Bytes survive until purge so Undo is lossless.
+        // Bytes survive removal and Undo expiry; no global reclamation is claimed.
         #expect(try await assets.data(atRelativePath: a.assetPath) == Data("one".utf8))
 
         try await store.restore(removed)
@@ -165,7 +165,8 @@ struct SavedCreationsDeleteTests {
 
         let again = try await store.remove(ids: [a.id])
         await store.purgeUnreferenced(again)
-        await #expect(throws: AssetStoreError.self) { _ = try await assets.data(atRelativePath: a.assetPath) }
+        #expect(try await assets.data(atRelativePath: a.assetPath) == Data("one".utf8))
+        #expect(try SavedCreationsStore(assetStore: assets, indexURL: index).creations.map(\.id) == [b.id])
         #expect(try await assets.data(atRelativePath: b.assetPath) == Data("two".utf8))
     }
 

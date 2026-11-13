@@ -65,7 +65,7 @@ struct SavedCreationsLibraryView: View {
             Button("Delete", role: .destructive) { if let items = pendingDelete { delete(items) } }
             Button("Cancel", role: .cancel) { pendingDelete = nil }
         } message: {
-            Text("You can undo for a few seconds. After that the saved file is removed from this Mac.")
+            Text("This removes the item from the Library, with Undo available briefly. Backing files are retained indefinitely to protect shared media; this does not free disk space.")
         }
         .overlay(alignment: .bottom) {
             if let removed = undoRemoved {

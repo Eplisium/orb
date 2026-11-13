@@ -131,6 +131,9 @@ Strict concurrency checking (`StrictConcurrency=targeted`) is enabled as warning
 
 ## Known limitations
 
+- Failed video-job writes retain complete records in memory and expose local Retry actions. Retrying never submits a second generation, but unsaved records are lost on quit. A failed initial lookup still blocks mutation; this is not a crash-durable submission outbox.
+- Library removal deletes the index entry, **not the backing media files**. Bytes are retained indefinitely because independent/legacy manifests do not provide a complete transactional owner inventory. Deleted items and failed saves can consume disk space; there is currently no supported reclamation workflow. Asset/catalog and manifest bindings also reject relocation or replacement catalogs rather than guessing ownership.
+
 - **Not notarized.** Downloaded builds are ad-hoc signed and need right-click → Open. Keychain and privacy prompts come back after each update.
 - **MCP approval is per server, not per tool.** Enabling a server in Settings is its approval: its tools are offered to the Agent whenever Computer Access is on, and each call still prompts. There is no way to allow only some of a server's tools.
 - **Agent permission levels.** The Agent UI only offers Web Only or Computer Access. Finer policy presets (workspace read, workspace write, terminal only) exist internally and are used by the Test Suite, but you can't choose them in the Agent.

@@ -185,6 +185,9 @@ struct LibraryExtendedAuditTests {
         #expect(store.creations == [b])
         let deletedAgain = try await store.remove(ids: [b.id])
         await store.purgeUnreferenced(deletedAgain)
-        await #expect(throws: AssetStoreError.self) { try await assets.data(atRelativePath: b.assetPath) }
+        #expect(store.creations.isEmpty)
+        // An expired local Undo is not proof that independent manifests have
+        // no owner. The explicit retention contract keeps the backing bytes.
+        #expect(try await assets.data(atRelativePath: b.assetPath) == bytes)
     }
 }

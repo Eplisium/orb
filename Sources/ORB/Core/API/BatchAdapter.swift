@@ -276,13 +276,21 @@ struct BatchRecord: Decodable, Equatable, Sendable {
 
     var batchStatus: BatchStatus? { status.map(BatchStatus.init(string:)) }
 
-    /// Results indexed by `custom_id`. Array order is never used for
-    /// matching.
+    /// ORB's fail-closed lookup: only uniquely occurring, nonempty `custom_id`s.
+    /// Repetitions (even identical rows) are ambiguous and never select a winner.
+    /// Raw results remain untouched; nonempty IDs are not trimmed or normalized.
     var resultsByCustomID: [String: BatchResultItem] {
-        Dictionary(
-            (results ?? []).map { ($0.customID, $0) },
-            uniquingKeysWith: { first, _ in first }
-        )
+        var indexed: [String: BatchResultItem] = [:]
+        var seen = Set<String>()
+        for item in results ?? [] where !item.customID.isEmpty {
+            if seen.insert(item.customID).inserted {
+                indexed[item.customID] = item
+            } else {
+                // Keep the ID in `seen` so a third occurrence cannot restore it.
+                indexed.removeValue(forKey: item.customID)
+            }
+        }
+        return indexed
     }
 
     func result(for customID: String) -> BatchResultItem? {

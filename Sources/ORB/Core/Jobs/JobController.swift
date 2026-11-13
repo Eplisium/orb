@@ -1,4 +1,5 @@
 import Foundation
+import Combine
 
 // MARK: - Durable media job records (W06)
 //
@@ -6,8 +7,9 @@ import Foundation
 // application-owned, @MainActor controller that persists a `JobRecord` for
 // every submission — keyed by the remote job ID *before* polling relies on
 // it — and owns the submission/polling state that used to live in
-// `MediaViews`. Records survive app restarts, so a queued generation can be
-// recovered instead of silently lost.
+// `MediaViews`. Successfully saved records survive app restarts. Failed
+// writes retain the latest full snapshot IN MEMORY for local-only retry;
+// quitting loses those unsaved records/updates. This is not a durable outbox.
 
 /// How the submission itself resolved. Distinct from polling state because
 /// "we don't know whether the remote job exists" must never be presented as
@@ -103,7 +105,7 @@ struct JobRecord: Equatable, Identifiable, Sendable {
 /// `lastPersistenceError` — a failed database write must never crash or
 /// abort a media flow.
 @MainActor
-final class JobController {
+final class JobController: ObservableObject {
     /// The controller used by the default view path. Backed by the shared
     /// database so records survive restarts. Created once per process and
     /// before any poll loop can start, so it runs the launch recovery.
@@ -121,7 +123,20 @@ final class JobController {
     }
 
     private let database: DatabaseManager
-    private(set) var lastPersistenceError: String?
+    /// Authoritative latest snapshots only while their writes remain unsaved.
+    /// UUID keys also preserve distinct unknown submissions with no remote ID.
+    private var pending: [UUID: JobRecord] = [:]
+    private(set) var persistenceErrors: [UUID: String] = [:]
+    private var readError: String?
+    /// Emitted after mutations so services can refresh even without a poll tick.
+    @Published private(set) var revision = 0
+
+    var pendingRecords: [JobRecord] { sorted(Array(pending.values)) }
+    var unsavedRecordCount: Int { pending.count }
+    /// Compatibility summary. Saving one row cannot hide another row's failure.
+    var lastPersistenceError: String? {
+        pendingRecords.compactMap { persistenceErrors[$0.id] }.first ?? readError
+    }
 
     init(database: DatabaseManager = .shared) {
         self.database = database
@@ -146,9 +161,9 @@ final class JobController {
     ) -> JobRecord? {
         let existing: JobRecord?
         do {
-            existing = try database.findJobRecordChecked(remoteID: remoteID)
+            existing = try recordChecked(remoteID: remoteID)
         } catch {
-            lastPersistenceError = error.localizedDescription
+            setReadError(error.localizedDescription)
             return nil
         }
         if existing != nil {
@@ -306,7 +321,11 @@ final class JobController {
     /// at most once (the first link wins), and allowed on terminal records —
     /// it never changes the polling state.
     func recordSavedCreation(remoteID: String, creationID: UUID) {
-        guard var record = record(remoteID: remoteID), record.savedCreationID == nil else { return }
+        guard var record = record(remoteID: remoteID) else { return }
+        guard record.savedCreationID == nil else {
+            retryPendingPersistence(id: record.id)
+            return
+        }
         record.savedCreationID = creationID
         record.updatedAt = Date()
         persist(record)
@@ -315,7 +334,11 @@ final class JobController {
     /// Clears a link whose creation no longer exists (deleted from Library),
     /// so the result can be downloaded again while the provider still has it.
     func clearSavedCreation(remoteID: String) {
-        guard var record = record(remoteID: remoteID), record.savedCreationID != nil else { return }
+        guard var record = record(remoteID: remoteID) else { return }
+        guard record.savedCreationID != nil else {
+            retryPendingPersistence(id: record.id)
+            return
+        }
         record.savedCreationID = nil
         record.updatedAt = Date()
         persist(record)
@@ -324,19 +347,32 @@ final class JobController {
     // MARK: Queries
 
     func record(id: UUID) -> JobRecord? {
-        do { return try database.findJobRecordChecked(id: id) }
-        catch {
-            lastPersistenceError = error.localizedDescription
+        if let record = pending[id] { return record }
+        do {
+            let record = try database.findJobRecordChecked(id: id)
+            setReadError(nil)
+            return record
+        } catch {
+            setReadError(error.localizedDescription)
             return nil
         }
     }
 
     func record(remoteID: String) -> JobRecord? {
-        do { return try database.findJobRecordChecked(remoteID: remoteID) }
+        do { return try recordChecked(remoteID: remoteID) }
         catch {
-            lastPersistenceError = error.localizedDescription
+            setReadError(error.localizedDescription)
             return nil
         }
+    }
+
+    /// Throwing lookup is essential for submission: a failed read is NOT
+    /// evidence that a remote ID is new and must not allocate another UUID.
+    private func recordChecked(remoteID: String) throws -> JobRecord? {
+        if let record = pending.values.first(where: { $0.remoteID == remoteID }) { return record }
+        let record = try database.findJobRecordChecked(remoteID: remoteID)
+        setReadError(nil)
+        return record
     }
 
     /// Resumable listing: jobs with a remote ID and a last known status that
@@ -351,32 +387,75 @@ final class JobController {
     }
 
     func allJobs() -> [JobRecord] {
-        do { return try database.loadJobRecordsChecked() }
-        catch {
-            lastPersistenceError = error.localizedDescription
-            return []
+        do {
+            let stored = try database.loadJobRecordsChecked()
+            setReadError(nil)
+            var merged: [UUID: JobRecord] = [:]
+            for record in stored where merged[record.id] == nil { merged[record.id] = record }
+            for (id, record) in pending { merged[id] = record }
+            return sorted(Array(merged.values))
+        } catch {
+            // Do not return a partial database inventory. Owned pending rows
+            // remain usable, but the read error explicitly marks incompleteness.
+            setReadError(error.localizedDescription)
+            return pendingRecords
         }
     }
 
+    private func sorted(_ records: [JobRecord]) -> [JobRecord] {
+        records.sorted {
+            $0.createdAt == $1.createdAt ? $0.id.uuidString < $1.id.uuidString : $0.createdAt > $1.createdAt
+        }
+    }
+
+    private func setReadError(_ error: String?) {
+        guard readError != error else { return }
+        readError = error
+        revision += 1
+    }
+
     // MARK: Persistence
+
+    /// Retry full snapshots locally, including terminal and unknown-ID rows.
+    /// No submission, polling, accounting, UUID allocation or timestamp change.
+    /// Returns the number saved; each unsuccessful row retains its own error.
+    @discardableResult
+    func retryPendingPersistence(id: UUID? = nil) -> Int {
+        let records = pendingRecords.filter { id == nil || $0.id == id }
+        var saved = 0
+        for record in records {
+            persist(record)
+            if pending[record.id] == nil { saved += 1 }
+        }
+        return saved
+    }
 
     private func update(remoteID: String, mutate: (inout JobRecord) -> Void) {
         guard var record = record(remoteID: remoteID) else { return }
         // Terminal states are monotonic: a completed/failed/cancelled/expired
         // job never regresses to an earlier state.
-        guard !record.pollingState.isTerminal else { return }
+        guard !record.pollingState.isTerminal else {
+            // A lifecycle no-op must not strand an already terminal snapshot
+            // after storage recovers. Retry locally without changing its state.
+            retryPendingPersistence(id: record.id)
+            return
+        }
         mutate(&record)
         record.updatedAt = Date()
         persist(record)
     }
 
     private func persist(_ record: JobRecord) {
+        // Own the complete latest state before attempting storage. A later
+        // sparse update must merge against this, not the stale SQLite row.
+        pending[record.id] = record
         do {
             try database.saveJobRecordChecked(record)
-            lastPersistenceError = nil
+            pending[record.id] = nil
+            persistenceErrors[record.id] = nil
         } catch {
-            // Storage-first: a failed write is surfaced, never fatal.
-            lastPersistenceError = error.localizedDescription
+            persistenceErrors[record.id] = error.localizedDescription
         }
+        revision += 1
     }
 }

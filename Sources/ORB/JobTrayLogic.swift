@@ -120,9 +120,10 @@ enum JobTray {
 
 /// Tray button with an active-count badge; opens a popover list.
 struct JobTrayButton: View {
-    @State private var jobs: [JobRecord] = []
+    /// Supplied by the revision-observing parent, including while open.
+    /// Only presentation state belongs here; caching records hides updates.
+    let jobs: [JobRecord]
     @State private var open = false
-    let reload: () -> [JobRecord]
     let onResume: (JobRecord) -> Void
     let onStop: (JobRecord) -> Void
     var onDownload: (JobRecord) -> Void = { _ in }
@@ -132,7 +133,7 @@ struct JobTrayButton: View {
     var hasLiveRun: (JobRecord) -> Bool = { _ in true }
 
     var body: some View {
-        Button { jobs = reload(); open.toggle() } label: {
+        Button { open.toggle() } label: {
             Label("Jobs", systemImage: "tray.full")
                 .overlay(alignment: .topTrailing) {
                     if let badge = JobTray.badgeText(jobs) {
@@ -143,7 +144,6 @@ struct JobTrayButton: View {
         }
         .accessibilityValue(JobTray.summary(jobs))
         .help("Media jobs")
-        .onAppear { jobs = reload() }
         .popover(isPresented: $open) {
             ScrollView {
                 VStack(alignment: .leading, spacing: 10) {
@@ -171,8 +171,8 @@ struct JobTrayButton: View {
             HStack {
                 ForEach(p.actions, id: \.self) { action in
                     switch action {
-                    case .resume: Button("Resume") { onResume(job); jobs = reload() }
-                    case .stop: Button("Stop checking") { onStop(job); jobs = reload() }
+                    case .resume: Button("Resume") { onResume(job) }
+                    case .stop: Button("Stop checking") { onStop(job) }
                     case .download:
                         if isDownloading(job) {
                             ProgressView().controlSize(.small)

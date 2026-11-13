@@ -123,6 +123,46 @@ struct RemoteFileListTests {
         #expect(listing.pageError == nil)
     }
 
+    @Test("Explicit refresh replaces an in-flight next page with page one")
+    func refreshSupersedesLoadMore() async throws {
+        let transport = RemoteFilesHeldTransport()
+        let listing = RemoteFileList(service: FileService(transport: transport))
+        await transport.gate.release(0, body: #"{"data":[{"id":"old"}],"has_more":true,"cursor":"A"}"#)
+        await listing.refresh()
+        let more = Task { await listing.loadMore() }
+        await waitForRequests(2, transport)
+        let refresh = Task { await listing.refresh() }
+        await waitForRequests(3, transport)
+        // Pre-release both responses even on the buggy join path, so a failed
+        // assertion does not leave a test continuation suspended.
+        await transport.gate.release(2, body: #"{"data":[{"id":"fresh"}]}"#)
+        await transport.gate.release(1, body: #"{"data":[{"id":"obsolete"}]}"#)
+        await refresh.value
+        await more.value
+        #expect(listing.files.map(\.id) == ["fresh"])
+        #expect(listing.pageError == nil)
+        #expect(!listing.isFetchingPage)
+    }
+
+    @Test("New refresh clears prior page errors while reconciling", arguments: [false, true])
+    func refreshClearsStaleError(mutation: Bool) async throws {
+        let transport = RemoteFilesHeldTransport()
+        let listing = RemoteFileList(service: FileService(transport: transport))
+        listing.pageError = "Previous request failed"
+        let refresh = Task {
+            if mutation {
+                _ = try await listing.upload(filename: "new.txt", mimeType: "text/plain", data: Data("new".utf8))
+            } else {
+                await listing.refresh()
+            }
+        }
+        await waitForRequests(1, transport)
+        #expect(listing.isFetchingPage)
+        #expect(listing.pageError == nil)
+        await transport.gate.release(0, body: #"{"data":[]}"#)
+        try await refresh.value
+    }
+
     private func waitForRequests(_ count: Int, _ transport: RemoteFilesHeldTransport) async {
         let deadline = ContinuousClock.now.advanced(by: .seconds(3))
         var current = await transport.gate.count

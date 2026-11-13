@@ -4,7 +4,7 @@ import SQLite3
 // MARK: - Media-owned persistence (jobs extras, test-result paging, leaderboard)
 //
 // Kept out of DatabaseManager.swift (owned by chat core). Schema changes here
-// are additive `addColumnIfMissing` calls only and never bump user_version.
+// are additive columns/tables and never bump user_version.
 
 extension DatabaseManager {
     /// Additive media columns. Called from `createTablesCore` before the
@@ -14,6 +14,115 @@ extension DatabaseManager {
         try addColumnIfMissing(table: "jobs", column: "prompt", definition: "TEXT")
         // The saved creation produced from a finished job: set exactly once.
         try addColumnIfMissing(table: "jobs", column: "saved_creation_id", definition: "TEXT")
+        // Durable deletion intent commits together with metadata removal, before
+        // any unlink. A failed cleanup/acknowledgement leaves this inventory intact.
+        try execChecked("""
+            CREATE TABLE IF NOT EXISTS asset_deletions (
+                checksum TEXT NOT NULL,
+                relative_path TEXT NOT NULL,
+                PRIMARY KEY(checksum, relative_path)
+            );
+            CREATE TABLE IF NOT EXISTS asset_library_pins (
+                checksum TEXT PRIMARY KEY
+            );
+            CREATE TABLE IF NOT EXISTS asset_catalog (
+                singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+                identity TEXT NOT NULL,
+                root TEXT
+            );
+            INSERT OR IGNORE INTO asset_catalog(singleton, identity) VALUES (1, '\(UUID().uuidString)');
+            """)
+    }
+
+    // MARK: Asset deletion coordination
+
+    /// Caller holds withAssetReservation across binding and filesystem mutation.
+    func bindAssetRoot(_ root: URL) throws -> String {
+        let stmt = try checkedAssetStatement("SELECT identity, root FROM asset_catalog WHERE singleton = 1;")
+        defer { sqlite3_finalize(stmt) }
+        guard sqlite3_step(stmt) == SQLITE_ROW,
+              let identity = columnTextOrNil(stmt, 0), UUID(uuidString: identity) != nil else {
+            throw DatabaseManagerError.operationFailed("Invalid asset catalog identity")
+        }
+        if let existing = columnTextOrNil(stmt, 1) {
+            guard existing == root.path else {
+                throw DatabaseManagerError.operationFailed("This asset catalog is already bound to another root")
+            }
+        } else {
+            try assetStatement("UPDATE asset_catalog SET root = ? WHERE singleton = 1;", [root.path])
+        }
+        let databasePath = storageFileURLs.first?.resolvingSymlinksInPath().standardizedFileURL.path ?? ":memory:"
+        return identity + "\n" + databasePath
+    }
+
+    func validateAssetAttachment(_ record: AssetRecord) throws {
+        guard record.jobID != nil || record.messageID != nil else { return }
+        let stmt = try checkedAssetStatement("SELECT root FROM asset_catalog WHERE singleton = 1;")
+        defer { sqlite3_finalize(stmt) }
+        guard sqlite3_step(stmt) == SQLITE_ROW, let root = columnTextOrNil(stmt, 0) else {
+            throw DatabaseManagerError.operationFailed("Store bytes through AssetStore before attaching metadata")
+        }
+        try AssetStore(baseDirectory: URL(fileURLWithPath: root), database: self).validateAttachment(record)
+    }
+
+    func loadAssetDeletionInventory() throws -> [AssetDeletionEntry] {
+        dbLock.lock()
+        defer { dbLock.unlock() }
+        let stmt = try checkedAssetStatement("SELECT checksum, relative_path FROM asset_deletions ORDER BY checksum, relative_path;")
+        defer { sqlite3_finalize(stmt) }
+        var result: [AssetDeletionEntry] = []
+        while true {
+            switch sqlite3_step(stmt) {
+            case SQLITE_ROW:
+                guard let checksum = columnTextOrNil(stmt, 0), let path = columnTextOrNil(stmt, 1) else {
+                    throw DatabaseManagerError.operationFailed("Invalid asset deletion inventory")
+                }
+                result.append(AssetDeletionEntry(checksum: checksum, relativePath: path))
+            case SQLITE_DONE: return result
+            default: throw DatabaseManagerError.operationFailed(currentError())
+            }
+        }
+    }
+
+    func pinLibraryAsset(checksum: String) throws {
+        try assetStatement("INSERT OR IGNORE INTO asset_library_pins(checksum) VALUES (?);", [checksum])
+    }
+
+    func journalAssetDeletion(_ entry: AssetDeletionEntry) throws {
+        try assetStatement("INSERT INTO asset_deletions(checksum, relative_path) VALUES (?, ?);", [entry.checksum, entry.relativePath])
+    }
+
+    func acknowledgeAssetDeletion(_ entry: AssetDeletionEntry) throws {
+        try assetStatement("DELETE FROM asset_deletions WHERE checksum = ? AND relative_path = ?;", [entry.checksum, entry.relativePath])
+    }
+
+    /// Also check path aliases, not only checksums, before unlinking anything.
+    func hasAssetRecord(checksum: String, relativePath: String) throws -> Bool {
+        let stmt = try checkedAssetStatement("SELECT 1 FROM assets WHERE checksum = ? OR relative_path = ? LIMIT 1;")
+        defer { sqlite3_finalize(stmt) }
+        Self.bindText(stmt, 1, checksum)
+        Self.bindText(stmt, 2, relativePath)
+        switch sqlite3_step(stmt) {
+        case SQLITE_ROW: return true
+        case SQLITE_DONE: return false
+        default: throw DatabaseManagerError.operationFailed(currentError())
+        }
+    }
+
+    private func checkedAssetStatement(_ sql: String) throws -> OpaquePointer {
+        guard let stmt = prepare(sql) else { throw DatabaseManagerError.operationFailed(currentError()) }
+        return stmt
+    }
+
+    private func assetStatement(_ sql: String, _ values: [String]) throws {
+        let stmt = try checkedAssetStatement(sql)
+        defer { sqlite3_finalize(stmt) }
+        for (offset, value) in values.enumerated() {
+            guard Self.bindText(stmt, Int32(offset + 1), value) == SQLITE_OK else {
+                throw DatabaseManagerError.operationFailed(currentError())
+            }
+        }
+        try requireDone(stmt)
     }
 
     // MARK: Job media fields

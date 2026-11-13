@@ -74,6 +74,14 @@ There are no third-party dependencies. The app uses only Apple frameworks: Swift
 - `KeychainOpenAccess` holds the current Keychain service. Legacy migration runs only after a confirmed missing current item; denied, unavailable, or malformed reads cannot replace current credentials or tombstones. Migration mirrors with add-only semantics. Opaque per-reference revisions invalidate account data and late responses across service instances without exposing credentials.
 - `PKCECoordinator` handles browser sign-in with S256 PKCE over a loopback callback. It fails closed on replay or on an origin, path, or state mismatch.
 
+### Recovery ownership boundaries
+
+Failed job writes are owned by `JobController` as complete in-memory snapshots, not by a view. Pending snapshots override durable rows; local-only retries retain identity/timestamps and never repeat paid work. Video exposes per-record errors and lost-on-quit warnings. Failed initial reads still fail closed rather than inventing a replacement identity.
+
+Asset deletion uses durable SQLite cleanup inventory plus `BEGIN IMMEDIATE` reservations for participating stores, dedupe, attachments and cleanup. Old cleanup acknowledgement commits before replacement saves. Bindings reject mixed catalog/root identities. Independent JSON Library manifests are not a global owner inventory: Library removal retains backing bytes indefinitely and new saves receive retention pins. No supported disk-reclamation workflow or power-loss/fsync guarantee is provided.
+
+Direct MCP connects join one identity-bearing startup attempt; process existence does not mean initialization readiness. Cancellation detaches a joiner or aborts the owner, and obsolete completion cannot clear a replacement attempt.
+
 ### Persistence
 
 `DatabaseManager` owns `~/Library/Application Support/ORB/favorites.sqlite3` (WAL mode). Migrations are idempotent (`CREATE TABLE IF NOT EXISTS` plus `addColumnIfMissing`) and versioned through `PRAGMA user_version`. If a database file fails to open, it is moved aside and the app continues with a temporary database. Under tests the manager isolates itself to a temporary database on its own.

@@ -53,6 +53,12 @@ final class SavedCreationsStore: ObservableObject {
     let loadError: Error?
     private let assetStore: AssetStore
     private let indexURL: URL
+    /// Optimistic snapshot, compared under the shared SQLite writer reservation.
+    /// Independent instances must reopen after another instance edits the index.
+    private var indexSnapshot: Data?
+    private var indexBindingURL: URL {
+        indexURL.deletingLastPathComponent().appendingPathComponent(".\(indexURL.lastPathComponent).orb-assets")
+    }
     /// Serialize the entire read-modify-write across suspension points. MainActor alone
     /// does not prevent two concurrent saves from reading the same manifest state.
     private var previousSave: Task<Void, Never>?
@@ -70,7 +76,11 @@ final class SavedCreationsStore: ObservableObject {
         let url = self.indexURL
         if FileManager.default.fileExists(atPath: url.path) {
             let manifest: CreationsManifest
-            do { manifest = try JSONDecoder().decode(CreationsManifest.self, from: Data(contentsOf: url)) }
+            do {
+                let payload = try Data(contentsOf: url)
+                manifest = try JSONDecoder().decode(CreationsManifest.self, from: payload)
+                indexSnapshot = payload
+            }
             catch { throw SavedCreationsError.invalidIndex(error.localizedDescription) }
             guard manifest.version == 1 else { throw SavedCreationsError.invalidIndex("unsupported version") }
             guard Set(manifest.creations.map(\.id)).count == manifest.creations.count else {
@@ -132,15 +142,11 @@ final class SavedCreationsStore: ObservableObject {
         // Containment + symlink check (AssetStore already verified the checksum
         // of new and deduped files by streaming them).
         _ = try validatedFileURL(path: asset.relativePath, checksum: asset.checksum)
+        try assetStore.preserveForLibrary(asset)
         let item = SavedCreation(id: UUID(), kind: kind, modelID: modelID, prompt: prompt,
                                  mimeType: mimeType, createdAt: Date(), assetPath: asset.relativePath,
                                  checksum: asset.checksum, videoRemoteID: videoRemoteID)
-        let updated = [item] + creations
-        let payload = try JSONEncoder().encode(CreationsManifest(version: 1, creations: updated))
-        try FileManager.default.createDirectory(at: indexURL.deletingLastPathComponent(), withIntermediateDirectories: true)
-        // .atomic writes a sibling temporary file and replaces the manifest only on success.
-        try payload.write(to: indexURL, options: .atomic)
-        creations = updated
+        try writeIndex([item] + creations)
         return item
     }
 
@@ -169,14 +175,13 @@ final class SavedCreationsStore: ObservableObject {
         }
     }
 
-    /// Deletes bytes no remaining creation references. Call once Undo is no longer possible.
+    /// Expire this instance's Undo bookkeeping only. JSON manifests (including
+    /// independent instances and legacy catalogs) do not provide a global owner
+    /// inventory. Preserve bytes rather than pretending this is atomic GC. New
+    /// Library saves also carry durable conservative pins in the asset catalog.
     func purgeUnreferenced(_ removed: [SavedCreation]) async {
         _ = try? await serialized { [self] in
             for item in removed { pendingRemoval.removeValue(forKey: item.id) }
-            let live = Set(creations.map(\.checksum)).union(pendingRemoval.values.map(\.checksum))
-            for checksum in Set(removed.map(\.checksum)) where !live.contains(checksum) {
-                _ = try? assetStore.removeUnattached(checksum: checksum)
-            }
         }
     }
 
@@ -191,10 +196,62 @@ final class SavedCreationsStore: ObservableObject {
     }
 
     private func writeIndex(_ updated: [SavedCreation]) throws {
+        if let loadError { throw loadError }
+        guard Set(updated.map(\.id)).count == updated.count,
+              updated.allSatisfy({ Self.isValidAssetPath($0.assetPath, checksum: $0.checksum) }) else {
+            throw SavedCreationsError.invalidIndex("duplicate identity or untrusted asset path")
+        }
         let payload = try JSONEncoder().encode(CreationsManifest(version: 1, creations: updated))
-        try FileManager.default.createDirectory(at: indexURL.deletingLastPathComponent(), withIntermediateDirectories: true)
-        try payload.write(to: indexURL, options: .atomic)
+        var published = false
+        do {
+            try assetStore.withCatalogReservation {
+                let base = assetStore.canonicalBaseDirectory.path
+                let index = indexURL.resolvingSymlinksInPath().standardizedFileURL.path
+                guard index != base, !index.hasPrefix(base + "/"),
+                      !assetStore.metadataFileURLs.contains(where: {
+                          $0.resolvingSymlinksInPath().standardizedFileURL.path == index
+                      }) else { throw SavedCreationsError.unavailable("index overlaps managed asset storage") }
+                // The marker rejects one manifest shared by independently locked
+                // roots/catalogs. Existing v1 JSON remains unchanged and readable.
+                let expected = Data(base.utf8)
+                let marker = indexBindingURL
+                let existingBinding = try Self.readIndexFile(marker)
+                guard existingBinding == nil || existingBinding == expected else {
+                    throw SavedCreationsError.unavailable("index belongs to another asset root")
+                }
+                guard try Self.readIndexFile(indexURL) == indexSnapshot else {
+                    throw SavedCreationsError.unavailable("index changed in another store; reopen the Library before editing")
+                }
+                let fm = FileManager.default
+                try fm.createDirectory(at: indexURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+                if existingBinding == nil {
+                    try ExclusiveMarkerPublisher.publish(expected, to: marker, fileManager: fm)
+                }
+                try payload.write(to: indexURL, options: .atomic)
+                published = true
+            }
+        } catch {
+            // JSON publication cannot be rolled back by a failed reservation COMMIT.
+            // Adopt that actual outcome so callers finish their Undo bookkeeping;
+            // all errors before publication still fail closed without changing memory.
+            guard published else { throw error }
+        }
+        indexSnapshot = payload
         creations = updated
+    }
+
+    /// Missing is the only acceptable read failure; unreadable files, directories,
+    /// and symlinks cannot masquerade as an absent manifest or binding.
+    private static func readIndexFile(_ url: URL) throws -> Data? {
+        do {
+            let attributes = try FileManager.default.attributesOfItem(atPath: url.path)
+            guard attributes[.type] as? FileAttributeType == .typeRegular else {
+                throw SavedCreationsError.invalidIndex("index or binding is not a regular file")
+            }
+            return try Data(contentsOf: url)
+        } catch let error as NSError where error.domain == NSCocoaErrorDomain && error.code == NSFileReadNoSuchFileError {
+            return nil
+        }
     }
 
     /// On-disk location of a creation's bytes for export (copyItem), drag-out,
@@ -227,7 +284,7 @@ final class SavedCreationsStore: ObservableObject {
         let target = parent.appendingPathComponent(destination.lastPathComponent)
         let canonicalTarget = target.resolvingSymlinksInPath().standardizedFileURL
         let base = assetStore.baseDirectory.resolvingSymlinksInPath().standardizedFileURL.path
-        let metadataURLs = assetStore.metadataFileURLs + [indexURL]
+        let metadataURLs = assetStore.metadataFileURLs + [indexURL, indexBindingURL]
         let metadata = metadataURLs.map { $0.resolvingSymlinksInPath().standardizedFileURL.path }
         guard canonicalTarget.path != base,
               !canonicalTarget.path.hasPrefix(base + "/"),

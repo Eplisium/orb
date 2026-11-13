@@ -12,6 +12,7 @@ final class RemoteFileList: ObservableObject {
 
     private let service: FileService
     private var pageTask: Task<Void, Never>?
+    private var pageCursor: String?
     private var generation = UUID()
     private var consumedCursors: Set<String> = []
 
@@ -19,7 +20,12 @@ final class RemoteFileList: ObservableObject {
 
     /// View tasks join shared work; leaving a view does not cancel its owner.
     func refresh() async {
-        if let pageTask { await pageTask.value; return }
+        if let pageTask, pageCursor == nil { await pageTask.value; return }
+        // A Refresh asks for an authoritative first page, not the completion
+        // of an older pagination request. Existing refresh callers still join.
+        pageTask?.cancel()
+        nextCursor = nil
+        hasMore = false
         await startPage(cursor: nil).value
     }
 
@@ -32,12 +38,15 @@ final class RemoteFileList: ObservableObject {
     private func startPage(cursor: String?) -> Task<Void, Never> {
         let identity = UUID()
         generation = identity
+        pageCursor = cursor
+        pageError = nil
         if cursor == nil { consumedCursors = [] }
         isFetchingPage = true
         let task = Task { @MainActor in
             defer {
                 if generation == identity {
                     pageTask = nil
+                    pageCursor = nil
                     isFetchingPage = false
                 }
             }

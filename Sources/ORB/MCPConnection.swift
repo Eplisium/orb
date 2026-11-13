@@ -254,6 +254,18 @@ actor MCPConnection {
     /// Production uses the Keychain-backed store; tests inject fakes.
     private let secretStore: CredentialSecretStore
     private var process: Process?
+    /// Process presence is transport liveness, not completed discovery. The
+    /// initiating caller owns this identity; later callers only own waiters.
+    // Mutable fields are accessed only on this actor; onCancel uses only the
+    // thread-safe cancellation flag and passes the identity back to the actor.
+    private final class StartupAttempt: @unchecked Sendable {
+        let process = Process()
+        let cancellation = MCPWriteCancellation()
+        var result: Result<Void, Error>?
+        var joiners: [UUID: CheckedContinuation<Void, Error>] = [:]
+    }
+    private var startup: StartupAttempt?
+    private(set) var isReady = false
     private var stdinHandle: FileHandle?
     private struct PendingRequest {
         let method: String
@@ -331,11 +343,87 @@ actor MCPConnection {
 
     func connect() async throws {
         try Task.checkCancellation()
-        guard process == nil else { return }
+        if let startup {
+            try await joinStartup(startup)
+            return
+        }
+        if isReady, process?.isRunning == true { return }
+        // A process can have exited before its termination callback arrives.
+        if process != nil { shutdown() }
+        let attempt = StartupAttempt()
+        startup = attempt
+        let cancellation = attempt.cancellation
+        try await withTaskCancellationHandler {
+            do {
+                try await startTransport(attempt)
+                try checkStartupTransport(attempt)
+                isReady = true
+                finishStartup(attempt, with: .success(()))
+            } catch {
+                // Shutdown may already have resolved this exact attempt while
+                // its owner was suspended. Do not replace that terminal result
+                // or close a newer transport started on the same actor.
+                let failure: Error
+                if case .failure(let resolved)? = attempt.result {
+                    failure = resolved
+                } else {
+                    failure = cancellation.isCancelled ? CancellationError() : error
+                }
+                if startup === attempt { closeTransport(with: failure) }
+                throw failure
+            }
+        } onCancel: {
+            cancellation.cancel()
+            Task { await self.cancelStartup(attempt) }
+        }
+    }
+
+    private func joinStartup(_ attempt: StartupAttempt) async throws {
+        let id = UUID()
+        let cancellation = MCPWriteCancellation()
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+                guard !cancellation.isCancelled, !Task.isCancelled else {
+                    continuation.resume(throwing: CancellationError())
+                    return
+                }
+                if let result = attempt.result {
+                    continuation.resume(with: result)
+                } else {
+                    attempt.joiners[id] = continuation
+                }
+            }
+            try Task.checkCancellation()
+        } onCancel: {
+            cancellation.cancel()
+            Task { await self.cancelStartupJoiner(id, in: attempt) }
+        }
+    }
+
+    private func cancelStartupJoiner(_ id: UUID, in attempt: StartupAttempt) {
+        attempt.joiners.removeValue(forKey: id)?.resume(throwing: CancellationError())
+    }
+
+    private func cancelStartup(_ attempt: StartupAttempt) {
+        guard startup === attempt else { return }
+        closeTransport(with: CancellationError())
+    }
+
+    private func finishStartup(_ attempt: StartupAttempt, with result: Result<Void, Error>) {
+        guard attempt.result == nil else { return }
+        attempt.result = result
+        if startup === attempt { startup = nil }
+        let joiners = attempt.joiners.values
+        attempt.joiners.removeAll()
+        for continuation in joiners { continuation.resume(with: result) }
+    }
+
+    private func startTransport(_ attempt: StartupAttempt) async throws {
+        try Task.checkCancellation()
         isShuttingDown = false
         lastError = nil
 
-        let task = Process()
+        let task = attempt.process
         // Resolve via a login shell so `npx`, `uvx`, and friends are found even
         // though a GUI app inherits a minimal PATH.
         task.executableURL = URL(fileURLWithPath: "/bin/sh")
@@ -374,7 +462,7 @@ actor MCPConnection {
         stdoutPump = Task { [weak self] in
             for await chunk in chunks {
                 guard !Task.isCancelled else { return }
-                await self?.ingest(chunk)
+                await self?.ingest(chunk, from: task)
             }
         }
         stdoutSink = chunkSink
@@ -386,21 +474,19 @@ actor MCPConnection {
             Task { await self?.handleTermination(terminated) }
         }
 
+        process = task
         do {
             try task.run()
         } catch {
-            shutdown()
             throw MCPError.launchFailed("\(config.command): \(error.localizedDescription)")
         }
 
-        process = task
         stdinHandle = stdinPipe.fileHandleForWriting
         let fd = stdinPipe.fileHandleForWriting.fileDescriptor
         let flags = fcntl(fd, F_GETFL)
         guard flags != -1,
               fcntl(fd, F_SETFL, flags | O_NONBLOCK) != -1,
               fcntl(fd, F_SETNOSIGPIPE, 1) != -1 else {
-            shutdown()
             throw MCPError.transport("Could not configure nonblocking MCP stdin")
         }
 
@@ -421,7 +507,7 @@ actor MCPConnection {
                 ])
             ])
         )
-        try checkStartupTransport(task)
+        try checkStartupTransport(attempt)
         serverInfo = initResult.objectValue?["serverInfo"]?.objectValue?["name"]?.stringValue
         // Record what the server actually supports so we never call a method it
         // doesn't implement (many servers error rather than returning empty).
@@ -430,34 +516,43 @@ actor MCPConnection {
         supportsPrompts = capabilities["prompts"] != nil
 
         try await notify(method: "notifications/initialized", params: .object([:]))
-        try checkStartupTransport(task)
+        try checkStartupTransport(attempt)
         let discoveredTools = try await listTools()
-        try checkStartupTransport(task)
+        try checkStartupTransport(attempt)
         tools = discoveredTools
         // Ordinary optional RPC failures are tolerated, but cancellation or a
         // closed/replaced transport must never publish successful startup.
         if supportsResources {
             let discoveredResources = (try? await listResources()) ?? []
-            try checkStartupTransport(task)
+            try checkStartupTransport(attempt)
             resources = discoveredResources
         }
         if supportsPrompts {
             let discoveredPrompts = (try? await listPrompts()) ?? []
-            try checkStartupTransport(task)
+            try checkStartupTransport(attempt)
             prompts = discoveredPrompts
         }
-        try checkStartupTransport(task)
+        try checkStartupTransport(attempt)
     }
 
-    private func checkStartupTransport(_ expected: Process) throws {
+    private func checkStartupTransport(_ attempt: StartupAttempt) throws {
+        if let result = attempt.result { try result.get() }
         try Task.checkCancellation()
-        guard process === expected, expected.isRunning else { throw MCPError.notConnected }
+        guard !attempt.cancellation.isCancelled else { throw CancellationError() }
+        guard startup === attempt, process === attempt.process,
+              attempt.process.isRunning else { throw MCPError.notConnected }
     }
 
     func shutdown() {
+        closeTransport(with: MCPError.notConnected)
+    }
+
+    private func closeTransport(with error: Error) {
+        if let startup { finishStartup(startup, with: .failure(error)) }
+        isReady = false
         isShuttingDown = true
         for (_, request) in pending {
-            request.continuation.resume(throwing: MCPError.notConnected)
+            request.continuation.resume(throwing: error)
         }
         pending.removeAll()
         outbound.removeAll()
@@ -468,6 +563,8 @@ actor MCPConnection {
         stdoutPump?.cancel()
         stdoutPump = nil
         stdinHandle?.closeFile()
+        (process?.standardOutput as? Pipe)?.fileHandleForReading.readabilityHandler = nil
+        (process?.standardError as? Pipe)?.fileHandleForReading.readabilityHandler = nil
         if let process, process.isRunning { process.terminate() }
         process = nil
         stdinHandle = nil
@@ -475,17 +572,16 @@ actor MCPConnection {
         tools = []
         resources = []
         prompts = []
+        supportsResources = false
+        supportsPrompts = false
+        serverInfo = nil
     }
 
     private func handleTermination(_ terminated: Process) {
         // A late callback from a closed transport must not tear down a newly
         // connected process on this same actor.
         guard process === terminated, !isShuttingDown else { return }
-        for (_, request) in pending {
-            request.continuation.resume(throwing: MCPError.transport("server exited unexpectedly"))
-        }
-        pending.removeAll()
-        shutdown()
+        closeTransport(with: MCPError.transport("server exited unexpectedly"))
         lastError = "MCP server \"\(config.name)\" exited unexpectedly."
     }
 
@@ -730,9 +826,7 @@ actor MCPConnection {
                 try? await Task.sleep(for: .milliseconds(5))
             } else {
                 let error = MCPError.transport("Could not write MCP stdin (errno \(errno))")
-                for request in pending.values { request.continuation.resume(throwing: error) }
-                pending.removeAll()
-                shutdown()
+                closeTransport(with: error)
                 lastError = error.localizedDescription
                 return
             }
@@ -751,19 +845,30 @@ actor MCPConnection {
             let partial = outbound[index].offset > 0
             outbound.remove(at: index)
             if partial {
-                shutdown()
+                closeTransport(with: error)
                 lastError = "MCP connection closed after an interrupted partial write; reconnect to continue."
             }
             return
         }
         // initialize MUST NOT receive notifications/cancelled (MCP spec).
-        guard request.expectsReply, request.method != "initialize", process?.isRunning == true else { return }
+        guard request.expectsReply, request.method != "initialize",
+              let expected = process, expected.isRunning else { return }
         let reason = error is CancellationError ? "Cancelled by client" : "Request timed out"
         Task { [weak self] in
-            try? await self?.notify(method: "notifications/cancelled", params: .object([
+            try? await self?.notifyIfCurrent(expected, method: "notifications/cancelled", params: .object([
                 "requestId": .number(Double(id)), "reason": .string(reason)
             ]))
         }
+    }
+
+    private func notifyIfCurrent(_ expected: Process, method: String, params: JSONValue) async throws {
+        guard process === expected else { return }
+        try await notify(method: method, params: params)
+    }
+
+    private func replyIfCurrent(_ expected: Process, reply: JSONValue, method: String) async throws {
+        guard process === expected else { return }
+        try await writeMessage(reply, method: method)
     }
 
     // Internal rather than private so transport tests exercise the real
@@ -783,7 +888,8 @@ actor MCPConnection {
     }
 
     /// Accumulates stdout and dispatches each complete newline-delimited message.
-    private func ingest(_ data: Data) {
+    private func ingest(_ data: Data, from expected: Process) {
+        guard process === expected else { return }
         readBuffer.append(data)
         while let newline = readBuffer.firstIndex(of: 0x0A) {
             let line = readBuffer[readBuffer.startIndex..<newline]
@@ -842,7 +948,7 @@ actor MCPConnection {
     /// other method with "method not found"); notifications (no id) are
     /// informational only.
     private func handleServerMessage(method: String, message: [String: JSONValue]) {
-        guard let id = message["id"], process?.isRunning == true else { return }
+        guard let id = message["id"], let expected = process, expected.isRunning else { return }
         let reply: JSONValue
         if method == "ping" {
             reply = .object(["jsonrpc": .string("2.0"), "id": id, "result": .object([:])])
@@ -857,7 +963,7 @@ actor MCPConnection {
             ])
         }
         Task { [weak self] in
-            try? await self?.writeMessage(reply, method: "reply/" + method)
+            try? await self?.replyIfCurrent(expected, reply: reply, method: "reply/" + method)
         }
     }
 }

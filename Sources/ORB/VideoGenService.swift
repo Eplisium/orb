@@ -1,4 +1,5 @@
 import Foundation
+import Combine
 
 // MARK: - Video generation (`POST /videos` + polling)
 
@@ -240,6 +241,10 @@ final class VideoGenService: ObservableObject {
     /// isolate storage; the default view path uses the shared controller so
     /// job records survive navigation and app restarts.
     private let jobController: JobController
+    /// Storage changes can occur without an active job (unknown submissions,
+    /// failed terminal writes, explicit retry, or another service sharing it).
+    @Published private(set) var jobRecordsRevision = 0
+    private var jobRecordsObservation: AnyCancellable?
     private let retryPolicy: PollRetryPolicy
     /// One owned poll task per remote job, so resuming job B never stops job
     /// A. Each entry carries a generation token so a replaced loop's cleanup
@@ -271,6 +276,9 @@ final class VideoGenService: ObservableObject {
         // default view path shares the application-owned controller.
         self.jobController = jobController ?? JobController.shared
         self.retryPolicy = retryPolicy
+        jobRecordsObservation = self.jobController.$revision.sink { [weak self] revision in
+            self?.jobRecordsRevision = revision
+        }
     }
 
     func fetchModels() async {
@@ -376,16 +384,26 @@ final class VideoGenService: ObservableObject {
     /// app restart or a local stop (`JobRecord.stoppedLocally`) so the job
     /// survives the view that started it. Other jobs' polls are untouched.
     ///
-    /// - Parameter record: a durable record with a remote ID and a
-    ///   non-terminal polling state (see `JobRecord.isResumable`).
+    /// - Parameter record: a snapshot identifying the original local UUID.
+    ///   The controller's latest pending-aware record is validated, never
+    ///   the caller's potentially stale polling state or remote identity.
     /// - Throws: `MediaServiceError.resumeUnavailable` when the record has
-    ///   no remote ID to poll or already reached a terminal state — both
-    ///   refusals happen before any request is sent.
+    ///   disappeared, cannot be read, has no remote ID to poll, or already
+    ///   reached a terminal state. Refusals leave existing loops untouched
+    ///   and happen before callbacks, credentials, or network requests.
     func resume(
         _ record: JobRecord,
         pollInterval: Duration = .seconds(5),
         onUpdate: @escaping @Sendable (VideoJob) -> Void = { _ in }
     ) async throws -> VideoJob {
+        // A tray can remain open while another service finishes this job.
+        // Pending snapshots override SQLite; failed/missing reads must not
+        // fall back to the caller's stale snapshot or a remote-ID match.
+        guard let record = jobController.record(id: record.id) else {
+            throw MediaServiceError.resumeUnavailable(
+                "the current job record could not be loaded. Restore access to local job storage before trying again."
+            )
+        }
         guard let remoteID = record.remoteID?
             .trimmingCharacters(in: .whitespacesAndNewlines), !remoteID.isEmpty else {
             throw MediaServiceError.resumeUnavailable(
@@ -570,7 +588,12 @@ final class VideoGenService: ObservableObject {
     func downloadAndSave(remoteID: String, store: SavedCreationsStore) async throws -> SavedCreation {
         if let record = jobController.record(remoteID: remoteID),
            let savedID = record.savedCreationID {
-            if let existing = store.creations.first(where: { $0.id == savedID }) { return existing }
+            if let existing = store.creations.first(where: { $0.id == savedID }) {
+                // The link may exist only in the pending snapshot. Recover its
+                // local write without downloading/indexing/billing again.
+                jobController.retryPendingPersistence(id: record.id)
+                return existing
+            }
             // The creation was deleted from Library: allow downloading again.
             jobController.clearSavedCreation(remoteID: remoteID)
         }
@@ -650,17 +673,37 @@ final class VideoGenService: ObservableObject {
 
     // MARK: Durable resume affordance (W09 step 3 wiring)
 
-    /// Durable records that can still be resumed (remote ID present, polling
-    /// not terminal), read from this service's own JobController. Views use
+    /// Known records that can still be resumed (remote ID present, polling
+    /// not terminal), including unsaved in-memory snapshots. Views use
     /// this passthrough instead of reaching into `JobController.shared`, so
     /// tests and alternate hosts stay isolated from shared state.
     var resumableRecords: [JobRecord] { jobController.resumableJobs() }
 
-    /// Finished jobs whose video was never saved in ORB (survives restarts).
+    /// Finished jobs whose video was never saved in ORB. Successfully saved
+    /// job records survive restarts; pending snapshots do not.
     var downloadableRecords: [JobRecord] { jobController.downloadableJobs() }
 
-    /// Every durable job (active, finished, failed) for the tray.
+    /// Every known job (active, finished, failed), with unsaved snapshots
+    /// overriding stale database rows. Only successful writes survive quit.
     var allJobRecords: [JobRecord] { jobController.allJobs() }
+
+    var unsavedJobRecordCount: Int { jobController.unsavedRecordCount }
+    var unsavedJobRecords: [JobRecord] { jobController.pendingRecords }
+    var jobPersistenceErrors: [UUID: String] { jobController.persistenceErrors }
+    var jobPersistenceWarning: String? {
+        guard unsavedJobRecordCount > 0 else { return nil }
+        let noun = unsavedJobRecordCount == 1 ? "job record has" : "job records have"
+        return "\(unsavedJobRecordCount) \(noun) unsaved changes kept only in memory. "
+            + "These queued records or updates will be lost when ORB quits. Retry saving before closing. "
+            + "Retry only saves local records; it does not submit or bill another job."
+    }
+
+    /// Local-only retry, optionally scoped to one original UUID. Never calls
+    /// transport, restarts polling, downloads results or records usage again.
+    @discardableResult
+    func retryPendingJobPersistence(id: UUID? = nil) -> Int {
+        jobController.retryPendingPersistence(id: id)
+    }
 
     /// Last persistence failure from the durable store, surfaced beside the
     /// resume affordance so a failed write is visible, never silent.

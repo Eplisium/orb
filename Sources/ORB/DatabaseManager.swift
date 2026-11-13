@@ -78,7 +78,30 @@ final class DatabaseManager {
     /// saves run on the main thread; without this lock a background statement
     /// can interleave inside another thread's open transaction. Recursive so
     /// the save helpers can call each other while holding it.
-    private let dbLock = NSRecursiveLock()
+    let dbLock = NSRecursiveLock()
+    private var assetReservationActive = false
+
+    /// No suspension is permitted while holding this reservation. The SQLite
+    /// writer lock, not merely dbLock, excludes other connections/processes.
+    func withAssetReservation<T>(_ work: () throws -> T) throws -> T {
+        dbLock.lock()
+        defer { dbLock.unlock() }
+        guard let db, launchFailure == nil else { throw DatabaseManagerError.notAvailable }
+        guard !assetReservationActive, sqlite3_get_autocommit(db) != 0 else {
+            throw DatabaseManagerError.operationFailed("Asset operations cannot join an outer transaction")
+        }
+        try execChecked("BEGIN IMMEDIATE;")
+        assetReservationActive = true
+        defer { assetReservationActive = false }
+        do {
+            let result = try work()
+            try execChecked("COMMIT;")
+            return result
+        } catch {
+            try? execChecked("ROLLBACK;")
+            throw error
+        }
+    }
     /// Set when the on-disk database could not be opened or migrated; ORB then
     /// degrades to a non-persistent in-memory database instead of crashing.
     private(set) var launchFailure: DatabaseLaunchFailure?
@@ -1123,6 +1146,15 @@ final class DatabaseManager {
     func saveAssetRecordChecked(_ record: AssetRecord) throws {
         dbLock.lock()
         defer { dbLock.unlock() }
+        if !assetReservationActive {
+            return try withAssetReservation { try saveAssetRecordChecked(record) }
+        }
+        // Raw metadata writers may not resurrect a deletion in progress. Only
+        // AssetStore can finish filesystem cleanup before publishing new bytes.
+        guard try loadAssetDeletionInventory().isEmpty else {
+            throw DatabaseManagerError.operationFailed("Asset cleanup is pending; retry through AssetStore")
+        }
+        try validateAssetAttachment(record)
         let sql = """
         INSERT INTO assets
         (id, relative_path, remote_reference, mime_type, size_bytes, checksum,
@@ -1151,6 +1183,11 @@ final class DatabaseManager {
 
     /// Removes metadata rows for a checksum. Rows tied to a job or message are left alone.
     func deleteUnattachedAssetRecords(checksum: String) throws {
+        dbLock.lock()
+        defer { dbLock.unlock() }
+        guard assetReservationActive else {
+            throw DatabaseManagerError.operationFailed("Asset deletion requires a reserved cleanup inventory")
+        }
         let sql = "DELETE FROM assets WHERE checksum = ? AND job_id IS NULL AND message_id IS NULL;"
         guard let stmt = prepare(sql) else { throw DatabaseManagerError.operationFailed(currentError()) }
         defer { sqlite3_finalize(stmt) }
@@ -1162,7 +1199,7 @@ final class DatabaseManager {
     func hasAttachedAssetRecord(checksum: String) throws -> Bool {
         dbLock.lock()
         defer { dbLock.unlock() }
-        let sql = "SELECT 1 FROM assets WHERE checksum = ? AND (job_id IS NOT NULL OR message_id IS NOT NULL) LIMIT 1;"
+        let sql = "SELECT 1 WHERE EXISTS (SELECT 1 FROM assets WHERE checksum = ?1 AND (job_id IS NOT NULL OR message_id IS NOT NULL)) OR EXISTS (SELECT 1 FROM asset_library_pins WHERE checksum = ?1);"
         guard let stmt = prepare(sql) else { throw DatabaseManagerError.operationFailed(currentError()) }
         defer { sqlite3_finalize(stmt) }
         Self.bindText(stmt, 1, checksum)

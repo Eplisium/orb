@@ -57,7 +57,7 @@ The identity is optional for legacy compatibility. It protects newly saved video
 | J03 | Core and media fields commit atomically, so failed recovery-field writes cannot leave a terminal or partial record | JobWriteFailureTests |
 | J04 | Failed parameter binding aborts full/legacy media writes instead of clearing persisted fields | JobWriteFailureTests |
 
-Controller errors remain visible and no mutation follows a failed read. Core/media writes use one upsert; failed initial submissions still do not have a durable retry queue. The Library manifest and job saved-link update remain separate commits.
+Controller errors remain visible and no mutation follows a failed read. Core/media writes use one upsert. J02 retains failed writes as complete memory-backed snapshots; pending-first lookup and local-only retry preserve identity and terminal state without another submission, download or accounting event. `JobInitialPersistenceTests`, `JobWriteFailureTests`, `VideoSaveLinkFailureTests`, and `PopulatedJobMigrationTests` cover this boundary. Unsaved history is lost on quit. A failed initial lookup is not converted into a new pending identity. The Library manifest and job saved-link update remain separate commits.
 
 ## Extended MCP audit
 
@@ -67,7 +67,7 @@ Controller errors remain visible and no mutation follows a failed read. Core/med
 | M02 | Cancellation during optional resource/prompt discovery escapes startup and prevents partial registry publication; ordinary RPC errors remain optional | MCPDiscoveryCancellationTests |
 | M04 | Startup checks original transport identity/liveness after awaits; shutdown and child exit during optional discovery cannot report success | MCPDiscoveryCancellationTests |
 
-The fixtures hold actual discovery, initialize and tool/resource/prompt responses and expose receipt state through an offline RPC. `MCPHeldResponseTests` verifies late initialize success/error and RPC results after config replacement, plus literal impersonation of computed compact names. Direct concurrent `MCPConnection.connect()` behavior remains a separate follow-up audit scope.
+The fixtures hold actual discovery, initialize and tool/resource/prompt responses and expose receipt state through an offline RPC. `MCPHeldResponseTests` verifies late initialize success/error and RPC results after config replacement, plus literal impersonation of computed compact names. M03 direct concurrent `MCPConnection.connect()` callers now share one identity-bearing startup attempt. Readiness is separate from process liveness; joiner cancellation detaches only that waiter, owner cancellation aborts the attempt, and same-actor retry is covered by `MCPConcurrentConnectTests`.
 
 ## Extended catalog audit
 
@@ -96,6 +96,15 @@ Responses/Messages remain adapter-only; Chat and Agent still use chat completion
 | F02 | Malformed pages cannot duplicate rows; repeated/cyclic cursors stop pagination with a visible error | RemoteFileListTests |
 
 The owner is `RemoteFileList`; `FilesView` only renders it. Confirmed deletes and successful uploads invalidate any GET begun before the mutation and reconcile from a fresh first page, so pagination never appends a pre-mutation page onto post-mutation state. These regressions use held offline transports that ignore cancellation, so the identity guards—not task cancellation—carry the guarantee. The production Files API is not claimed to emit duplicate IDs or cyclic cursors; these are bounded malformed/unstable-response cases. Remote uploads remain non-downloadable chat references and are separate from the local Library.
+
+## Remaining-findings repair coverage
+
+- Asset deletion recovery and coordinated ownership: `AssetDeletionRecoveryTests` and `AssetDeletionCoordinationTests`. Metadata removal and cleanup inventory commit before unlink. Cleanup acknowledgement commits before replacement saves. All participating writers use the same catalog reservation and bound root. This is recoverable coordination, not a filesystem/SQLite distributed transaction or a power-loss/fsync guarantee.
+- Independent Library manifests remain outside SQLite ownership. Removal is explicitly index-only: backing bytes are retained indefinitely, new saves receive durable pins, and no supported reclamation path exists. Legacy entries are not automatically migrated into a complete owner inventory; do not invoke low-level cleanup on their behalf. Existing purge tests assert retained bytes plus persisted index removal, not physical deletion.
+- Manifest publication: `AssetPublicationFailureTests` injects a rejected catalog-binding COMMIT after JSON replacement. Published changes are reflected in memory/Undo instead of reporting an unchanged index. `ExclusiveMarkerPublisherTests` verifies partial staging/install failure recovery and no-replace marker ownership. Bindings use completed staging plus exclusive hard-link publication; malformed pre-existing markers still fail closed.
+- Jobs tray: `JobTrayFreshnessTests` covers shared-controller queued/terminal/saved inputs and authoritative UUID revalidation before Resume side effects, including pending snapshots, failed reads, and already-owned loops.
+- Batch ambiguity: `BatchDuplicateResultTests` excludes every occurrence of duplicate IDs and empty IDs from accessors, preserving raw rows/order and nonempty opaque IDs. This is defensive lookup policy, not a claimed provider contract.
+- Files refresh follow-up: `RemoteFileListTests` forces refresh to supersede a held load-more, joins a first-page request, and verifies stale-error clearing. Multi-upload still refreshes after each confirmed mutation; batching is deferred rather than weakening freshness.
 
 ## Verification commands
 

@@ -59,6 +59,9 @@ struct VideoView: View {
         .onChange(of: service.activeJob) { _, _ in
             refreshResumableRecords()
         }
+        .onChange(of: service.jobRecordsRevision) { _, _ in
+            refreshResumableRecords()
+        }
         .onChange(of: selectedModelId) { _, _ in
             let o = PresetReset.videoOptions(afterChangingTo: selectedModelId, pending: pendingPreset)
             pendingPreset = nil
@@ -286,7 +289,7 @@ struct VideoView: View {
     private var jobsColumn: some View {
         VStack(alignment: .trailing, spacing: 0) {
             JobTrayButton(
-                reload: { service.allJobRecords },
+                jobs: service.allJobRecords,
                 onResume: { resumeDurable($0) },
                 onStop: { record in
                     if let remoteID = record.remoteID { service.stopPolling(remoteID: remoteID) }
@@ -358,6 +361,38 @@ struct VideoView: View {
     /// restarts the owned poll loop — never a new submission.
     @ViewBuilder
     private var durableJobsSection: some View {
+        if let warning = service.jobPersistenceWarning {
+            VStack(alignment: .leading, spacing: 8) {
+                Label("UNSAVED JOB RECORDS (\(service.unsavedJobRecordCount))", systemImage: "externaldrive.badge.exclamationmark")
+                    .font(.caption.bold()).foregroundStyle(.orange)
+                Text(warning).font(.caption).foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+                Button("Retry saving all job records") {
+                    service.retryPendingJobPersistence()
+                    refreshResumableRecords()
+                }
+                .controlSize(.small)
+                ForEach(service.unsavedJobRecords) { record in
+                    HStack(alignment: .top) {
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text(record.remoteID ?? "Unknown submission · \(record.id.uuidString.prefix(8))")
+                                .font(.caption.monospacedDigit()).lineLimit(1)
+                            if let error = service.jobPersistenceErrors[record.id] {
+                                Text(error).font(.caption2).foregroundStyle(.secondary)
+                            }
+                        }
+                        Spacer()
+                        Button("Retry saving") {
+                            service.retryPendingJobPersistence(id: record.id)
+                            refreshResumableRecords()
+                        }
+                        .controlSize(.small)
+                        .help("Save this local record only; never submit a new paid job")
+                    }
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
         if !downloadableRecords.isEmpty {
             VStack(alignment: .leading, spacing: 8) {
                 Text("FINISHED, NOT SAVED")

@@ -21,7 +21,7 @@ struct MCPDiscoveryCancellationTests {
         while ContinuousClock.now < deadline {
             if await connection.isRunning,
                let state = try? await connection.callTool(name: "state", arguments: .object([:])), state.content == method { return }
-            try await Task.sleep(for: .milliseconds(10))
+            await Task.yield()
         }
         throw MCPError.transport("Fixture did not reach held discovery request")
     }
@@ -30,20 +30,26 @@ struct MCPDiscoveryCancellationTests {
           .enabled(if: Self.node != nil, "requires Node"), arguments: ["resources/list", "prompts/list"])
     func directCancellation(method: String) async throws {
         let (_, connection) = try fixture(method: method)
-        let startup = Task { try await connection.connect() }
+        let startup = MCPHeldTask<Result<Void, Error>> {
+            do { try await connection.connect(); return .success(()) }
+            catch { return .failure(error) }
+        }
         do {
             try await waitForDiscovery(method, connection: connection)
             startup.cancel()
-            let result = await startup.result
+            let result = try await startup.value()
             switch result {
             case .success: Issue.record("Cancelled discovery reported successful connection")
             case .failure(let error): #expect(error is CancellationError)
             }
+            #expect(await connection.isReady == false)
+            #expect(await connection.isRunning == false)
+            #expect(await connection.tools.isEmpty)
             await connection.shutdown()
         } catch {
             startup.cancel()
-            _ = await startup.result
             await connection.shutdown()
+            await startup.drain()
             throw error
         }
     }
@@ -53,11 +59,11 @@ struct MCPDiscoveryCancellationTests {
     func registryCancellation(method: String) async throws {
         let (config, connection) = try fixture(method: method)
         let registry = MCPRegistry(configProvider: { [config] }, connectionFactory: { _ in connection })
-        let startup = Task { await registry.startEnabledServers() }
+        let startup = MCPHeldTask { await registry.startEnabledServers() }
         do {
             try await waitForDiscovery(method, connection: connection)
             startup.cancel()
-            await startup.value
+            try await startup.value()
             #expect(await connection.isRunning == false)
             #expect(await registry.status().allSatisfy { !$0.connected && $0.error == nil })
             // A fresh inventory request now retries cancelled first startup.
@@ -67,8 +73,10 @@ struct MCPDiscoveryCancellationTests {
         } catch {
             startup.cancel()
             await connection.shutdown()
-            await startup.value
-            await registry.shutdownAll()
+            await startup.drain()
+            let cleanup = MCPHeldTask { await registry.shutdownAll() }
+            await cleanup.drain()
+            cleanup.cancel()
             throw error
         }
     }
@@ -77,11 +85,14 @@ struct MCPDiscoveryCancellationTests {
           .enabled(if: Self.node != nil, "requires Node"), arguments: ["resources/list", "prompts/list"])
     func shutdownDuringDiscovery(method: String) async throws {
         let (_, connection) = try fixture(method: method)
-        let startup = Task { try await connection.connect() }
+        let startup = MCPHeldTask<Result<Void, Error>> {
+            do { try await connection.connect(); return .success(()) }
+            catch { return .failure(error) }
+        }
         do {
             try await waitForDiscovery(method, connection: connection)
             await connection.shutdown()
-            switch await startup.result {
+            switch try await startup.value() {
             case .success: Issue.record("Closed transport reported successful connection")
             case .failure: break
             }
@@ -90,7 +101,7 @@ struct MCPDiscoveryCancellationTests {
         } catch {
             startup.cancel()
             await connection.shutdown()
-            _ = await startup.result
+            await startup.drain()
             throw error
         }
     }
