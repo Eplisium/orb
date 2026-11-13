@@ -74,7 +74,21 @@ struct SavedCreationsTests {
         #expect(try Data(contentsOf: index) == invalid)
     }
 
-    @Test("failed manifest write leaves published and persisted prior entries intact")
+    @Test("unregistered legacy manifest cannot introduce an untrusted path")
+    func unregisteredPath() throws {
+        let (root, assets, index) = try fixture()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let item = SavedCreation(id: UUID(), kind: .image, modelID: "offline", prompt: nil,
+            mimeType: "image/png", createdAt: Date(timeIntervalSince1970: 1),
+            assetPath: "../../private", checksum: String(repeating: "a", count: 64))
+        struct Legacy: Encodable { let version = 1; let creations: [SavedCreation] }
+        let invalid = try JSONEncoder().encode(Legacy(creations: [item]))
+        try invalid.write(to: index)
+        #expect(throws: Error.self) { try SavedCreationsStore(assetStore: assets, indexURL: index) }
+        #expect(try Data(contentsOf: index) == invalid)
+    }
+
+    @Test("failed compatibility export preserves the committed creation and warns")
     func failedWrite() async throws {
         let (root, assets, index) = try fixture()
         defer { try? FileManager.default.removeItem(at: root) }
@@ -84,13 +98,15 @@ struct SavedCreationsTests {
         // A directory at the manifest path makes atomic replacement fail on all users (including root).
         try FileManager.default.removeItem(at: index)
         try FileManager.default.createDirectory(at: index, withIntermediateDirectories: false)
-        await #expect(throws: Error.self) {
-            try await store.save(Data("second".utf8), mimeType: "text/plain", kind: .transcript, modelID: "b", prompt: nil)
-        }
-        #expect(store.creations == [first])
+        let second = try await store.save(Data("second".utf8), mimeType: "text/plain", kind: .transcript, modelID: "b", prompt: nil)
+        #expect(store.creations == [second, first])
+        #expect(store.exportWarning != nil)
         try FileManager.default.removeItem(at: index)
         try original.write(to: index)
-        #expect(try SavedCreationsStore(assetStore: assets, indexURL: index).creations == [first])
+        let reopened = try SavedCreationsStore(assetStore: assets, indexURL: index)
+        #expect(reopened.creations == [second, first])
+        #expect(reopened.exportWarning == nil)
+        #expect(try await reopened.data(for: second) == Data("second".utf8))
     }
 
     @Test("tampered bytes are rejected by checksum")
@@ -127,7 +143,11 @@ struct SavedCreationsTests {
         entries[0]["assetPath"] = "../../private"
         json["creations"] = entries
         try JSONSerialization.data(withJSONObject: json).write(to: index)
-        #expect(throws: Error.self) { try SavedCreationsStore(assetStore: assets, indexURL: index) }
+        let tampered = try Data(contentsOf: index)
+        let reopened = try SavedCreationsStore(assetStore: assets, indexURL: index)
+        #expect(reopened.creations == [item])
+        #expect(reopened.exportWarning != nil)
+        #expect(try Data(contentsOf: index) == tampered)
         var forged = item
         forged.assetPath = "../../private"
         await #expect(throws: AssetStoreError.self) { try await store.data(for: forged) }
@@ -143,7 +163,7 @@ struct SavedCreationsDeleteTests {
         return (root, AssetStore(baseDirectory: root.appendingPathComponent("Assets"), database: DatabaseManager()), root.appendingPathComponent("creations.json"))
     }
 
-    @Test("remove and restore update the index while expired Undo conservatively retains bytes")
+    @Test("managed removal and token Undo preserve owners then reclaim unowned bytes")
     func lifecycle() async throws {
         let (root, assets, index) = try fixture()
         defer { try? FileManager.default.removeItem(at: root) }
@@ -151,21 +171,21 @@ struct SavedCreationsDeleteTests {
         let a = try await store.save(Data("one".utf8), mimeType: "text/plain", kind: .transcript, modelID: "m", prompt: nil)
         let b = try await store.save(Data("two".utf8), mimeType: "text/plain", kind: .transcript, modelID: "m", prompt: nil)
 
-        let removed = try await store.remove(ids: [a.id])
-        #expect(removed == [a])
+        let removed = try await store.removeWithUndo(ids: [a.id])
+        #expect(removed.creations == [a])
         #expect(store.creations.map(\.id) == [b.id])
         #expect(try SavedCreationsStore(assetStore: assets, indexURL: index).creations.map(\.id) == [b.id])
-        // Bytes survive removal and Undo expiry; no global reclamation is claimed.
+        // The durable Undo hold protects the bytes until finalized or expired.
         #expect(try await assets.data(atRelativePath: a.assetPath) == Data("one".utf8))
 
-        try await store.restore(removed)
+        try await store.restore(removed.token)
         let dates = store.creations.map(\.createdAt)
         #expect(dates == dates.sorted(by: >))
         #expect(Set(store.creations.map(\.id)) == [a.id, b.id])
 
-        let again = try await store.remove(ids: [a.id])
-        await store.purgeUnreferenced(again)
-        #expect(try await assets.data(atRelativePath: a.assetPath) == Data("one".utf8))
+        let again = try await store.removeWithUndo(ids: [a.id])
+        try await store.finalize(again.token)
+        #expect(!FileManager.default.fileExists(atPath: assets.baseDirectory.appendingPathComponent(a.assetPath).path))
         #expect(try SavedCreationsStore(assetStore: assets, indexURL: index).creations.map(\.id) == [b.id])
         #expect(try await assets.data(atRelativePath: b.assetPath) == Data("two".utf8))
     }

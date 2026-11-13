@@ -1,5 +1,6 @@
 import Foundation
 import SQLite3
+import Darwin
 
 private final class TestDatabaseCleanupRegistry: @unchecked Sendable {
     static let shared = TestDatabaseCleanupRegistry()
@@ -41,6 +42,7 @@ private final class TestDatabaseCleanupRegistry: @unchecked Sendable {
         try? FileManager.default.removeItem(atPath: path)
         try? FileManager.default.removeItem(atPath: path + "-wal")
         try? FileManager.default.removeItem(atPath: path + "-shm")
+        try? FileManager.default.removeItem(atPath: path + ".orb-initializing")
     }
 }
 
@@ -64,7 +66,8 @@ enum DatabaseManagerError: Error, LocalizedError {
 struct DatabaseLaunchFailure: Equatable {
     let title: String
     let detail: String
-    /// Set when the previously-failing database file was moved aside to a backup.
+    /// Main-file path of a complete byte-verified COPY of the observed file set.
+    /// Originals remain in place. This is not a consistent SQLite snapshot.
     let backupPath: String?
 }
 
@@ -73,6 +76,7 @@ final class DatabaseManager {
     private(set) var db: OpaquePointer?
     private let dbPath: String
     private let deletesDatabaseOnDeinit: Bool
+    private let recoveryBackup: DatabaseRecoveryBackup
     /// Serializes every multi-statement operation. Asset saves and agent
     /// memory runs reach this manager from background tasks while conversation
     /// saves run on the main thread; without this lock a background statement
@@ -80,6 +84,13 @@ final class DatabaseManager {
     /// the save helpers can call each other while holding it.
     let dbLock = NSRecursiveLock()
     private var assetReservationActive = false
+
+    func requireAssetReservation() throws {
+        dbLock.lock(); defer { dbLock.unlock() }
+        guard assetReservationActive, let db, sqlite3_get_autocommit(db) == 0 else {
+            throw DatabaseManagerError.operationFailed("Ownership transition requires a catalog reservation")
+        }
+    }
 
     /// No suspension is permitted while holding this reservation. The SQLite
     /// writer lock, not merely dbLock, excludes other connections/processes.
@@ -109,7 +120,8 @@ final class DatabaseManager {
     /// presentation. (The shared manager is constructed before SwiftUI exists.)
     static var lastLaunchFailure: DatabaseLaunchFailure?
 
-    init(path: String? = nil) {
+    init(path: String? = nil, recoveryBackup: DatabaseRecoveryBackup = DatabaseRecoveryBackup()) {
+        self.recoveryBackup = recoveryBackup
         if let path {
             dbPath = path
             deletesDatabaseOnDeinit = false
@@ -129,7 +141,21 @@ final class DatabaseManager {
         if deletesDatabaseOnDeinit {
             TestDatabaseCleanupRegistry.shared.register(dbPath)
         }
+        // Capture provenance BEFORE any schema migration. An empty old file or
+        // an old catalog with no rows is never evidence of a new database.
+        let bootstrap = Self.reserveCatalogInitialization(at: dbPath)
+        defer {
+            if bootstrap.descriptor >= 0 {
+                flock(bootstrap.descriptor, LOCK_UN)
+                close(bootstrap.descriptor)
+            }
+        }
         openDatabase()
+        if launchFailure == nil && (bootstrap.created || dbPath == ":memory:") {
+            // Failure leaves no claim; ordinary migration proceeds conservatively.
+            // Never reconstruct a missing claim from an empty schema later.
+            try? captureNewCatalogOrigin()
+        }
         createTables()
         if let launchFailure {
             Self.lastLaunchFailure = launchFailure
@@ -139,7 +165,65 @@ final class DatabaseManager {
     /// Files owned by this connection, including SQLite's transient sidecars.
     var storageFileURLs: [URL] {
         guard dbPath != ":memory:" else { return [] }
-        return ["", "-wal", "-shm", "-journal"].map { URL(fileURLWithPath: dbPath + $0) }
+        return ["", "-wal", "-shm", "-journal", ".orb-initializing"].map { URL(fileURLWithPath: dbPath + $0) }
+    }
+
+    /// Reserved storage trees, including failed/partial corruption copies. Guard
+    /// descendants too, even before the container exists or during memory fallback.
+    var storageDirectoryURLs: [URL] {
+        guard dbPath != ":memory:" else { return [] }
+        return [DatabaseRecoveryBackup.container(for: URL(fileURLWithPath: dbPath))]
+    }
+
+    /// flock serializes cooperating initializers before SQLite has a schema. The
+    /// stable lock sidecar is never unlinked during normal operation. Do not flock
+    /// the DB itself: closing that descriptor can release SQLite's process-wide
+    /// POSIX locks held by another live connection.
+    private static func reserveCatalogInitialization(at path: String) -> (descriptor: Int32, created: Bool) {
+        guard path != ":memory:" else { return (-1, false) }
+        let canonicalPath = URL(fileURLWithPath: path).resolvingSymlinksInPath().standardizedFileURL.path
+        let descriptor = open(canonicalPath + ".orb-initializing", O_RDWR | O_CREAT | O_NOFOLLOW | O_CLOEXEC, S_IRUSR | S_IWUSR)
+        guard descriptor >= 0 else { return (-1, false) }
+        while flock(descriptor, LOCK_EX) != 0 {
+            if errno == EINTR { continue }
+            close(descriptor)
+            return (-1, false)
+        }
+        let sidecarsAbsent = ["-wal", "-shm", "-journal"].allSatisfy {
+            (try? FileManager.default.attributesOfItem(atPath: path + $0)) == nil
+        }
+        // Only the O_EXCL winner may capture an origin. Existing empty files are
+        // deliberately legacy, including a crash between allocation and capture.
+        let newFile = open(path, O_RDWR | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, S_IRUSR | S_IWUSR)
+        guard newFile >= 0 else { return (descriptor, false) }
+        close(newFile) // Before SQLite opens this newly allocated inode.
+        return (descriptor, sidecarsAbsent)
+    }
+
+    private func captureNewCatalogOrigin() throws {
+        try execChecked("BEGIN IMMEDIATE;")
+        do {
+            guard try libraryRows("SELECT 1 FROM sqlite_master LIMIT 1;").isEmpty,
+                  try libraryRows("PRAGMA user_version;").first?.first == "0" else {
+                try execChecked("ROLLBACK;")
+                return
+            }
+            try execChecked("""
+                CREATE TABLE asset_catalog_origin (
+                  singleton INTEGER PRIMARY KEY CHECK(singleton=1),
+                  identity TEXT NOT NULL, version INTEGER NOT NULL, database_path TEXT NOT NULL);
+                """)
+            try libraryExecute("INSERT INTO asset_catalog_origin VALUES (1,?,1,?);",
+                               [UUID().uuidString, catalogStorageIdentity])
+            try execChecked("COMMIT;")
+        } catch {
+            try? execChecked("ROLLBACK;")
+            throw error
+        }
+    }
+
+    var catalogStorageIdentity: String {
+        storageFileURLs.first?.resolvingSymlinksInPath().standardizedFileURL.path ?? ":memory:"
     }
 
     var testDatabasePath: String? {
@@ -191,33 +275,6 @@ final class DatabaseManager {
         exec("PRAGMA foreign_keys=ON;")
     }
 
-    /// Moves a database file that failed to open or migrate aside to a
-    /// timestamped backup so the next launch starts fresh. Returns the backup
-    /// path, or nil when there was nothing to move (or the move failed — the
-    /// failure will resurface next launch, which is preferable to data loss).
-    private static func backupDatabase(at path: String) -> String? {
-        let fm = FileManager.default
-        guard fm.fileExists(atPath: path) else { return nil }
-        let stamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "-")
-        let backup = path + ".corrupt-" + stamp
-        do {
-            try fm.moveItem(atPath: path, toPath: backup)
-            // Committed frames may still live in the WAL; keep the sidecars
-            // with the main file so the backup stays recoverable, and so a
-            // stale WAL is never replayed against the fresh database.
-            for suffix in ["-wal", "-shm"] {
-                let sidecar = path + suffix
-                guard fm.fileExists(atPath: sidecar) else { continue }
-                if (try? fm.moveItem(atPath: sidecar, toPath: backup + suffix)) == nil {
-                    // Never leave a stale WAL next to a fresh database file.
-                    try? fm.removeItem(atPath: sidecar)
-                }
-            }
-            return backup
-        } catch {
-            return nil
-        }
-    }
 
     private func exec(_ sql: String) {
         guard let db else { return }
@@ -446,8 +503,8 @@ final class DatabaseManager {
         } catch {
             // A failed migration must never take the app down. Swap in a
             // fresh in-memory database and surface the problem to the user
-            // instead of crashing at launch. Only genuine corruption moves
-            // the on-disk files aside; contention or other operational
+            // instead of crashing at launch. Only genuine corruption copies
+            // the on-disk files; contention or other operational
             // failures (busy, locked, read-only, I/O, disk full…) leave the
             // original database and its WAL/SHM sidecars untouched.
             let primaryCode = db.map { sqlite3_errcode($0) & 0xFF } ?? SQLITE_OK
@@ -455,7 +512,18 @@ final class DatabaseManager {
             let isContention = primaryCode == SQLITE_BUSY || primaryCode == SQLITE_LOCKED
             sqlite3_close(db)
             db = nil
-            let backupPath = isCorruption ? Self.backupDatabase(at: dbPath) : nil
+            var backupPath: String?
+            var preservationDetail = ""
+            if isCorruption && !retryingAfterFailure && dbPath != ":memory:" {
+                do {
+                    let copiedPath = try recoveryBackup.preserve(at: URL(fileURLWithPath: dbPath)).path
+                    backupPath = copiedPath
+                    preservationDetail = "The database and all observed sidecars were copied and byte-verified at \(copiedPath)."
+                } catch {
+                    preservationDetail = "Corruption backup incomplete; no complete verified copy is available. \(error.localizedDescription)."
+                }
+                preservationDetail += " Original files were not moved or deleted by backup recovery and remain at their original paths; ORB will not replace them with a fresh disk database on relaunch. Copies are not a guaranteed consistent SQLite snapshot with a concurrent writer and are not guaranteed durable after power loss."
+            }
             let openedFallback = sqlite3_open_v2(":memory:", &db, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX, nil) == SQLITE_OK
             if openedFallback {
                 exec("PRAGMA journal_mode=WAL;")
@@ -469,9 +537,7 @@ final class DatabaseManager {
                     ? (isContention
                         ? "ORB could not open its local database because another process is using it (\(error.localizedDescription)). Your existing data was left untouched. ORB is running with a temporary in-memory database; data will not persist for this session. Quit other ORB instances or tools using the database and relaunch."
                         : "ORB could not upgrade its local database (\(error.localizedDescription)). Your existing data was left untouched. ORB is running with a temporary in-memory database; data will not persist for this session.")
-                    : backupPath != nil
-                    ? "ORB could not upgrade its local database (\(error.localizedDescription)). The previous database was moved to \(backupPath!) and ORB is starting with a temporary in-memory database, so data will not persist for this session."
-                    : "ORB could not upgrade its local database (\(error.localizedDescription)). ORB is running with a temporary in-memory database; data will not persist for this session.",
+                    : "ORB could not upgrade its local database (\(error.localizedDescription)). \(preservationDetail) \(openedFallback ? "ORB is running with a temporary in-memory database; data will not persist for this session." : "Data features are disabled for this session.")",
                 backupPath: backupPath
             )
             if openedFallback && !retryingAfterFailure {
@@ -1151,20 +1217,23 @@ final class DatabaseManager {
         }
         // Raw metadata writers may not resurrect a deletion in progress. Only
         // AssetStore can finish filesystem cleanup before publishing new bytes.
+        try quarantineLegacyAssetDeletions()
         guard try loadAssetDeletionInventory().isEmpty else {
             throw DatabaseManagerError.operationFailed("Asset cleanup is pending; retry through AssetStore")
         }
+        try requireAssetPathNotQuarantined(checksum: record.checksum, path: record.relativePath)
         try validateAssetAttachment(record)
         let sql = """
         INSERT INTO assets
         (id, relative_path, remote_reference, mime_type, size_bytes, checksum,
-         job_id, message_id, retention, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         job_id, message_id, retention, created_at, library_managed)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
             relative_path=excluded.relative_path, remote_reference=excluded.remote_reference,
             mime_type=excluded.mime_type, size_bytes=excluded.size_bytes,
             checksum=excluded.checksum, job_id=excluded.job_id,
-            message_id=excluded.message_id, retention=excluded.retention;
+            message_id=excluded.message_id, retention=excluded.retention,
+            library_managed=MIN(assets.library_managed,excluded.library_managed);
         """
         guard let stmt = prepare(sql) else { throw DatabaseManagerError.operationFailed(currentError()) }
         defer { sqlite3_finalize(stmt) }
@@ -1178,6 +1247,7 @@ final class DatabaseManager {
         if let messageID = record.messageID { Self.bindText(stmt, 8, messageID.uuidString) } else { sqlite3_bind_null(stmt, 8) }
         Self.bindText(stmt, 9, record.retention.rawValue)
         sqlite3_bind_double(stmt, 10, record.createdAt.timeIntervalSince1970)
+        sqlite3_bind_int(stmt, 11, record.libraryManaged ? 1 : 0)
         try requireDone(stmt)
     }
 
@@ -1199,7 +1269,8 @@ final class DatabaseManager {
     func hasAttachedAssetRecord(checksum: String) throws -> Bool {
         dbLock.lock()
         defer { dbLock.unlock() }
-        let sql = "SELECT 1 WHERE EXISTS (SELECT 1 FROM assets WHERE checksum = ?1 AND (job_id IS NOT NULL OR message_id IS NOT NULL)) OR EXISTS (SELECT 1 FROM asset_library_pins WHERE checksum = ?1);"
+        if try libraryHasOwner(checksum: checksum) { return true }
+        let sql = "SELECT 1 WHERE EXISTS (SELECT 1 FROM assets WHERE checksum = ?1 AND (job_id IS NOT NULL OR message_id IS NOT NULL OR remote_reference IS NOT NULL)) OR EXISTS (SELECT 1 FROM asset_library_pins WHERE checksum = ?1);"
         guard let stmt = prepare(sql) else { throw DatabaseManagerError.operationFailed(currentError()) }
         defer { sqlite3_finalize(stmt) }
         Self.bindText(stmt, 1, checksum)
@@ -1216,7 +1287,7 @@ final class DatabaseManager {
         defer { dbLock.unlock() }
         let sql = """
         SELECT id, relative_path, remote_reference, mime_type, size_bytes, checksum,
-               job_id, message_id, retention, created_at
+               job_id, message_id, retention, created_at, library_managed
         FROM assets WHERE checksum = ?;
         """
         guard let stmt = prepare(sql) else { throw DatabaseManagerError.operationFailed(currentError()) }
@@ -1239,7 +1310,7 @@ final class DatabaseManager {
     func loadAssetRecords() -> [AssetRecord] {
         let sql = """
         SELECT id, relative_path, remote_reference, mime_type, size_bytes, checksum,
-               job_id, message_id, retention, created_at
+               job_id, message_id, retention, created_at, library_managed
         FROM assets ORDER BY created_at DESC;
         """
         guard let stmt = prepare(sql) else { return [] }
@@ -1256,7 +1327,7 @@ final class DatabaseManager {
         defer { dbLock.unlock() }
         let sql = """
         SELECT id, relative_path, remote_reference, mime_type, size_bytes, checksum,
-               job_id, message_id, retention, created_at
+               job_id, message_id, retention, created_at, library_managed
         FROM assets WHERE checksum = ? ORDER BY created_at ASC LIMIT 1;
         """
         guard let stmt = prepare(sql) else { return nil }
@@ -1283,7 +1354,8 @@ final class DatabaseManager {
             jobID: columnTextOrNil(stmt, 6).flatMap(UUID.init(uuidString:)),
             messageID: columnTextOrNil(stmt, 7).flatMap(UUID.init(uuidString:)),
             retention: retention,
-            createdAt: Date(timeIntervalSince1970: sqlite3_column_double(stmt, 9))
+            createdAt: Date(timeIntervalSince1970: sqlite3_column_double(stmt, 9)),
+            libraryManaged: sqlite3_column_int(stmt, 10) == 1
         )
     }
 
@@ -1300,6 +1372,7 @@ final class DatabaseManager {
         try? FileManager.default.removeItem(atPath: dbPath)
         try? FileManager.default.removeItem(atPath: dbPath + "-wal")
         try? FileManager.default.removeItem(atPath: dbPath + "-shm")
+        try? FileManager.default.removeItem(atPath: dbPath + ".orb-initializing")
     }
 
     // MARK: - Test Results

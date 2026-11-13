@@ -71,9 +71,12 @@ struct DatabaseRecoveryTests {
         #expect(failure.backupPath != nil)
         let backup = try #require(failure.backupPath)
         #expect(FileManager.default.fileExists(atPath: backup))
-        #expect(FileManager.default.fileExists(atPath: url.path) == false)
+        // Preservation is copy-only; the original remains for explicit repair.
+        let original = Data("this is definitely not a sqlite database".utf8)
+        #expect(try Data(contentsOf: url) == original)
+        #expect(try Data(contentsOf: URL(fileURLWithPath: backup)) == original)
 
-        try? FileManager.default.removeItem(atPath: backup)
+        try? FileManager.default.removeItem(at: URL(fileURLWithPath: backup).deletingLastPathComponent())
     }
 
     @Test("a healthy database produces no launch failure")

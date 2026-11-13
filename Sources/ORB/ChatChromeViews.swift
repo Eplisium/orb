@@ -357,8 +357,22 @@ struct UndoToastView: View {
     /// (e.g. `UndoToastItem.id`) so a replacement toast restarts its own
     /// countdown even when the message text is identical.
     var token: UUID? = nil
+    /// Library removals expire durably, not eight seconds after a view mounts.
+    /// Nil preserves the original presentation-relative API for Chat/Agent.
+    var expiresAt: Date? = nil
+    var isBusy = false
     let undo: () -> Void
     let dismiss: () -> Void
+
+    private struct DismissIdentity: Hashable {
+        let token: String
+        let expiresAt: Date?
+        let isBusy: Bool
+    }
+
+    func remainingDuration(at now: Date) -> TimeInterval {
+        expiresAt.map { max(0, $0.timeIntervalSince(now)) } ?? UndoToast.visibleDuration
+    }
 
     var body: some View {
         HStack(spacing: 12) {
@@ -366,19 +380,31 @@ struct UndoToastView: View {
             Text(message).font(ORBFont.footnote.weight(.medium))
             // No ⌘Z keyboard shortcut: while the toast is up it would hijack
             // Undo inside the composer's text field.
-            Button("Undo", action: undo).buttonStyle(.link)
+            TimelineView(.periodic(from: .now, by: 0.25)) { context in
+                Button(isBusy ? "Restoring…" : "Undo") {
+                    guard !isBusy, remainingDuration(at: Date()) > 0 else { return }
+                    undo()
+                }
+                .buttonStyle(.link)
+                .disabled(isBusy || remainingDuration(at: context.date) <= 0)
+            }
             Button { dismiss() } label: { Image(systemName: "xmark") }
                 .buttonStyle(.plain).accessibilityLabel("Dismiss")
+                .disabled(isBusy)
         }
         .padding(.horizontal, 14).padding(.vertical, 9)
         .background(.regularMaterial, in: Capsule())
         .overlay { Capsule().stroke(Color.primary.opacity(0.12)) }
         .shadow(color: .black.opacity(0.15), radius: 8, y: 3)
         .padding(.bottom, 16)
-        .task(id: token?.uuidString ?? message) {
+        .task(id: DismissIdentity(token: token?.uuidString ?? message, expiresAt: expiresAt, isBusy: isBusy)) {
             // Returning on cancellation matters: a superseded toast's timer
             // must not dismiss the toast that replaced it and wipe its undo.
-            do { try await Task.sleep(for: .seconds(UndoToast.visibleDuration)) } catch { return }
+            // A restore owns its token until its callback; never finalize under
+            // it. When it finishes, a new task uses the ORIGINAL durable expiry.
+            guard !isBusy else { return }
+            do { try await Task.sleep(for: .seconds(remainingDuration(at: Date()))) } catch { return }
+            guard !Task.isCancelled else { return }
             dismiss()
         }
         .accessibilityElement(children: .combine)

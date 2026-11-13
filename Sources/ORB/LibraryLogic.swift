@@ -168,6 +168,35 @@ enum LibraryExport {
         return (written, failed)
     }
 
+    /// The Library UI's bulk entry point. Validate the requested name before
+    /// numbering so an existing managed file cannot turn a forbidden destination
+    /// into an apparently harmless suffixed export. The final publish is exclusive.
+    @MainActor
+    static func copy(_ plan: [Entry], to folder: URL, store: SavedCreationsStore,
+                     beforePublication: (URL) throws -> Void = { _ in }) -> (written: Int, failed: [String]) {
+        var taken = Set((try? FileManager.default.contentsOfDirectory(atPath: folder.path)) ?? [])
+        var written = 0
+        var failed: [String] = []
+        for entry in plan {
+            var name = entry.fileName
+            do {
+                guard !name.isEmpty, name != ".", name != "..", !name.contains("/"), !name.contains("\0") else {
+                    throw SavedCreationsError.managedExportDestination
+                }
+                try store.validateExportDestination(folder.appendingPathComponent(name))
+                name = unique(name, taken: &taken)
+                try store.exportExclusive(entry.creation, to: folder.appendingPathComponent(name),
+                                          beforePublication: beforePublication)
+                written += 1
+            } catch {
+                failed.append(name)
+                // Keep names reserved within this batch, even if another writer
+                // created one during a failed publish.
+            }
+        }
+        return (written, failed)
+    }
+
     /// File-copy variant: each entry's stored file is copied (never read into
     /// memory). Same never-overwrite numbering as `write`.
     static func copy(_ plan: [Entry], to folder: URL, source: (SavedCreation) throws -> URL) -> (written: Int, failed: [String]) {

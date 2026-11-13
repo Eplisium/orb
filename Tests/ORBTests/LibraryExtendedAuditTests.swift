@@ -6,11 +6,11 @@ import Testing
 @Suite("Library extended audit", .serialized)
 @MainActor
 struct LibraryExtendedAuditTests {
-    private func fixture() throws -> (URL, DatabaseManager, AssetStore, SavedCreationsStore) {
+    private func fixture(fileBacked: Bool = false) throws -> (URL, DatabaseManager, AssetStore, SavedCreationsStore) {
         let temporary = URL(fileURLWithPath: ProcessInfo.processInfo.environment["TMPDIR"] ?? NSTemporaryDirectory())
         let root = temporary.appendingPathComponent("ORB-library-audit-\(UUID())")
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-        let db = DatabaseManager(path: ":memory:")
+        let db = DatabaseManager(path: fileBacked ? root.appendingPathComponent("library.sqlite3").path : ":memory:")
         let assets = AssetStore(baseDirectory: root.appendingPathComponent("Assets"), database: db)
         let store = try SavedCreationsStore(assetStore: assets, indexURL: root.appendingPathComponent("creations.json"))
         return (root, db, assets, store)
@@ -19,17 +19,27 @@ struct LibraryExtendedAuditTests {
     @Test("E03: export cannot replace the library SQLite database or its sidecars",
           arguments: ["", "-wal", "-shm", "-journal"])
     func exportCannotOverwriteDatabase(suffix: String) async throws {
-        let (root, _, _, _) = try fixture()
+        let (root, db, _, store) = try fixture(fileBacked: true)
         defer { try? FileManager.default.removeItem(at: root) }
         let databaseURL = root.appendingPathComponent("library.sqlite3")
-        let db = DatabaseManager(path: databaseURL.path)
-        let assets = AssetStore(baseDirectory: root.appendingPathComponent("Assets"), database: db)
-        let store = try SavedCreationsStore(assetStore: assets, indexURL: root.appendingPathComponent("creations.json"))
         let item = try await store.save(Data("output".utf8), mimeType: "text/plain", kind: .transcript, modelID: "fixture", prompt: nil)
         let destination = URL(fileURLWithPath: databaseURL.path + suffix)
         let before = try? Data(contentsOf: destination)
-        #expect(throws: Error.self) { try store.export(item, to: destination) }
-        #expect((try? Data(contentsOf: destination)) == before)
+        let changes = sqlite3_total_changes(db.db)
+        do {
+            try store.export(item, to: destination)
+            Issue.record("Managed database export was allowed")
+        } catch SavedCreationsError.managedExportDestination {
+            // Expected rejection before the output is staged.
+        } catch { Issue.record("Unexpected export error: \(error)") }
+        #expect(sqlite3_total_changes(db.db) == changes)
+        // A read transaction can change transient WAL-index lock/read marks;
+        // those SHM bytes are not durable database content or exported output.
+        if suffix == "-shm" {
+            #expect((try? Data(contentsOf: destination).count) == before?.count)
+        } else {
+            #expect((try? Data(contentsOf: destination)) == before)
+        }
         #expect(db.findAssetRecord(checksum: item.checksum) != nil)
     }
 
@@ -103,12 +113,8 @@ struct LibraryExtendedAuditTests {
 
     @Test("E03: export cannot create a differently cased absent SQLite journal")
     func exportRejectsAbsentCaseVariant() async throws {
-        let (root, _, _, _) = try fixture()
+        let (root, _, _, store) = try fixture(fileBacked: true)
         defer { try? FileManager.default.removeItem(at: root) }
-        let databaseURL = root.appendingPathComponent("library.sqlite3")
-        let db = DatabaseManager(path: databaseURL.path)
-        let assets = AssetStore(baseDirectory: root.appendingPathComponent("Assets"), database: db)
-        let store = try SavedCreationsStore(assetStore: assets, indexURL: root.appendingPathComponent("creations.json"))
         let item = try await store.save(Data("output".utf8), mimeType: "text/plain", kind: .transcript, modelID: "fixture", prompt: nil)
         let destination = root.appendingPathComponent("LIBRARY.SQLITE3-JOURNAL")
         #expect(!FileManager.default.fileExists(atPath: destination.path))
@@ -133,7 +139,9 @@ struct LibraryExtendedAuditTests {
         defer { try? FileManager.default.removeItem(at: root) }
         let bytes = Data("unsaved output".utf8)
         let destination = root.appendingPathComponent("export.txt")
-        #expect(!FileManager.default.fileExists(atPath: root.appendingPathComponent("Assets").path))
+        // Registration claims the new root before the first asset publication.
+        #expect(try FileManager.default.contentsOfDirectory(atPath: root.appendingPathComponent("Assets").path).isEmpty)
+        #expect(store.creations.isEmpty)
         try store.export(data: bytes, to: destination)
         #expect(try Data(contentsOf: destination) == bytes)
     }
@@ -177,17 +185,16 @@ struct LibraryExtendedAuditTests {
         let bytes = Data("shared output".utf8)
         let a = try await store.save(bytes, mimeType: "text/plain", kind: .transcript, modelID: "fixture/a", prompt: nil)
         let b = try await store.save(bytes, mimeType: "text/plain", kind: .transcript, modelID: "fixture/b", prompt: nil)
-        let removedA = try await store.remove(ids: [a.id])
-        let removedB = try await store.remove(ids: [b.id])
-        await store.purgeUnreferenced(removedA)
-        try await store.restore(removedB)
+        let removedA = try await store.removeWithUndo(ids: [a.id])
+        let removedB = try await store.removeWithUndo(ids: [b.id])
+        try await store.finalize(removedA.token)
+        #expect(try await store.data(for: b) == bytes)
+        try await store.restore(removedB.token)
         #expect(try await store.data(for: b) == bytes)
         #expect(store.creations == [b])
-        let deletedAgain = try await store.remove(ids: [b.id])
-        await store.purgeUnreferenced(deletedAgain)
+        let deletedAgain = try await store.removeWithUndo(ids: [b.id])
+        try await store.finalize(deletedAgain.token)
         #expect(store.creations.isEmpty)
-        // An expired local Undo is not proof that independent manifests have
-        // no owner. The explicit retention contract keeps the backing bytes.
-        #expect(try await assets.data(atRelativePath: b.assetPath) == bytes)
+        #expect(!FileManager.default.fileExists(atPath: assets.baseDirectory.appendingPathComponent(b.assetPath).path))
     }
 }

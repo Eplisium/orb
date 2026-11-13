@@ -1,31 +1,21 @@
 import Foundation
 import Darwin
 
-/// An individual generation. Several creations may reference the same content-addressed asset.
 struct SavedCreation: Identifiable, Codable, Equatable, Sendable {
-    enum Kind: String, Codable, CaseIterable, Sendable {
-        case image, video, audio, transcript, embedding
-    }
-
+    enum Kind: String, Codable, CaseIterable, Sendable { case image, video, audio, transcript, embedding }
     var id: UUID
     var kind: Kind
     var modelID: String
     var prompt: String?
     var mimeType: String
     var createdAt: Date
-    /// Relative to AssetStore.baseDirectory; never a user-supplied filename.
     var assetPath: String
     var checksum: String
-    /// Recovery identity committed with the Library entry before the separate job link.
-    /// Optional so existing manifests remain readable.
     var videoRemoteID: String? = nil
 }
 
 enum SavedCreationsError: Error, LocalizedError {
-    case invalidIndex(String)
-    case unavailable(String)
-    case managedExportDestination
-
+    case invalidIndex(String), unavailable(String), managedExportDestination
     var errorDescription: String? {
         switch self {
         case .invalidIndex(let detail): return "The saved creations index is invalid: \(detail). It was not replaced."
@@ -37,155 +27,309 @@ enum SavedCreationsError: Error, LocalizedError {
 
 private struct CreationsManifest: Codable {
     let version: Int
+    var manifestID: UUID? = nil
+    var catalogID: String? = nil
+    var revision: Int64? = nil
     let creations: [SavedCreation]
 }
 
-/// Main-actor serialization ensures saves cannot lose entries to concurrent UI writes.
+/// SQLite is authoritative after registration. JSON is a retryable compatibility
+/// export, never an owner inventory or an input on subsequent opens.
 @MainActor
 final class SavedCreationsStore: ObservableObject {
     static let shared: SavedCreationsStore = {
         do { return try SavedCreationsStore() }
         catch { return SavedCreationsStore(loadFailure: error) }
     }()
-
-    @Published private(set) var creations: [SavedCreation]
-    /// Non-nil when the default manifest cannot be read. Saves fail closed in this state.
+    @Published private(set) var creations: [SavedCreation] = []
+    @Published private(set) var exportWarning: String?
+    @Published private(set) var cleanupWarning: String?
+    @Published private(set) var reclamationStatus = ""
     let loadError: Error?
     private let assetStore: AssetStore
     private let indexURL: URL
-    /// Optimistic snapshot, compared under the shared SQLite writer reservation.
-    /// Independent instances must reopen after another instance edits the index.
-    private var indexSnapshot: Data?
+    private let now: () -> Date
+    private let failpoint: (LibraryOwnershipPhase) throws -> Void
+    private let undoDuration: TimeInterval
+    private var snapshot: LibrarySnapshot?
+    private var previousSave: Task<Void, Never>?
+    private var maintenanceTask: Task<Void, Never>?
+    private var foregroundMaintenanceTask: Task<Void, Never>?
+    private var foregroundObservers: Set<UUID> = []
+    private(set) var foregroundMaintenanceGeneration = 0
+    var foregroundMaintenanceObserverCount: Int { foregroundObservers.count }
+    var isForegroundMaintenanceRunning: Bool { foregroundMaintenanceTask != nil }
+    // Legacy array APIs cannot identify an ABA generation. Only the first removal
+    // of an ID in this process may use that adapter; subsequent removals require
+    // the explicit token API. Never infer a token from persisted payload arrays.
+    private var compatibilityRemovals: [LibraryRemoval] = []
+    private var compatibilitySeen: Set<UUID> = []
     private var indexBindingURL: URL {
         indexURL.deletingLastPathComponent().appendingPathComponent(".\(indexURL.lastPathComponent).orb-assets")
     }
-    /// Serialize the entire read-modify-write across suspension points. MainActor alone
-    /// does not prevent two concurrent saves from reading the same manifest state.
-    private var previousSave: Task<Void, Never>?
-    /// Undo belongs to individual windows, but their shared bytes belong to the store.
-    private var pendingRemoval: [UUID: SavedCreation] = [:]
-
     private static func defaultIndexURL() -> URL {
-        AssetStore.defaultBaseDirectory().deletingLastPathComponent()
-            .appendingPathComponent("creations.json", isDirectory: false)
+        AssetStore.defaultBaseDirectory().deletingLastPathComponent().appendingPathComponent("creations.json")
+    }
+    init(assetStore: AssetStore = AssetStore(), indexURL: URL? = nil,
+         now: @escaping () -> Date = Date.init, undoDuration: TimeInterval = 8,
+         failpoint: @escaping (LibraryOwnershipPhase) throws -> Void = { _ in }) throws {
+        self.assetStore = assetStore
+        let requested = indexURL ?? Self.defaultIndexURL()
+        // Resolve existing ancestors even when the index does not exist yet.
+        var ancestor = requested.deletingLastPathComponent().standardizedFileURL
+        var suffix: [String] = []
+        while !FileManager.default.fileExists(atPath: ancestor.path), ancestor.path != "/" {
+            suffix.append(ancestor.lastPathComponent); ancestor.deleteLastPathComponent()
+        }
+        let parent = suffix.reversed().reduce(ancestor.resolvingSymlinksInPath().standardizedFileURL) { $0.appendingPathComponent($1) }
+        self.indexURL = parent.appendingPathComponent(requested.lastPathComponent)
+        self.now = now; self.failpoint = failpoint
+        guard undoDuration.isFinite, undoDuration > 0, undoDuration <= 86400 else {
+            throw SavedCreationsError.unavailable("Invalid Undo duration")
+        }
+        self.undoDuration = undoDuration
+        loadError = nil
+        try openRegisteredLibrary()
+        maintenanceAndExport()
+    }
+    init(loadFailure: Error, assetStore: AssetStore = AssetStore(), indexURL: URL? = nil) {
+        self.assetStore = assetStore; self.indexURL = indexURL ?? Self.defaultIndexURL()
+        now = Date.init; undoDuration = 8; failpoint = { _ in }; loadError = loadFailure
+    }
+    private func requireSnapshot() throws -> LibrarySnapshot {
+        if let loadError { throw loadError }
+        guard let snapshot else { throw SavedCreationsError.unavailable("Library is not registered") }
+        return snapshot
+    }
+    private func adopt(_ value: LibrarySnapshot) { snapshot = value; creations = value.creations }
+
+    /// A cache is not evidence of absence. Read and validate the entire registered
+    /// snapshot under one catalog reservation before either lookup can return nil.
+    /// In particular, a broken row/load must not clear a job link or redownload.
+    func creationForVideo(savedID: UUID?, remoteID: String) throws -> SavedCreation? {
+        let before = try requireSnapshot()
+        let latest = try assetStore.withCatalogReservation {
+            try assetStore.database.librarySnapshot(before.manifestID)
+        }
+        adopt(latest)
+        if let savedID, let linked = latest.creations.first(where: {
+            $0.id == savedID && $0.kind == .video && ($0.videoRemoteID == nil || $0.videoRemoteID == remoteID)
+        }) { return linked }
+        return latest.creations.first { $0.kind == .video && $0.videoRemoteID == remoteID }
     }
 
-    init(assetStore: AssetStore = AssetStore(), indexURL: URL? = nil) throws {
-        self.assetStore = assetStore
-        self.indexURL = indexURL ?? Self.defaultIndexURL()
-        let url = self.indexURL
-        if FileManager.default.fileExists(atPath: url.path) {
-            let manifest: CreationsManifest
-            do {
-                let payload = try Data(contentsOf: url)
-                manifest = try JSONDecoder().decode(CreationsManifest.self, from: payload)
-                indexSnapshot = payload
+    private func openRegisteredLibrary() throws {
+        let db = assetStore.database
+        let opened = try assetStore.withCatalogReservation { () -> LibrarySnapshot in
+            let base = assetStore.canonicalBaseDirectory.path
+            guard indexURL.path != base, !indexURL.path.hasPrefix(base + "/"),
+                  !assetStore.metadataFileURLs.contains(where: { $0.resolvingSymlinksInPath().standardizedFileURL.path == indexURL.path }) else {
+                throw SavedCreationsError.unavailable("index overlaps managed asset storage")
             }
-            catch { throw SavedCreationsError.invalidIndex(error.localizedDescription) }
-            guard manifest.version == 1 else { throw SavedCreationsError.invalidIndex("unsupported version") }
-            guard Set(manifest.creations.map(\.id)).count == manifest.creations.count else {
-                throw SavedCreationsError.invalidIndex("duplicate creation IDs")
+            if let row = try db.libraryRows("SELECT manifest_id FROM library_manifests WHERE canonical_index=?;", [indexURL.path]).first {
+                guard let id = UUID(uuidString: row[0]) else { throw db.libraryConflict("Invalid registered manifest") }
+                return try db.librarySnapshot(id)
             }
-            for item in manifest.creations {
-                guard Self.isValidAssetPath(item.assetPath, checksum: item.checksum) else {
-                    throw SavedCreationsError.invalidIndex("untrusted asset path")
+            let payload = try Self.readIndexFile(indexURL)
+            let manifest = try payload.map { try JSONDecoder().decode(CreationsManifest.self, from: $0) }
+            if let manifest {
+                guard manifest.version == 1, Set(manifest.creations.map(\.id)).count == manifest.creations.count,
+                      manifest.creations.allSatisfy({ AssetStore.validContentPath($0.assetPath, checksum: $0.checksum) }) else {
+                    throw SavedCreationsError.invalidIndex("unregistered identity, unsupported version, duplicate IDs or untrusted paths")
                 }
             }
-            creations = manifest.creations
-        } else {
-            creations = []
+            if let marker = try Self.readIndexFile(indexBindingURL), marker != Data(base.utf8) {
+                throw db.libraryConflict("Unregistered or foreign Library binding")
+            }
+            let id = UUID()
+            guard let catalog = try db.libraryRows("SELECT identity FROM asset_catalog WHERE singleton=1;").first?.first else {
+                throw db.libraryConflict("Missing catalog identity")
+            }
+            try db.libraryExecute("INSERT INTO library_manifests(manifest_id,catalog_id,canonical_index,revision) VALUES (?,?,?,0);", [id.uuidString,catalog,indexURL.path])
+            if let manifest {
+                // Seeing one legacy manifest never establishes global completeness.
+                try db.libraryExecute("UPDATE asset_catalog SET reclamation_mode='legacy_blocked' WHERE singleton=1;")
+                for item in manifest.creations { try db.insertLibraryCreation(item, manifestID: id) }
+            }
+            return try db.librarySnapshot(id)
         }
-        loadError = nil
-    }
-
-    private init(loadFailure: Error) {
-        assetStore = AssetStore()
-        indexURL = Self.defaultIndexURL()
-        creations = []
-        loadError = loadFailure
+        adopt(opened)
+        // Registry commit precedes sidecar/export. A missing sidecar is repairable.
+        // A bad export is warning-only; the registered database still loads.
     }
 
     func save(_ data: Data, mimeType: String, kind: SavedCreation.Kind, modelID: String, prompt: String?) async throws -> SavedCreation {
-        let predecessor = previousSave
-        let operation = Task {
-            await predecessor?.value
-            return try await performSave(data, mimeType: mimeType, kind: kind, modelID: modelID, prompt: prompt)
+        try await serialized { [self] in
+            try publish(data: data, source: nil, mimeType: mimeType, kind: kind, modelID: modelID, prompt: prompt, videoRemoteID: nil)
         }
-        previousSave = Task { _ = try? await operation.value }
-        return try await operation.value
     }
-
-    /// Saves a file already on disk (a streamed download) without loading it
-    /// into memory. The source is consumed only after asset metadata AND the
-    /// manifest commit, and left in place on failure for retry or export.
     func save(fileAt source: URL, mimeType: String, kind: SavedCreation.Kind, modelID: String, prompt: String?, videoRemoteID: String? = nil) async throws -> SavedCreation {
         try await serialized { [self] in
-            if let loadError { throw loadError }
-            let asset = try await assetStore.store(fileAt: source, mimeType: mimeType, consumeSource: false)
-            let creation = try indexNewCreation(asset: asset, mimeType: mimeType, kind: kind, modelID: modelID, prompt: prompt, videoRemoteID: videoRemoteID)
-            assetStore.consumeSourceFile(source, afterStoring: asset)
-            return creation
+            try publish(data: nil, source: source, mimeType: mimeType, kind: kind, modelID: modelID, prompt: prompt, videoRemoteID: videoRemoteID)
         }
     }
-
-    private func performSave(_ data: Data, mimeType: String, kind: SavedCreation.Kind, modelID: String, prompt: String?) async throws -> SavedCreation {
-        if let loadError { throw loadError }
-        let asset = try await assetStore.store(data, mimeType: mimeType)
-        return try indexNewCreation(asset: asset, mimeType: mimeType, kind: kind, modelID: modelID, prompt: prompt)
-    }
-
-    private func indexNewCreation(asset: AssetRecord, mimeType: String, kind: SavedCreation.Kind, modelID: String, prompt: String?, videoRemoteID: String? = nil) throws -> SavedCreation {
-        // AssetStore may return an existing record for these bytes, including its original path.
-        guard Self.isValidAssetPath(asset.relativePath, checksum: asset.checksum) else {
-            throw SavedCreationsError.unavailable("asset metadata has an untrusted path")
-        }
-        // Containment + symlink check (AssetStore already verified the checksum
-        // of new and deduped files by streaming them).
-        _ = try validatedFileURL(path: asset.relativePath, checksum: asset.checksum)
-        try assetStore.preserveForLibrary(asset)
-        let item = SavedCreation(id: UUID(), kind: kind, modelID: modelID, prompt: prompt,
-                                 mimeType: mimeType, createdAt: Date(), assetPath: asset.relativePath,
-                                 checksum: asset.checksum, videoRemoteID: videoRemoteID)
-        try writeIndex([item] + creations)
+    private func publish(data: Data?, source: URL?, mimeType: String, kind: SavedCreation.Kind,
+                         modelID: String, prompt: String?, videoRemoteID: String?) throws -> SavedCreation {
+        let before = try requireSnapshot()
+        let item = try assetStore.publishLibraryCreation(data: data, source: source, snapshot: before,
+            mimeType: mimeType, kind: kind, modelID: modelID, prompt: prompt, videoRemoteID: videoRemoteID,
+            now: now, failpoint: failpoint)
+        // Publication COMMIT succeeded. Later refresh/export failures are warnings,
+        // not failed saves (which would cause duplicate paid-output retries).
+        creations.insert(item, at: 0)
+        snapshot = LibrarySnapshot(manifestID: before.manifestID, catalogID: before.catalogID,
+            index: before.index, revision: before.revision + 1, creations: creations)
+        maintenanceAndExport()
         return item
     }
 
-    /// Removes creations from the index only (bytes stay so Undo works). If the index
-    /// write fails the in-memory list is untouched, so nothing disappears that would
-    /// come back after a restart.
+    func removeWithUndo(ids: Set<UUID>) async throws -> LibraryRemoval {
+        try await serialized { [self] in
+            let before = try requireSnapshot()
+            let removal = try assetStore.removeLibraryCreations(snapshot: before, ids: ids, now: now(), undoDuration: undoDuration, failpoint: failpoint)
+            let removedIDs = Set(removal.creations.map(\.id))
+            creations.removeAll { removedIDs.contains($0.id) }
+            snapshot = LibrarySnapshot(manifestID: before.manifestID, catalogID: before.catalogID, index: before.index,
+                revision: before.revision + (removedIDs.isEmpty ? 0 : 1), creations: creations)
+            maintenanceAndExport()
+            return removal
+        }
+    }
+    func restore(_ token: LibraryUndoToken) async throws {
+        try await serialized { [self] in
+            guard token.manifestID == (try requireSnapshot()).manifestID else { throw SavedCreationsError.unavailable("Undo belongs to another Library") }
+            try assetStore.restoreLibraryRemoval(token, now: now(), failpoint: failpoint)
+            maintenanceAndExport()
+        }
+    }
+    func finalize(_ token: LibraryUndoToken) async throws {
+        try await serialized { [self] in
+            guard token.manifestID == (try requireSnapshot()).manifestID else { throw SavedCreationsError.unavailable("Undo belongs to another Library") }
+            try assetStore.finalizeLibraryRemoval(token, failpoint: failpoint)
+            maintenanceAndExport()
+        }
+    }
     @discardableResult
     func remove(ids: Set<UUID>) async throws -> [SavedCreation] {
-        try await serialized { [self] in
-            if let loadError { throw loadError }
-            let removed = creations.filter { ids.contains($0.id) }
-            guard !removed.isEmpty else { return [] }
-            try writeIndex(creations.filter { !ids.contains($0.id) })
-            for item in removed { pendingRemoval[item.id] = item }
-            return removed
-        }
+        let removal = try await removeWithUndo(ids: ids)
+        let removedIDs = Set(removal.creations.map(\.id))
+        if compatibilitySeen.isDisjoint(with: removedIDs) { compatibilityRemovals.append(removal) }
+        compatibilitySeen.formUnion(removedIDs)
+        return removal.creations
     }
-
-    /// Puts removed creations back (Undo), keeping newest-first order.
     func restore(_ items: [SavedCreation]) async throws {
-        try await serialized { [self] in
-            let existing = Set(creations.map(\.id))
-            let merged = (creations + items.filter { !existing.contains($0.id) }).sorted { $0.createdAt > $1.createdAt }
-            try writeIndex(merged)
-            for item in items { pendingRemoval.removeValue(forKey: item.id) }
+        guard let removal = compatibilityRemovals.first(where: { $0.creations == items }) else {
+            throw SavedCreationsError.unavailable("This Undo requires its original removal token")
         }
+        try await restore(removal.token)
+        compatibilityRemovals.removeAll { $0.token == removal.token }
     }
-
-    /// Expire this instance's Undo bookkeeping only. JSON manifests (including
-    /// independent instances and legacy catalogs) do not provide a global owner
-    /// inventory. Preserve bytes rather than pretending this is atomic GC. New
-    /// Library saves also carry durable conservative pins in the asset catalog.
     func purgeUnreferenced(_ removed: [SavedCreation]) async {
-        _ = try? await serialized { [self] in
-            for item in removed { pendingRemoval.removeValue(forKey: item.id) }
+        guard let removal = compatibilityRemovals.first(where: { $0.creations == removed }) else {
+            cleanupWarning = "Finalization requires the original Undo token. Durable holds expire automatically."
+            return
         }
+        do {
+            try await finalize(removal.token)
+            compatibilityRemovals.removeAll { $0.token == removal.token }
+        } catch { cleanupWarning = error.localizedDescription }
     }
 
-    private func serialized<T>(_ work: @escaping @MainActor () async throws -> T) async throws -> T {
+    /// Foreground/startup recovery expires durable holds/intents, drains cleanup,
+    /// refreshes from SQLite and retries the latest JSON export. No network work.
+    func retryMaintenance() async {
+        if let maintenanceTask { await maintenanceTask.value; return }
+        let task = Task { @MainActor [self] in
+            _ = try? await serialized { [self] in maintenanceAndExport() }
+        }
+        maintenanceTask = task
+        await task.value
+        maintenanceTask = nil
+    }
+
+    /// All Library windows observe the shared store. Only it owns the periodic
+    /// loop; leaving one window cannot cancel another window's maintenance.
+    func startForegroundMaintenance(observer: UUID) {
+        foregroundObservers.insert(observer)
+        guard foregroundMaintenanceTask == nil else { return }
+        foregroundMaintenanceGeneration += 1
+        foregroundMaintenanceTask = Task { @MainActor [weak self] in
+            while !Task.isCancelled {
+                guard self != nil else { return }
+                await self?.retryMaintenance()
+                do { try await Task.sleep(for: .seconds(5)) } catch { return }
+            }
+        }
+    }
+    func stopForegroundMaintenance(observer: UUID) {
+        foregroundObservers.remove(observer)
+        guard foregroundObservers.isEmpty else { return }
+        foregroundMaintenanceTask?.cancel()
+        foregroundMaintenanceTask = nil
+    }
+    private func maintenanceAndExport() {
+        do {
+            try assetStore.recoverLibraryOwnership(now: now(), failpoint: failpoint)
+            cleanupWarning = nil
+        } catch { cleanupWarning = "Cleanup pending: \(error.localizedDescription)" }
+        do {
+            let before = try requireSnapshot()
+            try assetStore.withCatalogReservation {
+                let latest = try assetStore.database.librarySnapshot(before.manifestID)
+                adopt(latest)
+                let managed = try assetStore.database.libraryManagedRoot()
+                reclamationStatus = managed
+                    ? "Managed storage: maintenance reclaims unowned files after Undo expires, while Library is open or on its next open/save. Shared or standalone files remain protected."
+                    : "Legacy storage: removed files are retained. Reclamation requires migration to a new managed root; the old root is not deleted."
+                try exportSnapshot(latest)
+            }
+            exportWarning = nil
+        } catch { exportWarning = "Library changes are stored in SQLite; JSON export needs retry: \(error.localizedDescription)" }
+    }
+    /// Called under the writer reservation from the LATEST DB snapshot. A stale
+    /// worker cannot publish an older revision over a newer export.
+    private func exportSnapshot(_ value: LibrarySnapshot) throws {
+        let expected = Data((value.catalogID + "\n" + value.manifestID.uuidString + "\n" + assetStore.canonicalBaseDirectory.path).utf8)
+        let marker = try Self.readIndexFile(indexBindingURL)
+        if let marker, marker != expected && marker != Data(assetStore.canonicalBaseDirectory.path.utf8) {
+            throw SavedCreationsError.unavailable("Library binding belongs to another identity")
+        }
+        var currentExport = false
+        if let payload = try Self.readIndexFile(indexURL) {
+            let existing = try JSONDecoder().decode(CreationsManifest.self, from: payload)
+            guard Set(existing.creations.map(\.id)).count == existing.creations.count,
+                  existing.creations.allSatisfy({ AssetStore.validContentPath($0.assetPath, checksum: $0.checksum) }) else {
+                throw SavedCreationsError.invalidIndex("untrusted export paths or duplicate identities")
+            }
+            guard existing.version == 1 || (existing.version == 2 && existing.manifestID == value.manifestID && existing.catalogID == value.catalogID && (existing.revision ?? Int64.max) <= value.revision) else {
+                throw SavedCreationsError.invalidIndex("foreign identity or future revision")
+            }
+            currentExport = existing.version == 2 && existing.revision == value.revision
+                && existing.creations == value.creations
+        }
+        try FileManager.default.createDirectory(at: indexURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        if marker == nil { try ExclusiveMarkerPublisher.publish(expected, to: indexBindingURL) }
+        // Keep compatible legacy sidecars unchanged; the committed registry is
+        // the authoritative binding. New sidecars include both identities.
+        if !currentExport {
+            let manifest = CreationsManifest(version: 2, manifestID: value.manifestID, catalogID: value.catalogID,
+                                             revision: value.revision, creations: value.creations)
+            try failpoint(.exportWrite)
+            try JSONEncoder().encode(manifest).write(to: indexURL, options: .atomic)
+        }
+        let exportedText = try assetStore.database.libraryRows(
+            "SELECT exported_revision FROM library_manifests WHERE manifest_id=?;", [value.manifestID.uuidString]
+        ).first?.first
+        let exported = exportedText.flatMap { Int64($0) }
+        // Repair a lost acknowledgement without rewriting a verified current
+        // export. Conversely, an acknowledgement never substitutes for reading
+        // and validating the actual file and its binding above.
+        if exported != value.revision {
+            try failpoint(.exportAcknowledgement)
+            try assetStore.database.libraryExecute("UPDATE library_manifests SET exported_revision=? WHERE manifest_id=?;", [String(value.revision),value.manifestID.uuidString])
+        }
+    }
+    private func serialized<T: Sendable>(_ work: @escaping @MainActor () async throws -> T) async throws -> T {
         let predecessor = previousSave
         let operation = Task { @MainActor () async throws -> T in
             await predecessor?.value
@@ -194,54 +338,6 @@ final class SavedCreationsStore: ObservableObject {
         previousSave = Task { _ = try? await operation.value }
         return try await operation.value
     }
-
-    private func writeIndex(_ updated: [SavedCreation]) throws {
-        if let loadError { throw loadError }
-        guard Set(updated.map(\.id)).count == updated.count,
-              updated.allSatisfy({ Self.isValidAssetPath($0.assetPath, checksum: $0.checksum) }) else {
-            throw SavedCreationsError.invalidIndex("duplicate identity or untrusted asset path")
-        }
-        let payload = try JSONEncoder().encode(CreationsManifest(version: 1, creations: updated))
-        var published = false
-        do {
-            try assetStore.withCatalogReservation {
-                let base = assetStore.canonicalBaseDirectory.path
-                let index = indexURL.resolvingSymlinksInPath().standardizedFileURL.path
-                guard index != base, !index.hasPrefix(base + "/"),
-                      !assetStore.metadataFileURLs.contains(where: {
-                          $0.resolvingSymlinksInPath().standardizedFileURL.path == index
-                      }) else { throw SavedCreationsError.unavailable("index overlaps managed asset storage") }
-                // The marker rejects one manifest shared by independently locked
-                // roots/catalogs. Existing v1 JSON remains unchanged and readable.
-                let expected = Data(base.utf8)
-                let marker = indexBindingURL
-                let existingBinding = try Self.readIndexFile(marker)
-                guard existingBinding == nil || existingBinding == expected else {
-                    throw SavedCreationsError.unavailable("index belongs to another asset root")
-                }
-                guard try Self.readIndexFile(indexURL) == indexSnapshot else {
-                    throw SavedCreationsError.unavailable("index changed in another store; reopen the Library before editing")
-                }
-                let fm = FileManager.default
-                try fm.createDirectory(at: indexURL.deletingLastPathComponent(), withIntermediateDirectories: true)
-                if existingBinding == nil {
-                    try ExclusiveMarkerPublisher.publish(expected, to: marker, fileManager: fm)
-                }
-                try payload.write(to: indexURL, options: .atomic)
-                published = true
-            }
-        } catch {
-            // JSON publication cannot be rolled back by a failed reservation COMMIT.
-            // Adopt that actual outcome so callers finish their Undo bookkeeping;
-            // all errors before publication still fail closed without changing memory.
-            guard published else { throw error }
-        }
-        indexSnapshot = payload
-        creations = updated
-    }
-
-    /// Missing is the only acceptable read failure; unreadable files, directories,
-    /// and symlinks cannot masquerade as an absent manifest or binding.
     private static func readIndexFile(_ url: URL) throws -> Data? {
         do {
             let attributes = try FileManager.default.attributesOfItem(atPath: url.path)
@@ -249,128 +345,77 @@ final class SavedCreationsStore: ObservableObject {
                 throw SavedCreationsError.invalidIndex("index or binding is not a regular file")
             }
             return try Data(contentsOf: url)
-        } catch let error as NSError where error.domain == NSCocoaErrorDomain && error.code == NSFileReadNoSuchFileError {
-            return nil
-        }
+        } catch let error as NSError where error.domain == NSCocoaErrorDomain && error.code == NSFileReadNoSuchFileError { return nil }
     }
 
-    /// On-disk location of a creation's bytes for export (copyItem), drag-out,
-    /// Reveal in Finder, Share, Quick Look, and thumbnails — without reading
-    /// or hashing the file. Applies the same path validation as `data(for:)`:
-    /// content-addressed path shape, containment, and no symlinks anywhere.
     func fileURL(for creation: SavedCreation) throws -> URL {
         try validatedFileURL(path: creation.assetPath, checksum: creation.checksum)
     }
-
-    /// Exports generated bytes retained after a local save failure.
     func export(data: Data, to destination: URL) throws {
-        try export(to: destination) { staged in
-            try data.write(to: staged, options: .withoutOverwriting)
-        }
+        try export(to: destination) { try data.write(to: $0, options: .withoutOverwriting) }
     }
-
-    /// Stage the copy beside the destination, then atomically replace it. Never
-    /// remove the user's previous export before the replacement is ready.
     func export(_ creation: SavedCreation, to destination: URL) throws {
         let source = try fileURL(for: creation)
-        try export(to: destination) { staged in
-            try FileManager.default.copyItem(at: source, to: staged)
-        }
+        try export(to: destination) { try FileManager.default.copyItem(at: source, to: $0) }
     }
-
-    private func export(to destination: URL, stage: (URL) throws -> Void) throws {
+    /// Shared by single and bulk export. Reserved names stay reserved even when
+    /// the compatibility file/SQLite sidecar is temporarily absent.
+    @discardableResult
+    func validateExportDestination(_ destination: URL) throws -> URL {
         guard destination.isFileURL else { throw SavedCreationsError.managedExportDestination }
-        let parent = destination.deletingLastPathComponent().resolvingSymlinksInPath().standardizedFileURL
-        let target = parent.appendingPathComponent(destination.lastPathComponent)
-        let canonicalTarget = target.resolvingSymlinksInPath().standardizedFileURL
-        let base = assetStore.baseDirectory.resolvingSymlinksInPath().standardizedFileURL.path
-        let metadataURLs = assetStore.metadataFileURLs + [indexURL, indexBindingURL]
-        let metadata = metadataURLs.map { $0.resolvingSymlinksInPath().standardizedFileURL.path }
-        guard canonicalTarget.path != base,
-              !canonicalTarget.path.hasPrefix(base + "/"),
-              !metadata.contains(canonicalTarget.path) else { throw SavedCreationsError.managedExportDestination }
-        // Filesystem identity also covers firmlinks and spelling aliases. Walk
-        // parents so even a new filename inside an aliased asset shard is denied.
-        var ancestor = parent
-        while true {
-            if try Self.sameDirectory(ancestor, assetStore.baseDirectory) {
-                throw SavedCreationsError.managedExportDestination
-            }
-            if ancestor.path == "/" { break }
-            let next = ancestor.deletingLastPathComponent().standardizedFileURL
-            if next.path == ancestor.path { break }
-            ancestor = next
+        guard try !assetStore.isManagedStoragePath(destination, additionalFiles: [indexURL, indexBindingURL]) else {
+            throw SavedCreationsError.managedExportDestination
         }
-        for url in metadataURLs + [assetStore.baseDirectory] where try Self.sameDirectory(parent, url.deletingLastPathComponent()) {
-            let caseSensitive = try parent.resourceValues(forKeys: [.volumeSupportsCaseSensitiveNamesKey])
-                .volumeSupportsCaseSensitiveNames ?? false
-            let options: String.CompareOptions = caseSensitive ? [] : [.caseInsensitive]
-            if target.lastPathComponent.compare(url.lastPathComponent, options: options) == .orderedSame {
-                throw SavedCreationsError.managedExportDestination
-            }
-        }
-
-        let fm = FileManager.default
+        let parent = ManagedStoragePaths.canonicalURL(destination.deletingLastPathComponent())
+        return parent.appendingPathComponent(destination.lastPathComponent)
+    }
+    private func export(to destination: URL, stage: (URL) throws -> Void) throws {
+        let target = try validateExportDestination(destination)
+        let parent = target.deletingLastPathComponent()
         let staged = parent.appendingPathComponent(".orb-export-\(UUID().uuidString)")
-        defer { try? fm.removeItem(at: staged) }
+        defer { try? FileManager.default.removeItem(at: staged) }
         try stage(staged)
-        // POSIX rename replaces a file atomically, refuses a directory, and does
-        // not follow a final symlink or mutate another hard link to that file.
-        guard Darwin.rename(staged.path, target.path) == 0 else {
-            throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
+        guard try validateExportDestination(destination) == target else {
+            throw SavedCreationsError.managedExportDestination
         }
+        guard Darwin.rename(staged.path, target.path) == 0 else { throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno)) }
     }
 
-    private static func sameDirectory(_ lhs: URL, _ rhs: URL) throws -> Bool {
-        let keys: Set<URLResourceKey> = [.fileResourceIdentifierKey, .volumeIdentifierKey]
-        let left = try lhs.resourceValues(forKeys: keys)
-        let right: URLResourceValues
-        do { right = try rhs.resourceValues(forKeys: keys) }
-        catch let error as NSError where
-            (error.domain == NSCocoaErrorDomain && error.code == NSFileReadNoSuchFileError) ||
-            (error.domain == NSPOSIXErrorDomain && error.code == Int(ENOENT)) {
-            // Managed directories are created lazily. Recovery exports must work
-            // before the first successful save; other lookup errors fail closed.
-            return false
+    /// Bulk never uses the overwrite-capable save-panel rename path. Publishing
+    /// a staged copy with link(2) is atomic and exclusive, including a destination
+    /// created after enumeration/copy. It fails closed on filesystems without hard
+    /// links instead of falling back to an overwrite-capable operation.
+    func exportExclusive(_ creation: SavedCreation, to destination: URL,
+                         beforePublication: (URL) throws -> Void = { _ in }) throws {
+        try assetStore.withCatalogReservation {
+            let target = try validateExportDestination(destination)
+            let staged = target.deletingLastPathComponent().appendingPathComponent(".orb-export-\(UUID().uuidString)")
+            defer { try? FileManager.default.removeItem(at: staged) }
+            try FileManager.default.copyItem(at: fileURL(for: creation), to: staged)
+            try beforePublication(target)
+            // Recheck metadata and aliases at the publication boundary too.
+            guard try validateExportDestination(destination) == target else {
+                throw SavedCreationsError.managedExportDestination
+            }
+            guard Darwin.link(staged.path, target.path) == 0 else {
+                throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
+            }
         }
-        guard let leftFile = left.fileResourceIdentifier as? NSObject,
-              let rightFile = right.fileResourceIdentifier as? NSObject,
-              let leftVolume = left.volumeIdentifier as? NSObject,
-              let rightVolume = right.volumeIdentifier as? NSObject else {
-            throw SavedCreationsError.unavailable("could not verify export destination identity")
-        }
-        return leftFile.isEqual(rightFile) && leftVolume.isEqual(rightVolume)
     }
 
     private func validatedFileURL(path: String, checksum: String) throws -> URL {
-        guard Self.isValidAssetPath(path, checksum: checksum) else {
-            throw AssetStoreError.invalidPath(path)
-        }
-        // AssetStore rejects lexical traversal and any symlinked component.
+        guard AssetStore.validContentPath(path, checksum: checksum) else { throw AssetStoreError.invalidPath(path) }
         let url = try assetStore.fileURL(forRelativePath: path)
-        // Defence in depth: the canonical location must stay inside the library.
         let base = assetStore.baseDirectory.standardizedFileURL.resolvingSymlinksInPath()
         let file = url.standardizedFileURL.resolvingSymlinksInPath()
         guard file.path.hasPrefix(base.path + "/") else { throw AssetStoreError.invalidPath(path) }
         return url
     }
-
     func data(for creation: SavedCreation) async throws -> Data {
-        let path = creation.assetPath
-        _ = try validatedFileURL(path: path, checksum: creation.checksum)
-        // Verify against the creation's persisted checksum, not only the database's current record.
-        let record = AssetRecord(id: creation.id, relativePath: path, remoteReference: nil,
-                                 mimeType: creation.mimeType, sizeBytes: 0, checksum: creation.checksum,
-                                 jobID: nil, messageID: nil, retention: .keep, createdAt: creation.createdAt)
+        _ = try validatedFileURL(path: creation.assetPath, checksum: creation.checksum)
+        let record = AssetRecord(id: creation.id, relativePath: creation.assetPath, remoteReference: nil,
+            mimeType: creation.mimeType, sizeBytes: 0, checksum: creation.checksum, jobID: nil,
+            messageID: nil, retention: .keep, createdAt: creation.createdAt)
         return try await assetStore.data(for: record)
-    }
-
-    private static func isValidAssetPath(_ path: String, checksum: String) -> Bool {
-        guard checksum.count == 64, checksum.utf8.allSatisfy({ (48...57).contains($0) || (97...102).contains($0) }) else { return false }
-        let prefix = String(checksum.prefix(2)) + "/" + checksum
-        guard path == prefix || path.hasPrefix(prefix + ".") else { return false }
-        if path == prefix { return true }
-        let suffix = path.dropFirst(prefix.count + 1)
-        return !suffix.isEmpty && suffix.count <= 8 && suffix.utf8.allSatisfy { (97...122).contains($0) || (48...57).contains($0) }
     }
 }

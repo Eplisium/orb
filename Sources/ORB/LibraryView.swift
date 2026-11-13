@@ -28,7 +28,8 @@ struct SavedCreationsLibraryView: View {
     @State private var errorMessage: String?
     @State private var isOpening = false
     @State private var pendingDelete: [SavedCreation]?
-    @State private var undoRemoved: [SavedCreation]?
+    @State private var undoPresentation = LibraryUndoPresentation()
+    @State private var maintenanceObserver = UUID()
     @FocusState private var focused: Bool
 
     private var visible: [SavedCreation] { query.apply(to: store.creations) }
@@ -42,9 +43,26 @@ struct SavedCreationsLibraryView: View {
         VStack(alignment: .leading, spacing: 10) {
             toolbar
             if let errorMessage { PlaygroundErrorBanner(message: errorMessage) { self.errorMessage = nil } }
+            if let error = undoPresentation.errorMessage {
+                PlaygroundErrorBanner(message: error) { undoPresentation.clearError() }
+            }
             if let loadError = store.loadError {
                 Label(loadError.localizedDescription, systemImage: "exclamationmark.triangle.fill")
                     .font(ORBFont.caption).foregroundStyle(ORBTheme.danger)
+            }
+            if !store.reclamationStatus.isEmpty {
+                Text(store.reclamationStatus).font(ORBFont.caption).foregroundStyle(.secondary)
+            }
+            if store.cleanupWarning != nil || store.exportWarning != nil {
+                VStack(alignment: .leading, spacing: 4) {
+                    if let warning = store.cleanupWarning {
+                        Text(warning).font(ORBFont.caption).foregroundStyle(ORBTheme.danger)
+                    }
+                    if let warning = store.exportWarning {
+                        Text(warning).font(ORBFont.caption).foregroundStyle(ORBTheme.danger)
+                    }
+                    Button("Retry cleanup / export") { Task { await store.retryMaintenance() } }
+                }
             }
             content
         }
@@ -52,6 +70,7 @@ struct SavedCreationsLibraryView: View {
         .focusable()
         .focusEffectDisabled()
         .focused($focused)
+        .onAppear { store.startForegroundMaintenance(observer: maintenanceObserver) }
         .onKeyPress(.space) {
             guard let target = LibraryPreview.target(selection: selection.ids, visible: visible) else { return .ignored }
             open(target); return .handled
@@ -65,19 +84,25 @@ struct SavedCreationsLibraryView: View {
             Button("Delete", role: .destructive) { if let items = pendingDelete { delete(items) } }
             Button("Cancel", role: .cancel) { pendingDelete = nil }
         } message: {
-            Text("This removes the item from the Library, with Undo available briefly. Backing files are retained indefinitely to protect shared media; this does not free disk space.")
+            Text("Undo is available for 8 seconds. Unowned files in managed storage are then reclaimed. Shared files and legacy storage are retained; see the Library storage status.")
         }
         .overlay(alignment: .bottom) {
-            if let removed = undoRemoved {
+            if let removed = undoPresentation.current {
                 UndoToastView(
-                    message: LibraryDelete.message(count: removed.count),
+                    message: LibraryDelete.message(count: removed.creations.count),
+                    token: removed.token.id,
+                    expiresAt: removed.expiresAt,
+                    isBusy: undoPresentation.isRestoring,
                     undo: { undoDelete(removed) },
                     dismiss: { finalizeDelete(removed) }
                 )
                 .transition(.move(edge: .bottom).combined(with: .opacity))
             }
         }
-        .onDisappear { if let removed = undoRemoved { finalizeDelete(removed) } }
+        .onDisappear {
+            store.stopForegroundMaintenance(observer: maintenanceObserver)
+            if let removed = undoPresentation.current { finalizeDelete(removed) }
+        }
         .onDeleteCommand {
             let chosen = visible.filter { selection.contains($0.id) }
             if !chosen.isEmpty { pendingDelete = chosen }
@@ -99,6 +124,8 @@ struct SavedCreationsLibraryView: View {
                 }
                 .padding(.horizontal, 10).padding(.vertical, 6)
                 .background(.orbSurface(0.05), in: RoundedRectangle(cornerRadius: 8))
+                Button("Refresh") { Task { await store.retryMaintenance() } }
+                    .help("Reload Library from SQLite and retry cleanup and JSON export")
                 Picker("Sort", selection: $query.sort) {
                     ForEach(LibraryQuery.Sort.allCases) { Text($0.title).tag($0) }
                 }.pickerStyle(.menu).fixedSize()
@@ -300,32 +327,42 @@ struct SavedCreationsLibraryView: View {
 
     private func delete(_ items: [SavedCreation]) {
         pendingDelete = nil
-        // A newer delete finalizes the previous one: only one Undo is offered at a time.
-        if let previous = undoRemoved { finalizeDelete(previous) }
+        // Preserve the previous Undo if this deletion fails. Only a committed
+        // replacement finalizes the old presentation, and never a busy restore.
         Task {
             do {
-                let removed = try await store.remove(ids: Set(items.map(\.id)))
-                guard !removed.isEmpty else { return }
+                let removed = try await store.removeWithUndo(ids: Set(items.map(\.id)))
+                guard !removed.creations.isEmpty else { return }
                 selection.clear()
-                undoRemoved = removed
+                // A delete begun while another was committing can arrive later.
+                // Finalize the displayed generation, never an in-flight restore.
+                if let previous = undoPresentation.current { finalizeDelete(previous) }
+                undoPresentation.present(removed)
             } catch {
                 errorMessage = "Couldn't delete: \(error.localizedDescription). Nothing was removed."
             }
         }
     }
 
-    private func undoDelete(_ removed: [SavedCreation]) {
-        undoRemoved = nil
+    private func undoDelete(_ removed: LibraryRemoval) {
+        guard undoPresentation.current?.token == removed.token,
+              let captured = undoPresentation.beginUndo(at: Date()) else { return }
         Task {
-            do { try await store.restore(removed) }
-            catch { errorMessage = "Couldn't restore: \(error.localizedDescription)" }
+            do {
+                try await store.restore(captured.token)
+                undoPresentation.completeUndo(captured.token, error: nil)
+            } catch { undoPresentation.completeUndo(captured.token, error: error) }
         }
     }
 
-    private func finalizeDelete(_ removed: [SavedCreation]) {
-        guard undoRemoved?.map(\.id) == removed.map(\.id) else { return }
-        undoRemoved = nil
-        Task { await store.purgeUnreferenced(removed) }
+    private func finalizeDelete(_ removed: LibraryRemoval) {
+        guard undoPresentation.dismiss(removed.token) else { return }
+        Task {
+            do {
+                try await store.finalize(removed.token)
+                undoPresentation.completeDismiss(removed.token, error: nil)
+            } catch { undoPresentation.completeDismiss(removed.token, error: error) }
+        }
     }
 
     private func exportSelected() {
@@ -339,7 +376,7 @@ struct SavedCreationsLibraryView: View {
         panel.canCreateDirectories = true
         guard panel.runModal() == .OK, let folder = panel.url else { return }
         // Copy stored files directly (validated paths; nothing read into memory).
-        let outcome = LibraryExport.copy(LibraryExport.plan(chosen), to: folder) { try store.fileURL(for: $0) }
+        let outcome = LibraryExport.copy(LibraryExport.plan(chosen), to: folder, store: store)
         let text = LibraryExport.resultText(written: outcome.written, failed: outcome.failed)
         if outcome.failed.isEmpty { AppToasts.center.show(text, kind: .success) }
         else { errorMessage = text }

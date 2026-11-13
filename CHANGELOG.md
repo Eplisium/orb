@@ -5,7 +5,7 @@ All notable changes to ORB are listed here. The format is based on [Keep a Chang
 ## [Unreleased] — 1.1.0
 
 ### Backend reliability and safety
-- Failed initial and later job writes preserve complete in-memory snapshots, per-record errors, original identities and sparse updates. Video offers local-only Retry and warns that unsaved history is lost on quit.
+- Failed initial and later job writes preserve complete snapshots in a private local recovery journal. Generation-aware acknowledgement and expected-base checks prevent stale replay from overwriting changed SQLite state. Video offers local-only retry/conflict resolution, with a separate lost-on-quit warning when both stores fail.
 - Open Jobs trays receive current records, and Resume revalidates the latest pending-aware record before callbacks, credential access, or polling.
 - Direct concurrent MCP connects share initialization readiness; cancelled joiners detach independently and failed/shutdown attempts can be retried on the same connection.
 - Batch lookup excludes empty and repeated custom IDs while retaining all raw results and opaque identifiers.
@@ -33,9 +33,11 @@ All notable changes to ORB are listed here. The format is based on [Keep a Chang
 - Cancelling MCP resource/prompt discovery aborts startup instead of publishing a partially initialized connection; ordinary optional-discovery RPC errors remain tolerated.
 
 ### Library data protection
+- Single/bulk exports and source-file cleanup protect the complete job-recovery and database-backup directories, including aliases and not-yet-created paths.
+- Corruption preservation now makes verified copies of the database and observed SQLite sidecars without moving or deleting originals. Incomplete copies are reported explicitly; the app remains memory-only until the original storage is repaired. These forensic copies are not consistent snapshots of concurrent writers.
 - Asset deletion commits metadata removal plus a SQLite cleanup inventory before unlinking. Failed cleanup is retried on reopen; database-wide reservations coordinate participating stores, dedupe and attachments. Root/catalog bindings fail closed on mixed stores, and stale manifest writers are rejected.
-- Successfully published Library index changes reconcile memory and Undo even when the following SQLite reservation commit fails. Binding markers publish complete staged files exclusively, preventing partial first-write markers.
-- **Changed removal policy:** Library removal now retains backing files indefinitely, including after Undo expires. New saves have durable retention pins. This protects independent/legacy manifests but does not reclaim disk space; no supported garbage-collection workflow is included.
+- Registered Library contents, expiring Undo tokens and import ownership now commit in SQLite before JSON compatibility export. Export failure warns without triggering duplicate saves. Binding markers publish complete staged files exclusively, preventing partial first-write markers.
+- **Ownership-aware removal:** new managed roots reclaim unowned Library files after durable Undo/import holds expire. Shared, attached and standalone assets remain protected. Existing legacy roots still retain backing bytes; safe copy-and-activate migration is not included.
 - Chat/Agent assistant image-card exports now surface encoding/write failures and protect managed Library destinations through atomic staging. Re-encoded non-JPEG images are correctly named PNG instead of WebP/GIF/SVG.
 - Video saves retain the remote job identity in the Library manifest, so a failed separate job-link write can be retried after reopening without downloading/indexing a duplicate.
 - Asset cleanup aborts on failed/partial SQLite metadata reads or undecodable rows instead of removing metadata and orphaning bytes.

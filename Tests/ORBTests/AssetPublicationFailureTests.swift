@@ -6,95 +6,162 @@ import Testing
 @Suite("Asset publication failures", .serialized)
 @MainActor
 struct AssetPublicationFailureTests {
-    @Test("Published legacy removal succeeds despite reservation COMMIT failure and supplies usable Undo")
-    func publishedRemovalCommitFailure() async throws {
+    @Test("Rejected ownership COMMIT leaves live state, durable owners, Undo and JSON unchanged",
+          arguments: [LibraryOwnershipPhase.removalCommit, .restoreCommit])
+    func ownershipCommitRejected(phase: LibraryOwnershipPhase) async throws {
         let root = try makeRoot()
         defer { try? FileManager.default.removeItem(at: root) }
-        let fixture = try makeLegacyFixture(root: root, includesFirst: true)
-        let store = try SavedCreationsStore(assetStore: fixture.assets, indexURL: fixture.index)
-        let fault = AssetPublicationCommitFault(index: fixture.index, expected: [fixture.second])
+        let fixture = try makeLegacyFixture(root: root)
+        let fault = AssetPublicationCommitFault(index: fixture.index)
+        var enabled = false
+        let store = try SavedCreationsStore(assetStore: fixture.assets, indexURL: fixture.index,
+            now: { Date(timeIntervalSince1970: 1000) }, failpoint: {
+                if enabled && $0 == phase { fault.arm() }
+            })
+        let removal: LibraryRemoval?
+        if phase == .restoreCommit {
+            removal = try await store.removeWithUndo(ids: [fixture.first.id])
+            #expect(removal?.creations == [fixture.first])
+        } else { removal = nil }
+        let observer = try openDatabase(root)
+        let before = try durableState(observer)
+        let beforeJSON = try Data(contentsOf: fixture.index)
+        let beforeLive = store.creations
+        try expectManifest(fixture, database: observer, equals: beforeLive)
+        #expect(store.exportWarning == nil)
+        #expect(store.cleanupWarning == nil)
+
         fault.install(on: fixture.database)
         defer { fault.uninstall(from: fixture.database) }
-
-        var undo: [SavedCreation]?
-        do { undo = try await store.remove(ids: [fixture.first.id]) }
-        catch { Issue.record("Removal reported failure after publishing its JSON: \(error)") }
+        enabled = true
+        if let removal {
+            await #expect(throws: Error.self) { try await store.restore(removal.token) }
+        } else {
+            await #expect(throws: Error.self) { try await store.removeWithUndo(ids: [fixture.first.id]) }
+        }
+        enabled = false
         fault.uninstall(from: fixture.database)
 
-        // Prove the injection hit COMMIT AFTER the requested JSON was published,
-        // rather than a migration, metadata save, or a pre-publication failure.
+        // The seam only arms a real sqlite3_commit_hook rejection; it never throws.
         #expect(fault.armed)
         #expect(fault.rejected)
-        #expect(fault.observedAtCommit == [fixture.second])
+        #expect(!fault.rejectNext)
+        #expect(fault.observedAtCommit == beforeJSON, "Ownership must commit before any JSON publication")
         #expect(sqlite3_get_autocommit(fixture.database.db) != 0)
-        #expect(undo == [fixture.first], "A published deletion must return the UI's Undo payload")
-        try expectManifest(fixture, equals: [fixture.second])
-        #expect(store.creations == [fixture.second])
+        #expect(store.creations == beforeLive)
+        #expect(try durableState(observer) == before, "A separate connection must see the unchanged owners and Undo generation")
+        #expect(try Data(contentsOf: fixture.index) == beforeJSON)
+        #expect(store.exportWarning == nil)
+        #expect(store.cleanupWarning == nil)
         #expect(try await store.data(for: fixture.first) == fixture.bytes)
+        try expectReopened(fixture, database: observer, equals: beforeLive)
 
-        // Do not reopen the live instance to repair its private CAS snapshot.
-        // A subsequent, different edit must not be rejected as a stale writer.
-        var secondUndo: [SavedCreation]?
-        do { secondUndo = try await store.remove(ids: [fixture.second.id]) }
-        catch { Issue.record("A published removal left the live store unable to edit: \(error)") }
-        #expect(secondUndo == [fixture.second])
-        #expect(store.creations.isEmpty)
-        try expectManifest(fixture, equals: [])
-
-        if let undo {
-            do { try await store.restore(undo) }
-            catch { Issue.record("Undo of the published removal failed: \(error)") }
-            #expect(store.creations == [fixture.first])
-            try expectManifest(fixture, equals: [fixture.first])
+        // Retry on the ORIGINAL instance, without refresh repairing a stale snapshot.
+        if let removal {
+            try await store.restore(removal.token)
+        } else {
+            let retry = try await store.removeWithUndo(ids: [fixture.first.id])
+            #expect(retry.creations == [fixture.first])
+            try expectUndo(observer, removal: retry)
+            try await store.restore(retry.token)
         }
-        if let undo, let secondUndo {
-            try await store.restore(secondUndo)
-            #expect(store.creations == [fixture.first, fixture.second])
-            try expectManifest(fixture, equals: [fixture.first, fixture.second])
-            await store.purgeUnreferenced(undo + secondUndo)
-            #expect(try await store.data(for: fixture.first) == fixture.bytes)
-        }
+        #expect(store.creations == [fixture.first, fixture.second])
+        #expect(try observer.libraryRows("SELECT token FROM library_undo;").isEmpty)
+        try expectManifest(fixture, database: observer, equals: store.creations)
+        try await finalizeAllAndExpectLegacyRetention(store, fixture: fixture, database: observer)
     }
 
-    @Test("Published legacy Undo succeeds despite reservation COMMIT failure and leaves future edits usable")
-    func publishedRestoreCommitFailure() async throws {
+    @Test("Rejected JSON acknowledgement COMMIT is committed success with warning and usable token state",
+          arguments: [LibraryOwnershipPhase.removalCommit, .restoreCommit])
+    func exportAcknowledgementCommitRejected(operation: LibraryOwnershipPhase) async throws {
         let root = try makeRoot()
         defer { try? FileManager.default.removeItem(at: root) }
-        // Models an Undo payload retained from a legacy removal. Calling modern
-        // remove() to prepare this fixture would bind the root before the fault.
-        let fixture = try makeLegacyFixture(root: root, includesFirst: false)
-        let store = try SavedCreationsStore(assetStore: fixture.assets, indexURL: fixture.index)
-        let fault = AssetPublicationCommitFault(index: fixture.index, expected: [fixture.first, fixture.second])
+        let fixture = try makeLegacyFixture(root: root)
+        let fault = AssetPublicationCommitFault(index: fixture.index)
+        var enabled = false
+        let store = try SavedCreationsStore(assetStore: fixture.assets, indexURL: fixture.index,
+            now: { Date(timeIntervalSince1970: 1000) }, failpoint: {
+                if enabled && $0 == .exportAcknowledgement { fault.arm() }
+            })
+        let priorRemoval: LibraryRemoval?
+        if operation == .restoreCommit {
+            priorRemoval = try await store.removeWithUndo(ids: [fixture.first.id])
+        } else { priorRemoval = nil }
+        let observer = try openDatabase(root)
+        let before = try manifestRow(observer)
+        let beforeRevision = try #require(Int64(before[2]))
+        let beforeJSON = try Data(contentsOf: fixture.index)
         fault.install(on: fixture.database)
         defer { fault.uninstall(from: fixture.database) }
+        enabled = true
 
-        var restored = false
-        do { try await store.restore([fixture.first]); restored = true }
-        catch { Issue.record("Undo reported failure after publishing its JSON: \(error)") }
+        // A thrown error here is a test failure: ownership already committed.
+        let committedRemoval: LibraryRemoval?
+        let expected: [SavedCreation]
+        if let priorRemoval {
+            try await store.restore(priorRemoval.token)
+            committedRemoval = nil
+            expected = [fixture.first, fixture.second]
+        } else {
+            committedRemoval = try await store.removeWithUndo(ids: [fixture.first.id])
+            expected = [fixture.second]
+        }
+        enabled = false
         fault.uninstall(from: fixture.database)
 
         #expect(fault.armed)
         #expect(fault.rejected)
-        #expect(fault.observedAtCommit == [fixture.first, fixture.second])
+        #expect(!fault.rejectNext)
         #expect(sqlite3_get_autocommit(fixture.database.db) != 0)
-        #expect(restored)
-        #expect(store.creations == [fixture.first, fixture.second])
-        try expectManifest(fixture, equals: [fixture.first, fixture.second])
+        let publishedJSON = try Data(contentsOf: fixture.index)
+        #expect(publishedJSON != beforeJSON)
+        #expect(fault.observedAtCommit == publishedJSON, "Reject the acknowledgement only after the v2 export was written")
+        #expect(store.creations == expected)
+        #expect(store.exportWarning != nil)
+        #expect(store.cleanupWarning == nil)
+        let after = try manifestRow(observer)
+        #expect(after[0] == before[0])
+        #expect(after[1] == before[1])
+        #expect(Int64(after[2]) == beforeRevision + 1)
+        #expect(after[3] == before[3], "Rejected acknowledgement must not advance exported_revision")
+        #expect(after[2] != after[3])
+        try expectManifest(fixture, database: observer, equals: expected)
+        if let committedRemoval {
+            #expect(committedRemoval.creations == [fixture.first])
+            try expectUndo(observer, removal: committedRemoval)
+        } else {
+            #expect(try observer.libraryRows("SELECT token FROM library_undo;").isEmpty)
+        }
         #expect(try await store.data(for: fixture.first) == fixture.bytes)
 
-        // Removing the just-restored entry also detects a stale in-memory list:
-        // old code returns [] without writing because it never adopted the Undo.
-        var removedAgain: [SavedCreation]?
-        do { removedAgain = try await store.remove(ids: [fixture.first.id]) }
-        catch { Issue.record("A published Undo left the live store unable to edit: \(error)") }
-        #expect(removedAgain == [fixture.first])
-        #expect(store.creations == [fixture.second])
-        try expectManifest(fixture, equals: [fixture.second])
-        if let removedAgain, !removedAgain.isEmpty {
-            try await store.restore(removedAgain)
-            #expect(store.creations == [fixture.first, fixture.second])
-            try expectManifest(fixture, equals: [fixture.first, fixture.second])
+        // Reopen through an independent connection; then edit the original store
+        // without refreshing it. Reopening may retry export, never ownership.
+        try expectReopened(fixture, database: observer, equals: expected)
+        let acknowledged = try manifestRow(observer)
+        #expect(acknowledged[2] == after[2])
+        #expect(acknowledged[3] == after[2])
+        if let committedRemoval {
+            try expectUndo(observer, removal: committedRemoval)
+            let secondRemoval = try await store.removeWithUndo(ids: [fixture.second.id])
+            #expect(secondRemoval.creations == [fixture.second])
+            #expect(store.creations.isEmpty)
+            try await store.restore(committedRemoval.token)
+            #expect(store.creations == [fixture.first])
+            try await store.restore(secondRemoval.token)
+        } else {
+            let priorRemoval = try #require(priorRemoval)
+            await #expect(throws: Error.self) { try await store.restore(priorRemoval.token) }
+            let nextRemoval = try await store.removeWithUndo(ids: [fixture.first.id])
+            #expect(nextRemoval.creations == [fixture.first])
+            #expect(nextRemoval.token != priorRemoval.token)
+            #expect(store.creations == [fixture.second])
+            try await store.restore(nextRemoval.token)
         }
+        #expect(store.exportWarning == nil)
+        #expect(store.creations == [fixture.first, fixture.second])
+        #expect(try observer.libraryRows("SELECT token FROM library_undo;").isEmpty)
+        try expectManifest(fixture, database: observer, equals: store.creations)
+        try await finalizeAllAndExpectLegacyRetention(store, fixture: fixture, database: observer)
     }
 
     private func makeRoot() throws -> URL {
@@ -104,9 +171,14 @@ struct AssetPublicationFailureTests {
         return root
     }
 
-    private func makeLegacyFixture(root: URL, includesFirst: Bool) throws -> AssetPublicationLegacyFixture {
+    private func openDatabase(_ root: URL) throws -> DatabaseManager {
         let db = DatabaseManager(path: root.appendingPathComponent("metadata.sqlite3").path)
         try #require(db.launchFailure == nil)
+        return db
+    }
+
+    private func makeLegacyFixture(root: URL) throws -> AssetPublicationLegacyFixture {
+        let db = try openDatabase(root)
         let base = root.appendingPathComponent("Assets", isDirectory: true)
         let assets = AssetStore(baseDirectory: base, database: db)
         let bytes = Data("offline legacy publication fixture".utf8)
@@ -115,8 +187,8 @@ struct AssetPublicationFailureTests {
         let file = base.appendingPathComponent(relativePath)
         try FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
         try bytes.write(to: file)
-        // Seed legacy bytes and unattached metadata directly, NOT assets.store(),
-        // which would bind the catalog and make writeIndex's reservation read-only.
+        // Pre-existing bytes, unattached metadata and v1 JSON must remain a
+        // legacy-blocked root, not be silently promoted to managed ownership.
         let record = AssetRecord(id: UUID(), relativePath: relativePath, remoteReference: nil,
                                  mimeType: "text/plain", sizeBytes: bytes.count, checksum: checksum,
                                  jobID: nil, messageID: nil, retention: .keep,
@@ -129,27 +201,81 @@ struct AssetPublicationFailureTests {
                                    mimeType: "text/plain", createdAt: Date(timeIntervalSince1970: 10),
                                    assetPath: relativePath, checksum: checksum)
         let index = root.appendingPathComponent("creations.json")
-        let initial = includesFirst ? [first, second] : [second]
-        try JSONEncoder().encode(AssetPublicationManifest(version: 1, creations: initial)).write(to: index)
+        try JSONEncoder().encode(AssetPublicationManifest(version: 1, creations: [first, second])).write(to: index)
         try #require(!FileManager.default.fileExists(atPath: root.appendingPathComponent(".Assets.orb-catalog").path))
         try #require(!FileManager.default.fileExists(atPath: root.appendingPathComponent(".creations.json.orb-assets").path))
         var statement: OpaquePointer?
         try #require(sqlite3_prepare_v2(db.db, "SELECT root FROM asset_catalog WHERE singleton = 1;", -1, &statement, nil) == SQLITE_OK)
         defer { sqlite3_finalize(statement) }
         try #require(sqlite3_step(statement) == SQLITE_ROW)
-        try #require(sqlite3_column_type(statement, 0) == SQLITE_NULL, "Fixture must enter writeIndex with an unbound root")
+        try #require(sqlite3_column_type(statement, 0) == SQLITE_NULL, "Fixture must start with an unbound legacy root")
         return AssetPublicationLegacyFixture(database: db, assets: assets, index: index,
                                              first: first, second: second, bytes: bytes)
     }
 
-    private func expectManifest(_ fixture: AssetPublicationLegacyFixture, equals expected: [SavedCreation]) throws {
+    private func manifestRow(_ db: DatabaseManager) throws -> [String] {
+        let rows = try db.libraryRows("SELECT manifest_id,catalog_id,revision,exported_revision FROM library_manifests;")
+        try #require(rows.count == 1)
+        return try #require(rows.first)
+    }
+
+    private func durableState(_ db: DatabaseManager) throws -> [[[String]]] {
+        try [
+            db.libraryRows("SELECT * FROM library_manifests ORDER BY manifest_id;"),
+            db.libraryRows("SELECT * FROM library_creations ORDER BY manifest_id,creation_id;"),
+            db.libraryRows("SELECT * FROM library_undo ORDER BY token,creation_id;"),
+            db.libraryRows("SELECT * FROM library_imports ORDER BY operation_id;"),
+            db.libraryRows("SELECT * FROM assets ORDER BY id;"),
+            db.libraryRows("SELECT * FROM asset_deletions ORDER BY checksum,relative_path;"),
+            db.libraryRows("SELECT * FROM asset_catalog ORDER BY singleton;")
+        ]
+    }
+
+    private func expectUndo(_ db: DatabaseManager, removal: LibraryRemoval) throws {
+        let rows = try db.libraryRows("SELECT creation_id,payload,checksum,relative_path,expires_at FROM library_undo WHERE token=? AND manifest_id=? ORDER BY creation_id;",
+                                     [removal.token.id.uuidString, removal.token.manifestID.uuidString])
+        #expect(try rows.map { try db.decodeLibraryCreation($0) } == removal.creations.sorted { $0.id.uuidString < $1.id.uuidString })
+        #expect(rows.allSatisfy { Double($0[4]) == removal.expiresAt.timeIntervalSince1970 })
+    }
+
+    private func expectManifest(_ fixture: AssetPublicationLegacyFixture, database: DatabaseManager,
+                                equals expected: [SavedCreation]) throws {
         let manifest = try JSONDecoder().decode(AssetPublicationManifest.self, from: Data(contentsOf: fixture.index))
-        #expect(manifest.version == 1)
+        let row = try manifestRow(database)
+        #expect(manifest.version == 2)
+        #expect(manifest.manifestID?.uuidString == row[0])
+        #expect(manifest.catalogID == row[1])
+        #expect(manifest.revision == Int64(row[2]))
         #expect(manifest.creations == expected)
-        // A fresh reader and the original live instance must agree; fresh-reader
-        // success alone would conceal the old instance's poisoned CAS snapshot.
-        let reopened = try SavedCreationsStore(assetStore: fixture.assets, indexURL: fixture.index)
+        let id = try #require(UUID(uuidString: row[0]))
+        #expect(try database.librarySnapshot(id).creations == expected)
+        #expect(try database.libraryManagedRoot() == false)
+        #expect(try database.libraryRows("SELECT reclamation_mode FROM asset_catalog;") == [["legacy_blocked"]])
+    }
+
+    private func expectReopened(_ fixture: AssetPublicationLegacyFixture, database: DatabaseManager,
+                                equals expected: [SavedCreation]) throws {
+        let assets = AssetStore(baseDirectory: fixture.assets.baseDirectory, database: database)
+        let reopened = try SavedCreationsStore(assetStore: assets, indexURL: fixture.index,
+                                               now: { Date(timeIntervalSince1970: 1000) })
         #expect(reopened.creations == expected)
+        #expect(reopened.exportWarning == nil)
+        #expect(reopened.reclamationStatus.contains("Legacy"))
+        try expectManifest(fixture, database: database, equals: expected)
+    }
+
+    private func finalizeAllAndExpectLegacyRetention(_ store: SavedCreationsStore,
+        fixture: AssetPublicationLegacyFixture, database: DatabaseManager) async throws {
+        let removal = try await store.removeWithUndo(ids: [fixture.first.id, fixture.second.id])
+        #expect(removal.creations == [fixture.first, fixture.second])
+        try await store.finalize(removal.token)
+        #expect(store.creations.isEmpty)
+        #expect(try database.libraryRows("SELECT token FROM library_undo;").isEmpty)
+        #expect(try database.loadAssetDeletionInventory().isEmpty)
+        #expect(try await store.data(for: fixture.first) == fixture.bytes)
+        #expect(try fixture.assets.removeUnattached(checksum: fixture.first.checksum) == false)
+        try expectManifest(fixture, database: database, equals: [])
+        try expectReopened(fixture, database: database, equals: [])
     }
 }
 
@@ -164,46 +290,39 @@ private struct AssetPublicationLegacyFixture {
 
 private struct AssetPublicationManifest: Codable {
     let version: Int
+    var manifestID: UUID? = nil
+    var catalogID: String? = nil
+    var revision: Int64? = nil
     let creations: [SavedCreation]
 }
 
-/// Like AssetDeletionCoordinationTests' commit fault, this uses SQLite's real
-/// update/commit hooks. The commit hook only reads a fixture file: it never
-/// reenters SQLite. The owning test retains this object until both hooks detach.
+/// A phase seam arms the next actual SQLite COMMIT. The hook records only the
+/// fixture's JSON bytes (never reenters SQLite), then rejects that COMMIT once.
+/// The owning test retains this object until its hook is detached.
 private final class AssetPublicationCommitFault {
     let index: URL
-    let expected: [SavedCreation]
     var armed = false
+    var rejectNext = false
     var rejected = false
-    var observedAtCommit: [SavedCreation]?
+    var observedAtCommit: Data?
 
-    init(index: URL, expected: [SavedCreation]) {
-        self.index = index
-        self.expected = expected
-    }
+    init(index: URL) { self.index = index }
+
+    func arm() { armed = true; rejectNext = true }
 
     func install(on database: DatabaseManager) {
-        let context = Unmanaged.passUnretained(self).toOpaque()
-        sqlite3_update_hook(database.db, { context, operation, _, table, _ in
-            guard let context, operation == SQLITE_UPDATE, let table,
-                  String(cString: table) == "asset_catalog" else { return }
-            Unmanaged<AssetPublicationCommitFault>.fromOpaque(context).takeUnretainedValue().armed = true
-        }, context)
         sqlite3_commit_hook(database.db, { context in
             guard let context else { return 0 }
             let fault = Unmanaged<AssetPublicationCommitFault>.fromOpaque(context).takeUnretainedValue()
-            guard fault.armed, !fault.rejected else { return 0 }
-            guard let payload = try? Data(contentsOf: fault.index),
-                  let manifest = try? JSONDecoder().decode(AssetPublicationManifest.self, from: payload),
-                  manifest.version == 1, manifest.creations == fault.expected else { return 0 }
-            fault.observedAtCommit = manifest.creations
+            guard fault.rejectNext else { return 0 }
+            fault.rejectNext = false
+            fault.observedAtCommit = try? Data(contentsOf: fault.index)
             fault.rejected = true
             return 1
-        }, context)
+        }, Unmanaged.passUnretained(self).toOpaque())
     }
 
     func uninstall(from database: DatabaseManager) {
         sqlite3_commit_hook(database.db, nil, nil)
-        sqlite3_update_hook(database.db, nil, nil)
     }
 }

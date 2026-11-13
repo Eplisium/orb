@@ -85,4 +85,40 @@ struct ExclusiveMarkerPublisherTests {
         #expect(throws: Error.self) { try ExclusiveMarkerPublisher.publish(expected, to: marker) }
         #expect(try Data(contentsOf: marker).isEmpty)
     }
+
+    @Test("An identical owner winning publication is accepted without leaving staging")
+    func identicalWinner() throws {
+        let root = try fixture()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let marker = root.appendingPathComponent(".orb-catalog")
+        let expected = Data("same-owner".utf8)
+        var attemptedInstall = false
+        try ExclusiveMarkerPublisher.publish(expected, to: marker, install: { staged, final in
+            attemptedInstall = true
+            try expected.write(to: final, options: .withoutOverwriting)
+            try FileManager.default.linkItem(at: staged, to: final)
+        })
+        #expect(attemptedInstall)
+        #expect(try Data(contentsOf: marker) == expected)
+        #expect(try FileManager.default.contentsOfDirectory(atPath: root.path) == [marker.lastPathComponent])
+    }
+
+    @Test("Directory and symlink bindings fail closed even if the target contains matching bytes", arguments: [false, true])
+    func nonRegularMarker(symlink: Bool) throws {
+        let root = try fixture()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let marker = root.appendingPathComponent(".orb-assets")
+        let target = root.appendingPathComponent("untouched-target")
+        let expected = Data("same-owner".utf8)
+        try expected.write(to: target)
+        if symlink {
+            try FileManager.default.createSymbolicLink(at: marker, withDestinationURL: target)
+        } else {
+            try FileManager.default.createDirectory(at: marker, withIntermediateDirectories: false)
+        }
+        #expect(throws: Error.self) { try ExclusiveMarkerPublisher.publish(expected, to: marker) }
+        #expect(try Data(contentsOf: target) == expected)
+        let attributes = try FileManager.default.attributesOfItem(atPath: marker.path)
+        #expect(attributes[.type] as? FileAttributeType == (symlink ? .typeSymbolicLink : .typeDirectory))
+    }
 }

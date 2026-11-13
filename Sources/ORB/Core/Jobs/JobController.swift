@@ -7,14 +7,14 @@ import Combine
 // application-owned, @MainActor controller that persists a `JobRecord` for
 // every submission — keyed by the remote job ID *before* polling relies on
 // it — and owns the submission/polling state that used to live in
-// `MediaViews`. Successfully saved records survive app restarts. Failed
-// writes retain the latest full snapshot IN MEMORY for local-only retry;
-// quitting loses those unsaved records/updates. This is not a durable outbox.
+// `MediaViews`. SQLite writes are preceded by an independent full-snapshot
+// recovery journal. Failed journal AND SQLite writes remain explicitly memory-
+// only. Recovery never submits, polls, downloads, or accounts a paid job.
 
 /// How the submission itself resolved. Distinct from polling state because
 /// "we don't know whether the remote job exists" must never be presented as
 /// a definite outcome.
-enum JobSubmissionState: String, Sendable, Equatable {
+enum JobSubmissionState: String, Sendable, Equatable, Codable {
     /// The remote submission completed and returned a job ID.
     case submitted
     /// The submission outcome is unknown (e.g. the request timed out after
@@ -29,7 +29,7 @@ enum JobSubmissionState: String, Sendable, Equatable {
 /// completed/failed/cancelled/expired it never regresses. `.stoppedLocally`
 /// means only that ORB stopped its own polling loop — the remote job keeps
 /// running and is never claimed cancelled by a local stop.
-enum JobPollingState: String, Sendable, Equatable {
+enum JobPollingState: String, Sendable, Equatable, Codable {
     case idle
     case polling
     /// Local polling was stopped; the job stays resumable from its last
@@ -64,7 +64,7 @@ enum JobPollingState: String, Sendable, Equatable {
 /// One durable media job. Local `id` is ORB's own; `remoteID` is the
 /// provider's job ID (the polling key). `usageCost` carries the per-request
 /// usage/cost the API reported for this job. No secrets are stored.
-struct JobRecord: Equatable, Identifiable, Sendable {
+struct JobRecord: Equatable, Identifiable, Sendable, Codable {
     var id: UUID
     var remoteID: String?
     var kind: String
@@ -109,15 +109,24 @@ final class JobController: ObservableObject {
     /// The controller used by the default view path. Backed by the shared
     /// database so records survive restarts. Created once per process and
     /// before any poll loop can start, so it runs the launch recovery.
-    static let shared = JobController.launched()
+    static let shared: JobController = {
+        let database = DatabaseManager.shared
+        // Production opts in explicitly. Existing fixtures (including implicit
+        // SwiftPM shared databases) must never open the user's recovery files.
+        let directory = database.testDatabasePath == nil
+            ? ManagedStoragePaths.jobRecoveryDirectory
+            : nil
+        return launched(database: database, recoveryDirectory: directory)
+    }()
 
     /// Builds the controller a fresh process starts with. A record still
     /// marked `.polling` in storage was being polled when the previous run
     /// quit or crashed; no loop owns it any more, so it is demoted to
     /// `.stoppedLocally`. Left alone it would read "Running" forever, with
     /// Stop as its only action and nothing to stop.
-    static func launched(database: DatabaseManager = .shared) -> JobController {
-        let controller = JobController(database: database)
+    static func launched(database: DatabaseManager = .shared, recoveryDirectory: URL? = nil) -> JobController {
+        let controller = JobController(database: database, recoveryDirectory: recoveryDirectory)
+        controller.retryPendingPersistence()
         controller.demoteInterruptedPolls()
         return controller
     }
@@ -128,6 +137,18 @@ final class JobController: ObservableObject {
     private var pending: [UUID: JobRecord] = [:]
     private(set) var persistenceErrors: [UUID: String] = [:]
     private var readError: String?
+    private let journal: JobRecoveryJournal?
+    private var journalError: String?
+    private var journalBlocksNewIdentities = false
+    private var envelopes: [UUID: JobRecoveryEnvelope] = [:]
+    private var journalGenerations: [UUID: UUID] = [:]
+    private var knownBases: [UUID: JobDurableBase] = [:]
+    private var acknowledgements: [UUID: JobRecoveryEnvelope] = [:]
+    /// Unlink succeeded but directory fsync did not. Absence is retryable only
+    /// for this exact generation, never a general permission to delete a file.
+    private var removedGenerations: [UUID: UUID] = [:]
+    private(set) var memoryOnlyRecordIDs: Set<UUID> = []
+    private(set) var persistenceConflicts: [UUID: JobPersistenceConflict] = [:]
     /// Emitted after mutations so services can refresh even without a poll tick.
     @Published private(set) var revision = 0
 
@@ -135,11 +156,15 @@ final class JobController: ObservableObject {
     var unsavedRecordCount: Int { pending.count }
     /// Compatibility summary. Saving one row cannot hide another row's failure.
     var lastPersistenceError: String? {
-        pendingRecords.compactMap { persistenceErrors[$0.id] }.first ?? readError
+        persistenceErrors.keys.sorted { $0.uuidString < $1.uuidString }
+            .compactMap { persistenceErrors[$0] }.first ?? journalError ?? readError
     }
 
-    init(database: DatabaseManager = .shared) {
+    init(database: DatabaseManager = .shared, recoveryDirectory: URL? = nil,
+         recoveryFault: ((JobRecoveryJournal.Operation) throws -> Void)? = nil) {
         self.database = database
+        journal = recoveryDirectory.map { JobRecoveryJournal(directory: $0, fault: recoveryFault) }
+        importRecoveryJournal()
     }
 
     // MARK: Recording lifecycle events (called by VideoGenService)
@@ -310,6 +335,7 @@ final class JobController: ObservableObject {
     func demoteInterruptedPolls(excluding live: Set<String> = []) -> Int {
         var demoted = 0
         for record in allJobs() where record.pollingState == .polling {
+            guard persistenceConflicts[record.id] == nil else { continue }
             guard let remoteID = record.remoteID, !live.contains(remoteID) else { continue }
             recordStoppedLocally(remoteID: remoteID)
             demoted += 1
@@ -347,9 +373,11 @@ final class JobController: ObservableObject {
     // MARK: Queries
 
     func record(id: UUID) -> JobRecord? {
+        importRecoveryJournal()
         if let record = pending[id] { return record }
         do {
             let record = try database.findJobRecordChecked(id: id)
+            knownBases[id] = JobDurableBase(record)
             setReadError(nil)
             return record
         } catch {
@@ -369,8 +397,11 @@ final class JobController: ObservableObject {
     /// Throwing lookup is essential for submission: a failed read is NOT
     /// evidence that a remote ID is new and must not allocate another UUID.
     private func recordChecked(remoteID: String) throws -> JobRecord? {
+        importRecoveryJournal()
         if let record = pending.values.first(where: { $0.remoteID == remoteID }) { return record }
         let record = try database.findJobRecordChecked(remoteID: remoteID)
+        if let record { knownBases[record.id] = .snapshot(record) }
+        if record == nil && journalBlocksNewIdentities { throw JobRecoveryJournalError.corrupt }
         setReadError(nil)
         return record
     }
@@ -378,12 +409,12 @@ final class JobController: ObservableObject {
     /// Resumable listing: jobs with a remote ID and a last known status that
     /// have not reached a terminal state.
     func resumableJobs() -> [JobRecord] {
-        allJobs().filter(\.isResumable)
+        allJobs().filter { $0.isResumable && persistenceConflicts[$0.id] == nil }
     }
 
     /// Finished jobs whose output was never saved in ORB.
     func downloadableJobs() -> [JobRecord] {
-        allJobs().filter(\.needsDownload)
+        allJobs().filter { $0.needsDownload && persistenceConflicts[$0.id] == nil }
     }
 
     func allJobs() -> [JobRecord] {
@@ -421,6 +452,8 @@ final class JobController: ObservableObject {
     /// Returns the number saved; each unsuccessful row retains its own error.
     @discardableResult
     func retryPendingPersistence(id: UUID? = nil) -> Int {
+        importRecoveryJournal()
+        retryAcknowledgements(id: id)
         let records = pendingRecords.filter { id == nil || $0.id == id }
         var saved = 0
         for record in records {
@@ -446,16 +479,343 @@ final class JobController: ObservableObject {
     }
 
     private func persist(_ record: JobRecord) {
-        // Own the complete latest state before attempting storage. A later
-        // sparse update must merge against this, not the stale SQLite row.
+        // Retain the original expected durable base through every failed write.
+        // Updating a pending snapshot must NOT recapture a changed SQLite row.
+        let previous = envelopes[record.id]
+        let entry: JobRecoveryEnvelope
+        if let previous, (try? JobRecoveryEnvelope.same(previous.candidate, record)) == true {
+            entry = previous
+        } else {
+            entry = JobRecoveryEnvelope(candidate: record,
+                expectedDurableBase: previous?.expectedDurableBase ?? knownBases[record.id] ?? .missing)
+        }
         pending[record.id] = record
+        envelopes[record.id] = entry
+        defer { revision += 1 }
+        guard let journal else {
+            memoryOnlyRecordIDs.insert(record.id)
+            if persistenceConflicts[record.id] != nil {
+                do { try captureJournalConflict(entry, disk: nil) }
+                catch { persistenceErrors[record.id] = error.localizedDescription }
+                return
+            }
+            commitRecovery(entry, access: nil)
+            return
+        }
         do {
-            try database.saveJobRecordChecked(record)
-            pending[record.id] = nil
-            persistenceErrors[record.id] = nil
+            try journal.withAccess { access in
+                let disk = try access.read(record.id)
+                if disk?.generation != journalGenerations[record.id] || persistenceConflicts[record.id] != nil {
+                    if disk?.generation != entry.generation { memoryOnlyRecordIDs.insert(record.id) }
+                    try captureJournalConflict(entry, disk: disk)
+                    return
+                }
+                do {
+                    try access.stage(entry, replacing: journalGenerations[record.id])
+                    journalGenerations[record.id] = entry.generation
+                    acknowledgements[record.id] = nil
+                    removedGenerations[record.id] = nil
+                    memoryOnlyRecordIDs.remove(record.id)
+                } catch JobJournalPartialMutation.installed(let generation) {
+                    journalGenerations[record.id] = generation
+                    acknowledgements[record.id] = nil
+                    removedGenerations[record.id] = nil
+                    memoryOnlyRecordIDs.insert(record.id)
+                    // The file exists, but has not completed directory sync.
+                    // SQLite can still save; a later stage uses this generation.
+                    commitRecovery(entry, access: access)
+                    return
+                } catch JobRecoveryJournalError.unavailable {
+                    // Journal failure alone must not turn a working SQLite
+                    // store into data loss. CAS still protects the durable base.
+                    journalError = JobRecoveryJournalError.unavailable.localizedDescription
+                    memoryOnlyRecordIDs.insert(record.id)
+                    commitRecovery(entry, access: nil)
+                    return
+                }
+                commitRecovery(entry, access: access)
+            }
+        } catch JobRecoveryJournalError.unavailable {
+            journalError = JobRecoveryJournalError.unavailable.localizedDescription
+            memoryOnlyRecordIDs.insert(record.id)
+            guard persistenceConflicts[record.id] == nil else {
+                persistenceErrors[record.id] = "The journal is unavailable; conflict resolution requires a fresh local review."
+                return
+            }
+            commitRecovery(entry, access: nil)
         } catch {
+            // Lock contention, generation CAS mismatch, and corrupt inventory
+            // are NOT filesystem write failures: fail closed, without DB writes.
+            if let failure = error as? JobRecoveryJournalError {
+                switch failure {
+                case .changed, .corrupt: memoryOnlyRecordIDs.insert(record.id)
+                case .busy, .unavailable:
+                    if journalGenerations[record.id] != entry.generation { memoryOnlyRecordIDs.insert(record.id) }
+                }
+            } else { memoryOnlyRecordIDs.insert(record.id) }
             persistenceErrors[record.id] = error.localizedDescription
         }
-        revision += 1
+    }
+
+    private func commitRecovery(_ entry: JobRecoveryEnvelope, access: JobRecoveryJournal.Access?) {
+        do {
+            switch try database.reconcileJobRecovery(entry, save: true) {
+            case .conflict(let conflict):
+                setConflict(entry.candidate.id, conflict, disk: try access?.read(entry.candidate.id))
+            case .identical, .ready: finishSaved(entry, access: access)
+            }
+        } catch {
+            let suffix = memoryOnlyRecordIDs.contains(entry.candidate.id)
+                ? " Latest changes are only in memory; save before quitting." : " Local recovery journal retained."
+            persistenceErrors[entry.candidate.id] = error.localizedDescription + suffix
+        }
+    }
+
+    private func finishSaved(_ entry: JobRecoveryEnvelope, access: JobRecoveryJournal.Access?) {
+        let id = entry.candidate.id
+        pending[id] = nil
+        envelopes[id] = nil
+        persistenceErrors[id] = nil
+        persistenceConflicts[id] = nil
+        memoryOnlyRecordIDs.remove(id)
+        knownBases[id] = .snapshot(entry.candidate)
+        if let access {
+            acknowledgeSaved(entry, access: access)
+        }
+    }
+
+    private func acknowledgeSaved(_ entry: JobRecoveryEnvelope, access: JobRecoveryJournal.Access) {
+        let id = entry.candidate.id
+        acknowledgements[id] = entry
+        do {
+            try database.acknowledgeJobRecovery(entry) {
+                try discardGeneration(entry, access: access)
+            }
+            acknowledgements[id] = nil
+            removedGenerations[id] = nil
+            journalGenerations[id] = nil
+            persistenceErrors[id] = nil
+        } catch {
+            persistenceErrors[id] = "Job saved to SQLite; recovery journal acknowledgement failed. Retry local cleanup. "
+                + error.localizedDescription
+        }
+    }
+
+    private func discardGeneration(_ entry: JobRecoveryEnvelope, access: JobRecoveryJournal.Access) throws {
+        let id = entry.candidate.id
+        if removedGenerations[id] == entry.generation {
+            try access.check(id, generation: nil)
+            try access.syncDirectory()
+        } else {
+            do {
+                try access.acknowledge(entry)
+                // Also retain the outcome if the enclosing read reservation's
+                // COMMIT subsequently fails after a successful unlink+sync.
+                removedGenerations[id] = entry.generation
+                journalGenerations[id] = nil
+                if pending[id] != nil { memoryOnlyRecordIDs.insert(id) }
+            }
+            catch JobJournalPartialMutation.removed(let generation) {
+                removedGenerations[id] = generation
+                journalGenerations[id] = nil
+                if pending[id] != nil { memoryOnlyRecordIDs.insert(id) }
+                throw JobJournalPartialMutation.removed(generation)
+            }
+        }
+    }
+
+    private func retryAcknowledgements(id: UUID?) {
+        guard let journal else { return }
+        for entry in Array(acknowledgements.values) where id == nil || entry.candidate.id == id {
+            // A later lifecycle write may have failed before staging. Never
+            // replace that newer local snapshot with this older saved ack.
+            guard pending[entry.candidate.id] == nil else { continue }
+            do {
+                try journal.withAccess { access in
+                    let disk = try access.read(entry.candidate.id)
+                    let expected = removedGenerations[entry.candidate.id] == entry.generation ? nil : entry.generation
+                    let comparison = try database.reconcileJobRecovery(entry, save: false)
+                    if disk?.generation == expected, case .identical = comparison {
+                        acknowledgeSaved(entry, access: access)
+                    } else {
+                        // Retain a stale acknowledgement as a reviewable candidate,
+                        // rather than requiring restart or silently deleting it.
+                        pending[entry.candidate.id] = entry.candidate
+                        envelopes[entry.candidate.id] = entry
+                        acknowledgements[entry.candidate.id] = nil
+                        if disk?.generation != entry.generation { memoryOnlyRecordIDs.insert(entry.candidate.id) }
+                        try captureJournalConflict(entry, disk: disk)
+                    }
+                }
+            } catch { persistenceErrors[entry.candidate.id] = error.localizedDescription }
+            revision += 1
+        }
+    }
+
+    /// Import complete snapshots, but never eagerly upsert during construction.
+    /// Only exact committed duplicates are acknowledged. Launch explicitly
+    /// replays pending writes before it demotes interrupted polling states.
+    private func importRecoveryJournal() {
+        guard let journal else { return }
+        do {
+            try journal.withAccess { access in
+                let inventory = try access.inventory()
+                let clearedWarning = journalError != nil || journalBlocksNewIdentities
+                journalError = nil
+                journalBlocksNewIdentities = false
+                if clearedWarning { revision += 1 }
+                // A peer may have committed and acknowledged a generation since
+                // this controller read it. Missing disk is a change, not consent
+                // to replay our older/local snapshot or resume it remotely.
+                for (id, local) in envelopes where inventory[id] == nil && journalGenerations[id] != nil {
+                    memoryOnlyRecordIDs.insert(id)
+                    do { try captureJournalConflict(local, disk: nil) }
+                    catch { persistenceErrors[id] = error.localizedDescription }
+                }
+                for id in inventory.keys.sorted(by: { $0.uuidString < $1.uuidString }) {
+                    guard acknowledgements[id] == nil, let entry = inventory[id] else { continue }
+                    if let local = envelopes[id] {
+                        if entry.generation != journalGenerations[id] {
+                            memoryOnlyRecordIDs.insert(id)
+                            do { try captureJournalConflict(local, disk: entry) }
+                            catch { persistenceErrors[id] = error.localizedDescription }
+                        }
+                        continue
+                    }
+                    pending[id] = entry.candidate
+                    envelopes[id] = entry
+                    journalGenerations[id] = entry.generation
+                    memoryOnlyRecordIDs.remove(id)
+                    do {
+                        switch try database.reconcileJobRecovery(entry, save: false) {
+                        case .identical: finishSaved(entry, access: access)
+                        case .ready: persistenceErrors[id] = "Job snapshot recovered from the local journal; retry saving to SQLite."
+                        case .conflict(let conflict): setConflict(id, conflict, disk: entry)
+                        }
+                    } catch { persistenceErrors[id] = error.localizedDescription + " Local recovery journal retained." }
+                    revision += 1
+                }
+            }
+        } catch {
+            let next = error.localizedDescription
+            let blocks: Bool
+            if case JobRecoveryJournalError.unavailable = error { blocks = false } else { blocks = true }
+            if journalError != next || journalBlocksNewIdentities != blocks {
+                journalError = next
+                journalBlocksNewIdentities = blocks
+                revision += 1
+            }
+        }
+    }
+
+    private func captureJournalConflict(_ entry: JobRecoveryEnvelope, disk: JobRecoveryEnvelope?) throws {
+        let conflict = try database.jobRecoveryConflict(entry.candidate)
+        setConflict(entry.candidate.id, conflict, disk: disk)
+    }
+
+    private func setConflict(_ id: UUID, _ value: JobPersistenceConflict, disk: JobRecoveryEnvelope?) {
+        let previousReviewToken = persistenceConflicts[id]?.reviewToken
+        var conflict = value
+        conflict.journal = disk
+        conflict.candidate = envelopes[id]?.candidate
+        conflict.candidateGeneration = envelopes[id]?.generation
+        conflict.competingJournal = disk != nil && disk?.generation != conflict.candidateGeneration
+        // Reads of an unchanged conflict must not invalidate an open review.
+        if let old = persistenceConflicts[id], old.candidateGeneration == conflict.candidateGeneration,
+           old.journal?.generation == disk?.generation,
+           (try? JobDurableBase(old.durable).matches(conflict.durable)) == true,
+           (try? JobDurableBase(old.remoteOwner).matches(conflict.remoteOwner)) == true {
+            conflict.reviewToken = old.reviewToken
+        }
+        persistenceConflicts[id] = conflict
+        persistenceErrors[id] = conflict.remoteOwner == nil
+            ? "Local job snapshots differ. Review the candidate, SQLite and journal snapshots, then choose which to keep locally."
+            : "Another durable UUID owns this remote job. All snapshots are retained; only Keep SQLite is allowed."
+        // Repeated reads of the same review do not publish another revision.
+        if previousReviewToken != conflict.reviewToken { revision += 1 }
+    }
+
+    /// Deliberate LOCAL resolution. The UI supplies the token it actually showed;
+    /// legacy synchronous callers may omit it. Candidate and disk generations
+    /// are checked independently, then SQLite is checked under its reservation.
+    @discardableResult
+    func resolvePendingPersistence(id: UUID, resolution: JobPersistenceResolution, reviewToken: UUID? = nil) -> Bool {
+        guard let conflict = persistenceConflicts[id], let entry = envelopes[id],
+              reviewToken == nil || reviewToken == conflict.reviewToken,
+              conflict.candidateGeneration == entry.generation else { return false }
+        guard resolution == .keepDurable || conflict.canRetryCandidate else { return false }
+        if resolution == .useJournal && conflict.journal == nil { return false }
+        defer { revision += 1 }
+        do {
+            if let journal {
+                return try journal.withAccess { access in
+                    // A previous failed discard may have unlinked precisely the
+                    // reviewed generation. Only that recorded absence is allowed.
+                    let wasRemoved = conflict.journal.map { removedGenerations[id] == $0.generation } ?? false
+                    try access.check(id, generation: wasRemoved ? nil : conflict.journal?.generation)
+                    return try resolveReviewed(entry, conflict: conflict, resolution: resolution, access: access)
+                }
+            }
+            return try resolveReviewed(entry, conflict: conflict, resolution: resolution, access: nil)
+        } catch {
+            persistenceErrors[id] = error.localizedDescription
+            return false
+        }
+    }
+
+    private func resolveReviewed(_ entry: JobRecoveryEnvelope, conflict: JobPersistenceConflict,
+                                 resolution: JobPersistenceResolution, access: JobRecoveryJournal.Access?) throws -> Bool {
+        let id = entry.candidate.id
+        if resolution == .keepDurable {
+            // Lock order is always journal -> dbLock -> SQLite connection mutex
+            // -> BEGIN IMMEDIATE. Never release SQLite between review and unlink.
+            let accepted = try database.withReviewedJobRecovery(entry.candidate, reviewed: conflict) {
+                if let access, let disk = conflict.journal {
+                    try discardGeneration(disk, access: access)
+                } else if let access, removedGenerations[id] != nil {
+                    try access.check(id, generation: nil)
+                    try access.syncDirectory()
+                }
+            }
+            guard accepted else {
+                persistenceErrors[id] = "Durable job changed since review. Retry local saving to refresh the conflict before resolving."
+                return false
+            }
+            pending[id] = nil
+            envelopes[id] = nil
+            journalGenerations[id] = nil
+            acknowledgements[id] = nil
+            removedGenerations[id] = nil
+            memoryOnlyRecordIDs.remove(id)
+            persistenceErrors[id] = nil
+            persistenceConflicts[id] = nil
+            knownBases[id] = JobDurableBase(conflict.durable)
+            return true
+        }
+        guard try database.checkJobRecoveryResolution(entry.candidate, reviewed: conflict) else {
+            persistenceErrors[id] = "Durable job changed since review. Retry local saving to refresh the conflict before resolving."
+            return false
+        }
+        let chosen = resolution == .useJournal ? conflict.journal!.candidate : entry.candidate
+        let replacement = JobRecoveryEnvelope(candidate: chosen, expectedDurableBase: JobDurableBase(conflict.durable))
+        // Do not mutate the in-memory candidate until a replacement was installed.
+        // If stage fails before rename, the reviewed choice remains retryable.
+        if let access {
+            do {
+                try access.stage(replacement, replacing: try access.read(id)?.generation)
+                memoryOnlyRecordIDs.remove(id)
+            } catch JobJournalPartialMutation.installed(let generation) {
+                journalGenerations[id] = generation
+                memoryOnlyRecordIDs.insert(id)
+            }
+            journalGenerations[id] = replacement.generation
+        } else { memoryOnlyRecordIDs.insert(id) }
+        pending[id] = chosen
+        envelopes[id] = replacement
+        persistenceConflicts[id] = nil
+        acknowledgements[id] = nil
+        removedGenerations[id] = nil
+        commitRecovery(replacement, access: access)
+        return pending[id] == nil
     }
 }

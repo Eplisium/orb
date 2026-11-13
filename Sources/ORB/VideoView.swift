@@ -33,6 +33,13 @@ struct VideoView: View {
 
     /// Preset staged by Apply for a different model; consumed by the model-change reset.
     @State private var pendingPreset: VideoPresetValues? = nil
+    @State private var conflictToResolve: JobConflictReview?
+    @State private var conflictResolutionError: String?
+
+    private struct JobConflictReview: Identifiable {
+        let id: UUID
+        let conflict: JobPersistenceConflict
+    }
 
     private let accent = ORBTheme.accent
 
@@ -74,6 +81,82 @@ struct VideoView: View {
             lastFrameURL = nil
             generateAudio = o.generateAudio
         }
+        .sheet(item: $conflictToResolve) { review in
+            conflictReviewSheet(review)
+        }
+    }
+
+    private func conflictReviewSheet(_ review: JobConflictReview) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Resolve local job snapshots").font(.headline)
+            Text("Each choice keeps the entire selected snapshot, including cost, prompt and creation link, and discards the other reviewed changes. No submission, polling, download or billing occurs.")
+                .font(.caption)
+            ScrollView {
+                VStack(alignment: .leading, spacing: 16) {
+                    conflictSnapshot("Local candidate", record: review.conflict.candidate)
+                    conflictSnapshot("SQLite", record: review.conflict.durable)
+                    if let owner = review.conflict.remoteOwner {
+                        conflictSnapshot("SQLite remote-ID owner (different UUID)", record: owner)
+                    }
+                    conflictSnapshot("Recovery journal", record: review.conflict.journal?.candidate)
+                    if let generation = review.conflict.journal?.generation {
+                        Text("Journal generation: \(generation.uuidString)").font(.caption.monospaced())
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .textSelection(.enabled)
+            }
+            if let error = conflictResolutionError {
+                Text(error).font(.caption).foregroundStyle(.orange)
+            }
+            VStack(alignment: .leading, spacing: 8) {
+                Button("Keep SQLite — discard reviewed candidates", role: .destructive) {
+                    resolveConflict(review, resolution: .keepDurable)
+                }
+                if review.conflict.canRetryCandidate {
+                    Button("Use local candidate — replace SQLite and journal", role: .destructive) {
+                        resolveConflict(review, resolution: .retryCandidate)
+                    }
+                    if review.conflict.competingJournal {
+                        Button("Use journal candidate — discard local candidate", role: .destructive) {
+                            resolveConflict(review, resolution: .useJournal)
+                        }
+                    }
+                }
+                HStack {
+                    Button("Refresh review") {
+                        service.retryPendingJobPersistence(id: review.id)
+                        if let conflict = service.jobPersistenceConflicts[review.id] {
+                            conflictToResolve = JobConflictReview(id: review.id, conflict: conflict)
+                            conflictResolutionError = nil
+                        }
+                        refreshResumableRecords()
+                    }
+                    Spacer()
+                    Button("Cancel", role: .cancel) { conflictToResolve = nil }
+                }
+            }
+        }
+        .padding(20)
+        .frame(width: 660, height: 620)
+    }
+
+    private func conflictSnapshot(_ title: String, record: JobRecord?) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(title).font(.subheadline.bold())
+            Text(JobPersistenceConflict.describe(record)).font(.caption.monospaced())
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    private func resolveConflict(_ review: JobConflictReview, resolution: JobPersistenceResolution) {
+        if service.resolveJobPersistenceConflict(id: review.id, resolution: resolution, reviewToken: review.conflict.reviewToken) {
+            conflictToResolve = nil
+            conflictResolutionError = nil
+        } else {
+            conflictResolutionError = "Resolution was not completed. Snapshots may have changed or local storage may be unavailable. Refresh the review before choosing again."
+        }
+        refreshResumableRecords()
     }
 
     private func refreshResumableRecords() {
@@ -363,7 +446,7 @@ struct VideoView: View {
     private var durableJobsSection: some View {
         if let warning = service.jobPersistenceWarning {
             VStack(alignment: .leading, spacing: 8) {
-                Label("UNSAVED JOB RECORDS (\(service.unsavedJobRecordCount))", systemImage: "externaldrive.badge.exclamationmark")
+                Label("JOB RECOVERY · \(service.unsavedJobRecordCount) UNSAVED", systemImage: "externaldrive.badge.exclamationmark")
                     .font(.caption.bold()).foregroundStyle(.orange)
                 Text(warning).font(.caption).foregroundStyle(.orange)
                     .fixedSize(horizontal: false, vertical: true)
@@ -372,7 +455,7 @@ struct VideoView: View {
                     refreshResumableRecords()
                 }
                 .controlSize(.small)
-                ForEach(service.unsavedJobRecords) { record in
+                ForEach(service.jobPersistenceIssueRecords) { record in
                     HStack(alignment: .top) {
                         VStack(alignment: .leading, spacing: 3) {
                             Text(record.remoteID ?? "Unknown submission · \(record.id.uuidString.prefix(8))")
@@ -380,8 +463,24 @@ struct VideoView: View {
                             if let error = service.jobPersistenceErrors[record.id] {
                                 Text(error).font(.caption2).foregroundStyle(.secondary)
                             }
+                            if service.unsavedJobRecords.contains(where: { $0.id == record.id }) {
+                                Text(service.memoryOnlyJobRecordIDs.contains(record.id)
+                                    ? "Latest changes: memory only" : "Latest changes: local recovery journal")
+                                    .font(.caption2).foregroundStyle(.orange)
+                            }
+                            if let conflict = service.jobPersistenceConflicts[record.id] {
+                                Text("Recovered: \(record.pollingState.rawValue) · Durable: \((conflict.remoteOwner ?? conflict.durable)?.pollingState.rawValue ?? "absent")")
+                                    .font(.caption2).foregroundStyle(.secondary)
+                            }
                         }
                         Spacer()
+                        if let conflict = service.jobPersistenceConflicts[record.id] {
+                            Button("Resolve locally…") {
+                                conflictResolutionError = nil
+                                conflictToResolve = JobConflictReview(id: record.id, conflict: conflict)
+                            }
+                                .controlSize(.small)
+                        }
                         Button("Retry saving") {
                             service.retryPendingJobPersistence(id: record.id)
                             refreshResumableRecords()

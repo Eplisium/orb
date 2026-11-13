@@ -30,8 +30,18 @@ extension DatabaseManager {
                 identity TEXT NOT NULL,
                 root TEXT
             );
-            INSERT OR IGNORE INTO asset_catalog(singleton, identity) VALUES (1, '\(UUID().uuidString)');
+            CREATE TABLE IF NOT EXISTS asset_catalog_origin (
+                singleton INTEGER PRIMARY KEY CHECK(singleton=1),
+                identity TEXT NOT NULL, version INTEGER NOT NULL, database_path TEXT NOT NULL
+            );
             """)
+        let origin = try libraryRows("SELECT identity,version,database_path FROM asset_catalog_origin WHERE singleton=1;").first
+        let identity: String
+        if let origin, UUID(uuidString: origin[0]) != nil, origin[1] == "1", origin[2] == catalogStorageIdentity {
+            identity = origin[0]
+        } else { identity = UUID().uuidString }
+        try libraryExecute("INSERT OR IGNORE INTO asset_catalog(singleton,identity) VALUES (1,?);", [identity])
+        try migrateLibraryOwnership()
     }
 
     // MARK: Asset deletion coordination

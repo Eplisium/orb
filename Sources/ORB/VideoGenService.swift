@@ -404,6 +404,9 @@ final class VideoGenService: ObservableObject {
                 "the current job record could not be loaded. Restore access to local job storage before trying again."
             )
         }
+        guard jobController.persistenceConflicts[record.id] == nil else {
+            throw MediaServiceError.resumeUnavailable("resolve the conflicting local job snapshots before polling.")
+        }
         guard let remoteID = record.remoteID?
             .trimmingCharacters(in: .whitespacesAndNewlines), !remoteID.isEmpty else {
             throw MediaServiceError.resumeUnavailable(
@@ -586,25 +589,27 @@ final class VideoGenService: ObservableObject {
     /// in memory. The durable record keeps the creation ID, so after a
     /// restart the tray knows the result is saved.
     func downloadAndSave(remoteID: String, store: SavedCreationsStore) async throws -> SavedCreation {
-        if let record = jobController.record(remoteID: remoteID),
-           let savedID = record.savedCreationID {
-            if let existing = store.creations.first(where: { $0.id == savedID }) {
-                // The link may exist only in the pending snapshot. Recover its
-                // local write without downloading/indexing/billing again.
-                jobController.retryPendingPersistence(id: record.id)
-                return existing
+        let record = jobController.record(remoteID: remoteID)
+        // Both ID lookup and remote-ID recovery use the same authoritative read.
+        // A failed read is not absence: do not clear a link or start a download.
+        if let existing = try store.creationForVideo(savedID: record?.savedCreationID, remoteID: remoteID) {
+            if record?.savedCreationID == existing.id {
+                if let record { jobController.retryPendingPersistence(id: record.id) }
+            } else {
+                // The authoritative lookup established the old ID is absent
+                // and found this job's committed replacement. Ordinary linking
+                // is first-wins, so release only that now-proven stale link.
+                if record?.savedCreationID != nil {
+                    jobController.clearSavedCreation(remoteID: remoteID)
+                }
+                jobController.recordSavedCreation(remoteID: remoteID, creationID: existing.id)
             }
-            // The creation was deleted from Library: allow downloading again.
-            jobController.clearSavedCreation(remoteID: remoteID)
-        }
-        // The manifest may have committed while the separate SQLite link failed.
-        // Recover that identity across service/app restarts before downloading again.
-        if let existing = store.creations.first(where: { $0.kind == .video && $0.videoRemoteID == remoteID }) {
-            jobController.recordSavedCreation(remoteID: remoteID, creationID: existing.id)
             return existing
         }
+        if record?.savedCreationID != nil {
+            jobController.clearSavedCreation(remoteID: remoteID)
+        }
         if let running = downloadTasks[remoteID] { return try await running.value }
-        let record = jobController.record(remoteID: remoteID)
         let task = Task<SavedCreation, Error> { @MainActor in
             let file: URL
             let mime: String
@@ -679,23 +684,42 @@ final class VideoGenService: ObservableObject {
     /// tests and alternate hosts stay isolated from shared state.
     var resumableRecords: [JobRecord] { jobController.resumableJobs() }
 
-    /// Finished jobs whose video was never saved in ORB. Successfully saved
-    /// job records survive restarts; pending snapshots do not.
+    /// Finished jobs whose video was never saved in ORB. Pending snapshots
+    /// survive restart when the recovery journal is available.
     var downloadableRecords: [JobRecord] { jobController.downloadableJobs() }
 
-    /// Every known job (active, finished, failed), with unsaved snapshots
-    /// overriding stale database rows. Only successful writes survive quit.
+    /// Every known job, with pending snapshots overriding stale database rows.
     var allJobRecords: [JobRecord] { jobController.allJobs() }
 
     var unsavedJobRecordCount: Int { jobController.unsavedRecordCount }
     var unsavedJobRecords: [JobRecord] { jobController.pendingRecords }
     var jobPersistenceErrors: [UUID: String] { jobController.persistenceErrors }
+    var memoryOnlyJobRecordIDs: Set<UUID> { jobController.memoryOnlyRecordIDs }
+    var jobPersistenceConflicts: [UUID: JobPersistenceConflict] { jobController.persistenceConflicts }
+    var jobPersistenceIssueRecords: [JobRecord] {
+        allJobRecords.filter { jobPersistenceErrors[$0.id] != nil }
+    }
     var jobPersistenceWarning: String? {
-        guard unsavedJobRecordCount > 0 else { return nil }
-        let noun = unsavedJobRecordCount == 1 ? "job record has" : "job records have"
-        return "\(unsavedJobRecordCount) \(noun) unsaved changes kept only in memory. "
-            + "These queued records or updates will be lost when ORB quits. Retry saving before closing. "
-            + "Retry only saves local records; it does not submit or bill another job."
+        guard unsavedJobRecordCount > 0 || durablePersistenceError != nil else { return nil }
+        let memoryCount = memoryOnlyJobRecordIDs.count
+        let journalCount = unsavedJobRecordCount - memoryCount
+        var parts: [String] = []
+        if journalCount > 0 {
+            parts.append("\(journalCount) unsaved job record(s) are backed by the local recovery journal and can be recovered after restart. Conflicts require a local choice before saving.")
+        }
+        if memoryCount > 0 {
+            parts.append("\(memoryCount) job record(s) have latest changes kept only in memory. These changes will be lost when ORB quits; retry saving before closing.")
+        }
+        if unsavedJobRecordCount == 0 {
+            parts.append("Local job recovery needs attention. Saved SQLite records remain durable; see the recovery error below.")
+        }
+        parts.append("Retry and conflict resolution only change local records; they never submit or bill another job.")
+        return parts.joined(separator: " ")
+    }
+
+    @discardableResult
+    func resolveJobPersistenceConflict(id: UUID, resolution: JobPersistenceResolution, reviewToken: UUID? = nil) -> Bool {
+        jobController.resolvePendingPersistence(id: id, resolution: resolution, reviewToken: reviewToken)
     }
 
     /// Local-only retry, optionally scoped to one original UUID. Never calls

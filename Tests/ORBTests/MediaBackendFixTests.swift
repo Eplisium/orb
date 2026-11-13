@@ -44,20 +44,20 @@ struct MediaBackendFixTests {
         #expect((try? Data(contentsOf: source)) == bytes)
     }
 
-    @Test("B06: outer manifest rejection preserves input, including deduped assets", arguments: [false, true])
+    @Test("B06: creation rejection preserves input, including deduped assets", arguments: [false, true])
     func b06ManifestFailurePreservesSource(deduplicated: Bool) async throws {
         let root = try fixtureRoot()
         defer { try? FileManager.default.removeItem(at: root) }
-        let assets = AssetStore(baseDirectory: root.appendingPathComponent("Assets"),
-                                database: DatabaseManager(path: ":memory:"))
+        let db = DatabaseManager(path: ":memory:")
+        let assets = AssetStore(baseDirectory: root.appendingPathComponent("Assets"), database: db)
         let index = root.appendingPathComponent("creations.json")
         let store = try SavedCreationsStore(assetStore: assets, indexURL: index)
         let source = root.appendingPathComponent("download.mp4")
         let bytes = Data("paid video bytes".utf8)
         if deduplicated { _ = try await assets.store(bytes, mimeType: "video/mp4") }
         try bytes.write(to: source)
-        // A directory cannot be atomically replaced with the JSON manifest.
-        try FileManager.default.createDirectory(at: index, withIntermediateDirectories: false)
+        // A failed authoritative creation transaction must not consume paid input.
+        try db.execChecked("CREATE TRIGGER deny_library_creation BEFORE INSERT ON library_creations BEGIN SELECT RAISE(ABORT, 'injected creation failure'); END;")
 
         await #expect(throws: (any Error).self) {
             _ = try await store.save(fileAt: source, mimeType: "video/mp4", kind: .video,
@@ -84,7 +84,7 @@ struct MediaBackendFixTests {
         let assets = AssetStore(baseDirectory: root.appendingPathComponent("Assets"), database: db)
         let index = root.appendingPathComponent("creations.json")
         let store = try SavedCreationsStore(assetStore: assets, indexURL: index)
-        try FileManager.default.createDirectory(at: index, withIntermediateDirectories: false)
+        try db.execChecked("CREATE TRIGGER deny_library_creation BEFORE INSERT ON library_creations BEGIN SELECT RAISE(ABORT, 'injected creation failure'); END;")
 
         await #expect(throws: (any Error).self) {
             _ = try await service.downloadAndSave(remoteID: remoteID, store: store)
@@ -96,7 +96,7 @@ struct MediaBackendFixTests {
         #expect(service.retainedDownloads[remoteID]?.file == source)
 
         // Retry the retained bytes, not a second remote download.
-        try FileManager.default.removeItem(at: index)
+        try db.execChecked("DROP TRIGGER deny_library_creation;")
         let saved = try await service.downloadAndSave(remoteID: remoteID, store: store)
         #expect(transport.downloadCount == 1)
         #expect(service.retainedDownloads[remoteID] == nil)
@@ -105,6 +105,37 @@ struct MediaBackendFixTests {
         #expect(controller.record(remoteID: remoteID)?.savedCreationID == saved.id)
         let reopened = try SavedCreationsStore(assetStore: assets, indexURL: index)
         #expect(reopened.creations == [saved])
+    }
+
+    @Test("B06: JSON export failure is a saved video, not another paid download")
+    func b06VideoExportWarningDoesNotDuplicate() async throws {
+        let root = try fixtureRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let db = DatabaseManager(path: ":memory:")
+        let controller = JobController(database: db)
+        let remoteID = "video-\(UUID())"
+        controller.recordVideoSubmission(remoteID: remoteID, modelID: "fixture/model", remoteStatus: "completed")
+        let source = root.appendingPathComponent("download.mp4")
+        let bytes = Data("paid output with failed export".utf8)
+        try bytes.write(to: source)
+        let transport = MediaBackendDownloadedFileTransport(file: source)
+        let service = videoService(transport, controller)
+        let assets = AssetStore(baseDirectory: root.appendingPathComponent("Assets"), database: db)
+        let index = root.appendingPathComponent("creations.json")
+        let store = try SavedCreationsStore(assetStore: assets, indexURL: index)
+        try FileManager.default.removeItem(at: index)
+        try FileManager.default.createDirectory(at: index, withIntermediateDirectories: false)
+        let saved = try await service.downloadAndSave(remoteID: remoteID, store: store)
+        #expect(store.exportWarning != nil)
+        #expect(store.creations == [saved])
+        #expect(controller.record(remoteID: remoteID)?.savedCreationID == saved.id)
+        #expect(service.retainedDownloads[remoteID] == nil)
+        #expect(!FileManager.default.fileExists(atPath: source.path))
+        let reopened = try SavedCreationsStore(assetStore: assets, indexURL: index)
+        let again = try await service.downloadAndSave(remoteID: remoteID, store: reopened)
+        #expect(again == saved)
+        #expect(transport.downloadCount == 1)
+        #expect(try await reopened.data(for: saved) == bytes)
     }
 
     @Test("B06: consuming an existing library path never deletes the stored asset")

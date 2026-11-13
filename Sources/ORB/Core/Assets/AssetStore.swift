@@ -34,6 +34,7 @@ struct AssetRecord: Equatable, Identifiable, Sendable {
     var messageID: UUID?
     var retention: AssetRetention
     var createdAt: Date
+    var libraryManaged: Bool = false
 }
 
 struct AssetDeletionEntry: Equatable {
@@ -79,21 +80,28 @@ final class AssetStore {
     }
 
     let baseDirectory: URL
+    let recoveryDirectory: URL
     /// Foundation may leave ancestor aliases unresolved when the final directory
     /// is absent. Bind the deepest existing ancestor before the first write too.
     var canonicalBaseDirectory: URL {
-        var ancestor = baseDirectory
-        var suffix: [String] = []
-        while !FileManager.default.fileExists(atPath: ancestor.path), ancestor.path != "/" {
-            suffix.append(ancestor.lastPathComponent)
-            ancestor.deleteLastPathComponent()
-        }
-        return suffix.reversed().reduce(ancestor.resolvingSymlinksInPath().standardizedFileURL) {
-            $0.appendingPathComponent($1)
-        }
+        ManagedStoragePaths.canonicalURL(baseDirectory)
     }
     var metadataFileURLs: [URL] { database.storageFileURLs + [catalogMarkerURL] }
-    private let database: DatabaseManager
+    var managedDirectoryURLs: [URL] {
+        [baseDirectory, recoveryDirectory] + database.storageDirectoryURLs
+    }
+
+    /// One boundary for every exporter and every post-commit source consumer.
+    /// A registry read failure must fail closed, including for deduplicated saves.
+    func isManagedStoragePath(_ url: URL, additionalFiles: [URL] = []) throws -> Bool {
+        let registered = try database.libraryRows("SELECT canonical_index FROM library_manifests;").flatMap { row -> [URL] in
+            let index = URL(fileURLWithPath: row[0])
+            return [index, index.deletingLastPathComponent().appendingPathComponent(".\(index.lastPathComponent).orb-assets")]
+        }
+        return try ManagedStoragePaths.contains(url, directories: managedDirectoryURLs,
+            files: metadataFileURLs + registered + additionalFiles)
+    }
+    let database: DatabaseManager
     private let unlink: (URL) throws -> Void
     // Outside the asset tree: it is catalog metadata, not content.
     private var catalogMarkerURL: URL {
@@ -105,9 +113,13 @@ final class AssetStore {
     ///     write. Tests inject an isolated temporary directory.
     ///   - database: Metadata store. Tests inject an isolated manager; the
     ///     default is the shared one.
+    ///   - recoveryDirectory: Reserved job journal tree. Nil selects the same
+    ///     production location as JobController.shared; fixtures inject a root.
     init(baseDirectory: URL? = nil, database: DatabaseManager = .shared,
+         recoveryDirectory: URL? = nil,
          unlink: @escaping (URL) throws -> Void = { try FileManager.default.removeItem(at: $0) }) {
         self.baseDirectory = (baseDirectory ?? Self.defaultBaseDirectory()).standardizedFileURL
+        self.recoveryDirectory = (recoveryDirectory ?? ManagedStoragePaths.jobRecoveryDirectory).standardizedFileURL
         self.database = database
         self.unlink = unlink
     }
@@ -159,14 +171,22 @@ final class AssetStore {
         catch { throw AssetStoreError.storageFailure(error.localizedDescription) }
     }
 
-    private func storePayload(
+    func storePayload(
         checksum: String, size: Int, mimeType: String?, remoteReference: String?,
-        jobID: UUID?, messageID: UUID?, stage: (URL) throws -> Void
+        jobID: UUID?, messageID: UUID?, libraryImport: LibraryImportToken? = nil,
+        now: () -> Date = Date.init,
+        commit: ((AssetRecord) throws -> Void)? = nil, stage: (URL) throws -> Void
     ) throws -> AssetRecord {
         do {
             try recoverPendingDeletions()
             return try database.withAssetReservation {
                 try bindCatalog()
+                if let token = libraryImport {
+                    try database.requireLibraryRevision(token.manifestID, token.revision)
+                    guard try !database.libraryRows("SELECT 1 FROM library_imports WHERE operation_id=? AND manifest_id=? AND lease_until>?;", [token.id.uuidString, token.manifestID.uuidString, String(now().timeIntervalSince1970)]).isEmpty else {
+                        throw database.libraryConflict("Import lease expired; retry saving")
+                    }
+                }
                 // A deletion can be prepared between recovery and this lock.
                 // Fail closed; the caller still owns its input and can retry.
                 guard try database.loadAssetDeletionInventory().isEmpty else {
@@ -174,6 +194,16 @@ final class AssetStore {
                 }
                 let records = try database.loadAssetRecordsChecked(checksum: checksum)
                     .sorted { $0.createdAt < $1.createdAt }
+                // Quarantine reserves both the content and path, even if its old
+                // file is missing or contains bytes which do not match the hash.
+                try database.requireAssetPathNotQuarantined(checksum: checksum,
+                    path: Self.relativePath(forChecksum: checksum, mimeType: mimeType))
+                for record in records {
+                    try database.requireAssetPathNotQuarantined(checksum: checksum, path: record.relativePath)
+                }
+                if let token = libraryImport {
+                    try database.requireAssetPathNotQuarantined(checksum: token.stagingChecksum, path: token.stagingPath)
+                }
                 // Validate the entire inventory, not just the deduped first row.
                 for record in records {
                     guard Self.isContentAddressed(record, checksum: checksum) else {
@@ -182,9 +212,12 @@ final class AssetStore {
                     try verifyStoredFile(record)
                 }
                 if let existing = records.first {
-                    if jobID == nil && messageID == nil && remoteReference == nil { return existing }
+                    if libraryImport != nil {
+                        try commit?(existing)
+                        return existing
+                    }
                     if let owned = records.first(where: {
-                        $0.jobID == jobID && $0.messageID == messageID && $0.remoteReference == remoteReference
+                        !$0.libraryManaged && $0.jobID == jobID && $0.messageID == messageID && $0.remoteReference == remoteReference
                     }) { return owned }
                     // Dedupe shares bytes, not ownership: never replace another
                     // job/message's attachment with the incoming owner's fields.
@@ -201,7 +234,17 @@ final class AssetStore {
                         throw AssetStoreError.corrupt(relativePath: relativePath)
                     }
                 } else {
-                    let temporaryURL = finalURL.deletingLastPathComponent().appendingPathComponent(".tmp-\(UUID().uuidString)")
+                    let temporaryURL: URL
+                    if let token = libraryImport {
+                        temporaryURL = try resolvedURL(forRelativePath: token.stagingPath)
+                        try FileManager.default.createDirectory(at: temporaryURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+                        _ = try resolvedURL(forRelativePath: token.stagingPath)
+                    } else {
+                        temporaryURL = finalURL.deletingLastPathComponent().appendingPathComponent(".tmp-\(UUID().uuidString)")
+                    }
+                    guard !FileManager.default.fileExists(atPath: temporaryURL.path) else {
+                        throw AssetStoreError.storageFailure("Import staging path already exists; retry maintenance")
+                    }
                     defer { try? FileManager.default.removeItem(at: temporaryURL) }
                     try stage(temporaryURL)
                     _ = try resolvedURL(forRelativePath: relativePath)
@@ -209,8 +252,11 @@ final class AssetStore {
                 }
                 // A failed commit may leave an unindexed, verified file. Retain
                 // it (and the caller's source), so a retry can safely adopt it.
-                return try recordStoredAsset(sizeBytes: size, checksum: checksum, relativePath: relativePath,
-                    mimeType: mimeType, remoteReference: remoteReference, jobID: jobID, messageID: messageID)
+                let record = try recordStoredAsset(sizeBytes: size, checksum: checksum, relativePath: relativePath,
+                    mimeType: mimeType, remoteReference: remoteReference, jobID: jobID, messageID: messageID,
+                    libraryManaged: libraryImport != nil)
+                try commit?(record)
+                return record
             }
         } catch let error as AssetStoreError { throw error }
         catch { throw AssetStoreError.storageFailure(error.localizedDescription) }
@@ -219,12 +265,9 @@ final class AssetStore {
     /// Best-effort cleanup after all owning transactions commit. A caller may
     /// pass an existing library path; never unlink the stored asset itself.
     func consumeSourceFile(_ source: URL, afterStoring record: AssetRecord) {
-        let canonicalSource = source.resolvingSymlinksInPath().standardizedFileURL.path
-        let canonicalRoot = baseDirectory.resolvingSymlinksInPath().standardizedFileURL.path
-        // Source cleanup is not asset deletion. Never consume ANY library file,
-        // including another MIME alias or another attached content generation.
-        guard canonicalSource != canonicalRoot, !canonicalSource.hasPrefix(canonicalRoot + "/"),
-              !metadataFileURLs.contains(where: { $0.resolvingSymlinksInPath().standardizedFileURL.path == canonicalSource }) else { return }
+        // Source cleanup is not managed-storage deletion. Keep recovery entries,
+        // locks, database backups and metadata even after a successful dedupe.
+        guard let managed = try? isManagedStoragePath(source), !managed else { return }
         guard let stored = try? fileURL(forRelativePath: record.relativePath),
               source.resolvingSymlinksInPath().standardizedFileURL
                 != stored.resolvingSymlinksInPath().standardizedFileURL else { return }
@@ -258,7 +301,8 @@ final class AssetStore {
         mimeType: String?,
         remoteReference: String?,
         jobID: UUID?,
-        messageID: UUID?
+        messageID: UUID?,
+        libraryManaged: Bool = false
     ) throws -> AssetRecord {
         let record = AssetRecord(
             id: UUID(),
@@ -270,7 +314,8 @@ final class AssetStore {
             jobID: jobID,
             messageID: messageID,
             retention: .keep,
-            createdAt: Date()
+            createdAt: Date(),
+            libraryManaged: libraryManaged
         )
         do {
             try database.saveAssetRecordChecked(record)
@@ -335,6 +380,7 @@ final class AssetStore {
         let recovered = try recoverPendingDeletions().contains(checksum)
         let prepared = try database.withAssetReservation {
             try bindCatalog()
+            guard try database.libraryManagedRoot() else { return false }
             if try database.hasAttachedAssetRecord(checksum: checksum) { return false }
             let records = try database.loadAssetRecordsChecked(checksum: checksum)
             // Validate every row before journaling/deleting even the first one.
@@ -360,7 +406,13 @@ final class AssetStore {
     func recoverPendingDeletions() throws -> Set<String> {
         try database.withAssetReservation {
             try bindCatalog()
+            // bindCatalog quarantines legacy work in this transaction, before
+            // loading anything that might authorize an unlink.
             let entries = try database.loadAssetDeletionInventory()
+            let managed = try database.libraryManagedRoot()
+            guard entries.isEmpty || managed else {
+                throw AssetStoreError.storageFailure("Unreconciled legacy cleanup inventory")
+            }
             // Complete validation BEFORE unlinking any file. A malformed journal,
             // symlink/directory, or unexpected live owner makes recovery fail closed.
             let urls = try entries.map { entry -> URL in
@@ -382,6 +434,7 @@ final class AssetStore {
     }
 
     private func deletionURL(_ entry: AssetDeletionEntry) throws -> URL {
+        try database.requireAssetPathNotQuarantined(checksum: entry.checksum, path: entry.relativePath)
         guard Self.validContentPath(entry.relativePath, checksum: entry.checksum) else {
             throw AssetStoreError.invalidPath(entry.relativePath)
         }
@@ -414,6 +467,8 @@ final class AssetStore {
     /// Moving/copying a catalog/root requires explicit reconciliation, not adoption.
     private func bindCatalog() throws {
         _ = try resolvedURL(forRelativePath: ".catalog-validation")
+        try database.classifyAssetRoot(canonicalBaseDirectory,
+            markerExists: FileManager.default.fileExists(atPath: catalogMarkerURL.path))
         let identity = try database.bindAssetRoot(canonicalBaseDirectory)
         let expected = Data(identity.utf8)
         let marker = catalogMarkerURL
@@ -426,6 +481,7 @@ final class AssetStore {
         guard try Data(contentsOf: marker) == expected else {
             throw AssetStoreError.storageFailure("Asset root belongs to another metadata catalog")
         }
+        try database.quarantineLegacyAssetDeletions()
     }
 
     /// JSON manifests are independent catalogs, not SQLite transactions. Pin
@@ -450,7 +506,11 @@ final class AssetStore {
     func withCatalogReservation<T>(_ work: () throws -> T) throws -> T {
         try database.withAssetReservation {
             try bindCatalog()
-            return try work()
+            let result = try work()
+            // v1 registration changes the mode inside work(). Commit the durable
+            // quarantine in that SAME transaction, without editing its caller.
+            try database.quarantineLegacyAssetDeletions()
+            return result
         }
     }
 
