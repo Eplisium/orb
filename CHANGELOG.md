@@ -6,18 +6,42 @@ All notable changes to ORB are listed here. The format is based on [Keep a Chang
 
 ### Added
 - **Releases:** tagged builds (`v*`) publish an optimized, ad-hoc signed `ORB.app` zip with a `SHA256SUMS` file on the GitHub Releases page.
-- **Storage:** `DatabaseManager.compact()` checkpoints the WAL and vacuums the database, safe to run off the main thread.
+- **Storage:** Settings → Advanced → Storage & Diagnostics shows what ORB's data uses on disk, reveals it in Finder, copies a key-free diagnostics summary, and has **Compact Database** (reclaims space left by deleted conversations and images, with before/after sizes).
+- **Chat:** syntax highlighting for closed code blocks in common languages, with a scroll hint for long lines; Choose Model (⌘L), Find in Conversation (⇧⌘F), Continue for replies cut off at the length limit, and Up in an empty composer to edit the last message.
+- **Chat and Agent:** message delete is undoable, and "Delete with reply" removes a question together with its answer. Session deletes from the sidebar row are undoable too.
+- **Agent:** `run_command` shows live output in its card while it runs, takes an optional timeout (default 120 s, max 30 min) and returns partial output on timeout. Quitting ORB stops every command the agent started.
+- **Agent:** `write_file` reports created/modified with a line diff, shown in the approval sheet before writing; tool cards show commands, scripts and file contents readably instead of escaped JSON.
+- **Agent:** while a tool waits for approval the run strip and sidebar say so, the Agent sidebar item shows a shield badge, and a notification reaches you in another app.
+- **MCP:** live server status, Apply for edited servers, an environment and Keychain-secret editor, a working folder setting, stderr in failure messages, and paging through large tool/resource/prompt lists.
+- **Model browser:** the whole catalog (image, video, speech and embedding models too) with relevance-ranked search, Batch API variants (hidden by default), p50 latency/throughput with percentiles, Markdown descriptions, and an API tab with curl/Python/TypeScript snippets.
+- **Generate:** saved videos play inside the studio with poster thumbnails; an audio player in Speech; an embeddings similarity heat map; estimated pre-run cost; per-studio prompt history and "Open in Studio"; drag and drop into studios; Dismiss for finished jobs and "Show in Library".
+- **Test Suite:** text-mode custom tests with an expected output, editing and confirmed delete; time to first token and tokens/second for text probes (stored with results); side-by-side Markdown answers; a response column in CSV export.
+- **App:** Check for Updates… plus a quiet daily release check, Lock ORB (⌃⌘L), a complete grouped shortcut sheet, and a Help menu that opens the project README, issues and release notes.
 
 ### Changed
 - **Packaging:** `build_app.sh` packages the optimized release configuration by default; `--debug` opts in to the unoptimized build. CI compiles and packages the release configuration.
 - **Info.plist:** adds an Apple Events usage description (Agent automation, only with Computer Access on), the Developer Tools app category, a copyright line, and the development region.
 - **CI:** runs on `main` are no longer cancelled by a newer push (only superseded pull-request runs are). The build fails if unique compiler warnings rise above `scripts/warnings-baseline.txt`.
+- **App shell:** ORB has a single main window; menu commands and `orb://` links reuse it (or reopen it after ⌘W). ⌘F searches the current section: the collection on screen in the browser, sessions in Chat and Agent.
+- **Defaults:** Chat, Agent, Test Suite and ⌘N pick their default model from the live catalog (pinned, then favourites, then recents, then a current model from a well-known family) instead of a hard-coded ID, and never a batch, image or embedding model.
+- **Files:** opens on the local Library, which no longer shows the "add a key" banner; uploading still needs a key.
+- **Images:** Enhance with AI works without an Agent-pinned model (it uses the Chat default or a fast text model) and says which model it will use.
+- **Agent:** a tool call cut off by the output limit goes back to the model as an error and the run continues; only repeated overflows stop the run. Approve is a click or ⌘Return, never plain Return. File tools ask before writing outside the workspace or touching credential or code-running locations.
+- **Settings:** OP Mode and App Lock live in General → Security; Network timeouts moved into Advanced. The text-size control was withdrawn until every view scales.
+- **Model menu:** reads "Remove from Compare" for a compared model and disables Chat with Model for models that cannot chat.
 
 ### Fixed
 - **Launch speed:** messages, conversations, and interrupted-stream recovery use indexes, so opening ORB with a long chat history no longer scans the whole messages table once per conversation.
 - **Database safety:** ORB refuses to open a database written by a newer version (it shows an error and runs with a temporary database instead) and never lowers the stored schema version.
 - **Database safety:** a write from one thread can no longer be rolled back by another thread's failed asset or Library transaction.
 - **MCP / tool cards:** top-level JSON strings are escaped correctly, and NaN or infinite numbers are written as `null` instead of invalid JSON.
+- **Launch speed:** Chat and Agent load every transcript in one query instead of one query per conversation.
+- **Chat:** a failed or stopped regeneration restores the original reply; sends and finished replies save only the changed rows; HEIC/BMP/TIFF attachments are re-encoded (long edge 2048 px) off the main thread; text and code files are inlined with an honest size cap; sent messages show image thumbnails and file chips; the context gauge starts from the last reported usage; sessions are ordered by last activity.
+- **Agent:** the status reads "Waiting for your approval" instead of "Running tool" while a prompt is open; error hints name only controls that exist in Agent; fetch_url stops at its size cap and skips binary downloads; the system prompt lists only advertised tools.
+- **Model browser:** endpoint latency/throughput decode the current API shape; the cached catalog shows at once and refreshes when stale; ⌘F and "reveal model" keep the current collection, filters and search; Agent is disabled for models without tool calling.
+- **Generate:** catalogs load without a key; Generate Video frees up once the job is accepted (up to four polling jobs); embedding and rerank runs track progress separately; file reads happen off the main thread; one no-key notice per studio.
+- **Test Suite:** comparisons and failed or cancelled runs record partial spend, the spend ceiling is checked after every agent turn (30-turn budget), latency excludes approval waits, exact-output probes can pass, the leaderboard ignores cancelled runs, and custom-test results open.
+- **Settings and shell:** the sidebar credit balance refreshes after spending; App Lock prompts once per lock and treats Cancel as cancel; the onboarding sheet never appears over the lock screen; the in-app Reduce Motion setting reaches every animation.
 
 ## [1.1.0] — 2026-11-13
 
