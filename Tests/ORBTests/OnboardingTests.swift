@@ -443,7 +443,8 @@ struct NeedsKeyContentTests {
             let c = NeedsKeyContent.make(for: studio)
             #expect(!c.title.isEmpty)
             #expect(!c.message.isEmpty)
-            #expect(c.actionTitle == "Open Settings")
+            #expect(c.actionTitle == "Add API Key…")
+            #expect(c.signInTitle == "Sign in with OpenRouter")
             #expect(!c.systemImage.isEmpty)
             titles.insert(c.title)
         }

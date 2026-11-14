@@ -9,6 +9,8 @@ import SwiftUI
 enum ORBShell {
     /// One-line fallback to the old hidden title bar window style.
     static let useHiddenTitleBar = false
+    /// The single main window's scene id (`openWindow(id:)`).
+    static let mainWindowID = "main"
     static let minimumWindowSize = CGSize(width: 960, height: 640)
     static let startSectionDefaultsKey = "orb.startSection"
     static let sectionStorageKey = "orb.shell.section"
@@ -60,11 +62,82 @@ enum ShellShortcuts {
         let title: String
     }
 
-    /// Generated from `ShortcutCommand` so it always matches the menus.
-    static var cheatSheet: [Entry] {
-        var entries = [Entry(keys: "⌘1…9", title: "Jump to section (sidebar order)")]
-        entries += ShortcutCommand.allCases.map { Entry(keys: $0.combo.display, title: $0.title) }
-        return entries
+    struct EntryGroup: Equatable, Identifiable {
+        let title: String
+        let entries: [Entry]
+        var id: String { title }
+    }
+
+    /// The ⌘/ sheet, grouped by menu. Built from `ShortcutCommand` and
+    /// `ConversationShortcuts`, the same tables the menus bind, so every
+    /// bound chord appears exactly once.
+    static var cheatSheetGroups: [EntryGroup] {
+        func entry(_ c: ShortcutCommand) -> Entry { Entry(keys: c.combo.display, title: c.title) }
+        let conversation: [(KeyboardShortcut, String)] = [
+            (ConversationShortcuts.stop, "Stop response"),
+            (ConversationShortcuts.regenerate, "Regenerate response"),
+            (ConversationShortcuts.copyLastReply, "Copy last reply"),
+            (ConversationShortcuts.export, "Export conversation"),
+            (ConversationShortcuts.searchSessions, "Search sessions"),
+        ]
+        return [
+            EntryGroup(title: "General", entries: [
+                entry(.palette), entry(.find), entry(.refresh), entry(.settings),
+                entry(.shortcuts), entry(.lockNow),
+            ]),
+            EntryGroup(title: "Go", entries:
+                [Entry(keys: "⌘1…9", title: "Jump to section (sidebar order)"),
+                 entry(.sectionEmbeddings), entry(.sectionTestSuite), entry(.toggleSidebar)]),
+            EntryGroup(title: "File", entries: [entry(.newChat), entry(.newAgent)]),
+            EntryGroup(title: "Conversation", entries: conversation.map {
+                Entry(keys: KeyCombo($0.0).display, title: $0.1)
+            }),
+            EntryGroup(title: "Model", entries: [
+                entry(.toggleFavorite), entry(.copyModelID), entry(.chatWithModel), entry(.openCompare),
+            ]),
+        ]
+    }
+
+    /// Every cheat-sheet row, in display order.
+    static var cheatSheet: [Entry] { cheatSheetGroups.flatMap(\.entries) }
+
+    /// Sidebar tooltip: "Embeddings (⌘0)".
+    static func sidebarHelp(for section: SidebarSection) -> String {
+        shortcutDisplay(for: section).map { "\(section.title) (\($0))" } ?? section.title
+    }
+}
+
+/// What ⌘F does where you are. macOS users expect Find to search the
+/// current context: the model list in a browser section (without leaving
+/// Favorites or New This Week), the session list in Chat or Agent, and
+/// nothing in sections that have no search.
+enum FindTarget: Equatable {
+    case browserSearch(SidebarSection)
+    case sessionSearch
+    case unavailable
+
+    var menuTitle: String {
+        switch self {
+        case .browserSearch: return "Find Models"
+        case .sessionSearch: return "Find Sessions"
+        case .unavailable: return "Find"
+        }
+    }
+}
+
+enum FindRouting {
+    /// - Parameters:
+    ///   - section: the visible section, when known.
+    ///   - hasSessionSearch: a Chat/Agent view is focused and offers
+    ///     session search (its `ConversationActions.searchSessions`).
+    static func target(for section: SidebarSection?, hasSessionSearch: Bool) -> FindTarget {
+        guard let section else {
+            // Unknown section: prefer the conversation that has focus.
+            return hasSessionSearch ? .sessionSearch : .browserSearch(.allModels)
+        }
+        if section.isBrowser { return .browserSearch(section) }
+        if section == .chat || section == .agent { return hasSessionSearch ? .sessionSearch : .unavailable }
+        return .unavailable
     }
 }
 
@@ -122,6 +195,9 @@ final class ShellController: ObservableObject {
     /// The browser's selected model, mirrored for the Model menu.
     @Published var focusedModelID: String?
     @Published var focusedModelIsFavorite = false
+    /// The main window's visible section (set by ContentView), so menus
+    /// can act on the current context. nil until the window reports it.
+    @Published var currentSection: SidebarSection?
     func send(_ action: ShellAction) { pending = ShellRequest(action: action) }
 
     /// Routes an `orb://` URL; returns false (and does nothing) when the
@@ -178,7 +254,7 @@ struct AccountChipState: Equatable {
         if let remaining {
             let low = remaining < lowBalanceThreshold
             return AccountChipState(
-                title: String(format: "$%.2f", remaining),
+                title: ORBMoney.format(remaining),
                 subtitle: low ? "Credits low" : "Credits remaining",
                 isLow: low
             )

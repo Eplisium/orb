@@ -38,13 +38,34 @@ enum ORBMotion {
     }
 }
 
+/// The in-app "Animations: Reduce" override, published by `orbAppearance()`.
+/// Views combine it with the system flag through `ORBMotion.reduces`.
+private struct ORBForcesReducedMotionKey: EnvironmentKey { static let defaultValue = false }
+extension EnvironmentValues {
+    var orbForcesReducedMotion: Bool {
+        get { self[ORBForcesReducedMotionKey.self] }
+        set { self[ORBForcesReducedMotionKey.self] = newValue }
+    }
+}
+
+extension ORBMotion {
+    /// Reduce Motion as views see it: the OS setting or the in-app override.
+    static func reduces(system: Bool, forced: Bool) -> Bool { system || forced }
+
+    /// The animation an `orbAnimation` modifier applies.
+    static func resolvedAnimation(_ token: Token, system: Bool, forced: Bool) -> Animation? {
+        token.animation(reduceMotion: reduces(system: system, forced: forced))
+    }
+}
+
 private struct ORBAnimationModifier<V: Equatable>: ViewModifier {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.orbForcesReducedMotion) private var forcedReduceMotion
     let token: ORBMotion.Token
     let value: V
 
     func body(content: Content) -> some View {
-        content.animation(token.animation(reduceMotion: reduceMotion), value: value)
+        content.animation(ORBMotion.resolvedAnimation(token, system: reduceMotion, forced: forcedReduceMotion), value: value)
     }
 }
 

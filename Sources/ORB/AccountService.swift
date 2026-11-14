@@ -18,6 +18,14 @@ final class AccountService: ObservableObject {
     @Published var hasManagementKey = false
     /// Public refresh identity for views; never contains credential bytes.
     @Published private(set) var credentialRevision = UUID()
+    /// When `/credits` last answered successfully for the current key.
+    @Published private(set) var lastCreditsFetch: Date?
+
+    /// A balance older than this is refetched when ORB regains focus.
+    static let creditsTTL: TimeInterval = 60
+    /// Spending (a new ledger revision) refetches at most this often.
+    static let spendRefreshInterval: TimeInterval = 10
+    private var lastLedgerRevisionSeen: Int?
 
     typealias DataLoader = (URLRequest) async throws -> (Data, URLResponse)
 
@@ -25,6 +33,7 @@ final class AccountService: ObservableObject {
     private let profile: CredentialProfile
     private let secretStore: CredentialSecretStore
     private let dataLoader: DataLoader
+    private let now: () -> Date
     /// Bumped whenever the management credential changes or disappears.
     /// In-flight requests capture it and drop their result if it moved, so a
     /// slow response for a replaced/removed key can't publish into the new
@@ -43,8 +52,10 @@ final class AccountService: ObservableObject {
             managementKeyReference: CredentialRole.management.keychainAccount
         ),
         secretStore: CredentialSecretStore = KeychainCredentialStore(),
-        dataLoader: @escaping DataLoader = { try await URLSession.shared.data(for: $0) }
+        dataLoader: @escaping DataLoader = { try await URLSession.shared.data(for: $0) },
+        now: @escaping () -> Date = Date.init
     ) {
+        self.now = now
         self.profile = profile
         self.secretStore = secretStore
         self.dataLoader = dataLoader
@@ -123,10 +134,41 @@ final class AccountService: ObservableObject {
         refreshManagementKeyPresence()
         guard generation == credentialGeneration else { return }
         switch result {
-        case .success(let value): credits = value
+        case .success(let value):
+            credits = value
+            lastCreditsFetch = now()
         case .failure(let failure): creditsError = failure.message
         }
         isLoadingCredits = false
+    }
+
+    /// Whether the sidebar balance should be refetched now.
+    /// - Parameter ledgerRevision: `UsageLedger.revision`; a change means ORB
+    ///   just recorded spend, so the balance is out of date — but at most
+    ///   once per `spendRefreshInterval`, so a burst of requests is one fetch.
+    func shouldRefreshCredits(now date: Date, ledgerRevision: Int? = nil) -> Bool {
+        guard hasManagementKey, !isLoadingCredits else { return false }
+        guard let last = lastCreditsFetch, credits != nil else { return true }
+        let age = date.timeIntervalSince(last)
+        if let ledgerRevision, let seen = lastLedgerRevisionSeen, ledgerRevision != seen {
+            return age >= Self.spendRefreshInterval || age < 0
+        }
+        return age >= Self.creditsTTL || age < 0
+    }
+
+    /// Records the ledger revision the current balance already reflects.
+    func noteLedgerRevision(_ revision: Int) { lastLedgerRevisionSeen = revision }
+
+    /// True while the balance predates spend ORB has recorded since.
+    func balanceLags(ledgerRevision: Int) -> Bool {
+        lastLedgerRevisionSeen.map { $0 != ledgerRevision } ?? false
+    }
+
+    /// Fetches credits when `shouldRefreshCredits` says so.
+    func refreshCreditsIfStale(ledgerRevision: Int? = nil) async {
+        guard shouldRefreshCredits(now: now(), ledgerRevision: ledgerRevision) else { return }
+        if let ledgerRevision { lastLedgerRevisionSeen = ledgerRevision }
+        await fetchCredits()
     }
 
     // MARK: - Activity
@@ -181,6 +223,7 @@ final class AccountService: ObservableObject {
         credentialGeneration &+= 1
         credentialRevision = UUID()
         credits = nil
+        lastCreditsFetch = nil
         activity = []
         creditsError = nil
         activityError = nil

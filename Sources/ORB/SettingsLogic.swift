@@ -28,23 +28,23 @@ struct AppearancePrefs: Equatable {
             }
         }
 
-        var dynamicTypeSize: DynamicTypeSize {
-            switch self {
-            case .small: return .medium
-            case .standard: return .large
-            case .large: return .xLarge
-            case .xLarge: return .xxLarge
-            }
-        }
+        /// Whether Settings offers the control. macOS has no Dynamic Type,
+        /// so a text-size setting only works where ORB scales fonts itself
+        /// (`.orbFont(size:)` / `.orbFont(_ style:)`); hundreds of views still
+        /// use fixed text styles. Until every view reads `\.orbTextScale`
+        /// the control stays hidden and the effective scale is 1, rather than
+        /// offering a setting that enlarges only some of the text.
+        static let isOffered = false
+
+        /// The scale views actually receive.
+        var effectiveScale: CGFloat { Self.isOffered ? scale : 1 }
     }
 
     enum Density: String, CaseIterable, Identifiable {
         case comfortable, compact
         var id: String { rawValue }
         var title: String { rawValue.capitalized }
-        var rowPadding: CGFloat { self == .compact ? 3 : 7 }
-        /// Never below the 28 pt hit target the design system uses.
-        var minimumRowHeight: CGFloat { self == .compact ? 28 : 36 }
+        /// Density sets the control size app-wide (buttons, pickers, fields).
         var controlSize: ControlSize { self == .compact ? .small : .regular }
     }
 
@@ -136,18 +136,22 @@ struct AppearanceModifier: ViewModifier {
     @AppStorage(AppearancePrefs.schemeKey) private var scheme = AppearancePrefs.Scheme.system.rawValue
     @AppStorage(AppearancePrefs.textSizeKey) private var textSize = AppearancePrefs.TextSize.standard.rawValue
     @AppStorage(AppearancePrefs.densityKey) private var density = AppearancePrefs.Density.comfortable.rawValue
+    @AppStorage(AppearancePrefs.motionKey) private var motion = AppearancePrefs.MotionOverride.system.rawValue
 
     func body(content: Content) -> some View {
         let prefs = AppearancePrefs(
             scheme: .init(rawValue: scheme) ?? .system,
             textSize: .init(rawValue: textSize) ?? .standard,
-            density: .init(rawValue: density) ?? .comfortable
+            density: .init(rawValue: density) ?? .comfortable,
+            reduceMotion: .init(rawValue: motion) ?? .system
         )
         content
             .onAppear { AppAppearance.apply(prefs.scheme) }
             .onChange(of: scheme) { _, newValue in AppAppearance.apply(.init(rawValue: newValue) ?? .system) }
-            .dynamicTypeSize(prefs.textSize.dynamicTypeSize)
-            .environment(\.orbTextScale, prefs.textSize.scale)
+            .environment(\.orbTextScale, prefs.textSize.effectiveScale)
+            // "Reduce" reaches every orbAnimation and the toast host, not
+            // only the views that consult ORBMotion.looping/oneShot.
+            .environment(\.orbForcesReducedMotion, prefs.reduceMotion == .on)
             .controlSize(prefs.density.controlSize)
     }
 }
@@ -159,8 +163,17 @@ extension View {
 // MARK: Panes
 
 enum SettingsPane: String, CaseIterable, Identifiable {
-    case general, accounts, usage, mcp, network, advanced
+    case general, accounts, usage, mcp, advanced
+    /// Retired: network timeouts now live in Advanced. Kept so a stored or
+    /// linked "network" value still decodes; never shown as a tab.
+    case network
+
+    static var allCases: [SettingsPane] { [.general, .accounts, .usage, .mcp, .advanced] }
+
     var id: String { rawValue }
+
+    /// The tab that actually renders this pane.
+    var visiblePane: SettingsPane { self == .network ? .advanced : self }
 
     var title: String {
         switch self {
@@ -197,13 +210,13 @@ enum SettingsPane: String, CaseIterable, Identifiable {
         case "Credits", "Usage", "Activity": return .usage
         case "Providers": return .advanced
         case "MCP Servers": return .mcp
-        case "Advanced": return .network
+        case "Advanced", "Network": return .advanced
         default: return .general
         }
     }
 
     static func restore(from defaults: UserDefaults = .standard) -> SettingsPane {
-        defaults.string(forKey: storageKey).flatMap(SettingsPane.init(rawValue:)) ?? .general
+        (defaults.string(forKey: storageKey).flatMap(SettingsPane.init(rawValue:)) ?? .general).visiblePane
     }
 
     func store(in defaults: UserDefaults = .standard) { defaults.set(rawValue, forKey: Self.storageKey) }
@@ -285,7 +298,7 @@ enum UsageSeries {
     static func accessibilitySummary(_ series: [UsagePoint]) -> String {
         let total = series.reduce(0) { $0 + $1.cost }
         guard total > 0, let peak = series.max(by: { $0.cost < $1.cost }) else { return "No spend recorded." }
-        return "Total \(UsageSettingsView.money(total)) over \(series.count) days. Highest on \(peak.label) at \(UsageSettingsView.money(peak.cost))."
+        return "Total \(ORBMoney.format(total)) over \(series.count) days. Highest on \(peak.label) at \(ORBMoney.format(peak.cost))."
     }
 }
 
@@ -337,8 +350,8 @@ enum AccountPanel: CaseIterable {
     /// Shown in place of the panel when its key is missing.
     var missingKeyMessage: String {
         switch requiredRole {
-        case .management: return "Add a management key in Settings → Accounts to see credits and activity."
-        case .inference: return "Add an API key in Settings → Accounts to see details about it."
+        case .management: return "Add a management key in Settings → Accounts & Keys to see credits and activity."
+        case .inference: return "Add an API key in Settings → Accounts & Keys to see details about it."
         }
     }
 
@@ -385,15 +398,15 @@ struct PriceUnitSettingsSection: View {
     @AppStorage(PriceUnit.defaultsKey) private var unit: PriceUnit = .perMillion
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Label("Prices", systemImage: "dollarsign.circle").font(.title3.weight(.semibold))
+        VStack(alignment: .leading, spacing: ORBMetrics.spacingSM) {
+            SettingsSectionHeader("Prices", symbol: "dollarsign.circle",
+                                  subtitle: "Applies to the model list, details, Compare and exports. Filters stay in $ per 1M tokens.")
             Picker("Show token prices", selection: $unit) {
                 ForEach(PriceUnit.allCases) { Text($0.title).tag($0) }
             }
             .pickerStyle(.segmented)
+            .labelsHidden()
             .frame(maxWidth: 320)
-            Text("Applies to the model list, details, Compare and exports. Filters stay in $ per 1M tokens.")
-                .font(.caption).foregroundStyle(.secondary)
         }
     }
 }
@@ -406,10 +419,10 @@ struct AppearanceSettingsSection: View {
     @AppStorage(AppearancePrefs.motionKey) private var motion = AppearancePrefs.MotionOverride.system.rawValue
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            Label("Appearance", systemImage: "paintpalette").font(.title3.weight(.semibold))
-            // One label column and one control column, so the four controls
-            // line up instead of each starting where its own label ends.
+        VStack(alignment: .leading, spacing: ORBMetrics.spacingSM) {
+            SettingsSectionHeader("Appearance", symbol: "paintpalette")
+            // One label column and one control column, so the controls line
+            // up instead of each starting where its own label ends.
             Grid(alignment: .leadingFirstTextBaseline, horizontalSpacing: 14, verticalSpacing: 12) {
                 GridRow {
                     Text("Theme")
@@ -417,15 +430,17 @@ struct AppearanceSettingsSection: View {
                         ForEach(AppearancePrefs.Scheme.allCases) { Text($0.title).tag($0.rawValue) }
                     }.pickerStyle(.segmented)
                 }
-                GridRow {
-                    Text("Text size")
-                    Picker("Text size", selection: $textSize) {
-                        ForEach(AppearancePrefs.TextSize.allCases) { Text($0.title).tag($0.rawValue) }
+                if AppearancePrefs.TextSize.isOffered {
+                    GridRow {
+                        Text("Text size")
+                        Picker("Text size", selection: $textSize) {
+                            ForEach(AppearancePrefs.TextSize.allCases) { Text($0.title).tag($0.rawValue) }
+                        }
                     }
                 }
                 GridRow {
-                    Text("Density")
-                    Picker("Density", selection: $density) {
+                    Text("Controls")
+                    Picker("Controls", selection: $density) {
                         ForEach(AppearancePrefs.Density.allCases) { Text($0.title).tag($0.rawValue) }
                     }.pickerStyle(.segmented)
                 }
@@ -438,8 +453,9 @@ struct AppearanceSettingsSection: View {
             }
             .labelsHidden()
             .frame(maxWidth: 380, alignment: .leading)
-            Text("ORB always follows your Mac's Reduce Motion setting. “Reduce” turns animations down even when the system hasn't.")
-                .font(.callout).foregroundStyle(.secondary)
+            Text("Compact makes buttons, pickers and fields smaller. ORB always follows your Mac's Reduce Motion setting; “Reduce” turns animations down even when the system hasn't.")
+                .orbFont(.footnote).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
         }
     }
 }
@@ -451,8 +467,8 @@ struct SaveStatusLabel: View {
     var body: some View {
         if status != .idle {
             Label(status.text, systemImage: status.symbol)
-                .font(.callout)
-                .foregroundStyle({ if case .failed = status { return Color.red } else { return Color.secondary } }())
+                .orbFont(.footnote)
+                .foregroundStyle({ if case .failed = status { return ORBTheme.danger } else { return Color.secondary } }())
                 .accessibilityElement(children: .combine)
         }
     }
@@ -463,11 +479,10 @@ struct NotificationSettingsSection: View {
     @AppStorage(JobNotification.soundKey) private var sound = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Label("Notifications", systemImage: "bell").font(.title3.weight(.semibold))
+        VStack(alignment: .leading, spacing: ORBMetrics.spacingSM) {
+            SettingsSectionHeader("Notifications", symbol: "bell",
+                                  subtitle: "ORB notifies you when a long job finishes while you are in another app or page. It stays quiet if you are already looking at it.")
             Toggle("Play a sound when a job finishes", isOn: $sound)
-            Text("ORB notifies you when a long job finishes while you are in another app or page. It stays quiet if you are already looking at it.")
-                .font(.callout).foregroundStyle(.secondary)
         }
     }
 }

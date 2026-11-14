@@ -95,7 +95,7 @@ struct ManagementKeyPanelTests {
         let store = InMemoryCredentialStore()
         let service = makeService(store: store)
         var panel = ManagementKeyPanel()
-        panel.draftKey = "  fake-management-key-for-tests  "
+        panel.draftKey = "  sk-or-v1-fake-management-key-for-tests-0000000  "
 
         panel.saveDraft(into: service)
 
@@ -116,7 +116,7 @@ struct ManagementKeyPanelTests {
         _ = backing.saveSecret("previous-management-key", forReference: CredentialRole.management.keychainAccount)
 
         var panel = ManagementKeyPanel()
-        panel.draftKey = "replacement-key"
+        panel.draftKey = "sk-or-v1-replacement-management-key-000000000"
         panel.saveDraft(into: service)
 
         #expect(panel.actionError?.contains("Keychain error") == true)

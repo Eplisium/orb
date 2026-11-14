@@ -198,6 +198,7 @@ final class OnboardingController: ObservableObject {
     private let makeSignIn: () -> any OnboardingSignIn
     private let reviewMode: Bool
     private let openURL: (URL) -> Void
+    private let activateApp: () -> Void
     private var activeSignIn: (any OnboardingSignIn)?
     private var signInTask: Task<Void, Error>?
 
@@ -208,8 +209,10 @@ final class OnboardingController: ObservableObject {
         outcomeStore: any OnboardingOutcomeStore = UserDefaultsOnboardingStore(),
         makeSignIn: (() -> any OnboardingSignIn)? = nil,
         reviewMode: Bool = OnboardingGate.isReviewMode(),
-        openURL: @escaping (URL) -> Void = { NSWorkspace.shared.open($0) }
+        openURL: @escaping (URL) -> Void = { NSWorkspace.shared.open($0) },
+        activateApp: (() -> Void)? = nil
     ) {
+        self.activateApp = activateApp ?? { OpenRouterSignInModel.bringORBToFront() }
         self.credentials = credentials
         self.outcomeStore = outcomeStore
         self.makeSignIn = makeSignIn ?? { PKCEOnboardingSignIn(store: credentials) }
@@ -266,6 +269,9 @@ final class OnboardingController: ObservableObject {
             try await task.value
             if credentials.hasSecret(forReference: CredentialRole.inference.keychainAccount) {
                 flow.inferenceKeySaved()
+                // The user approved in the browser; bring them back to ORB,
+                // where the step now shows "Key saved".
+                activateApp()
             } else {
                 flow.signInFailed("Sign-in finished but no key was saved. Paste a key instead.")
             }
@@ -324,7 +330,16 @@ struct NeedsKeyContent: Equatable {
     var title: String
     var message: String
     var systemImage: String
+    /// Primary action: opens Settings on the Accounts & Keys pane.
     var actionTitle: String
+    /// Secondary action: the one-click browser sign-in.
+    var signInTitle: String = NeedsKeyContent.signInTitle
+
+    static let addKeyTitle = "Add API Key…"
+    static let signInTitle = "Sign in with OpenRouter"
+    /// The pane the primary action opens. Every "Settings → …" hint in ORB
+    /// names it by `SettingsPane.accounts.title`.
+    static let settingsPane: SettingsPane = .accounts
 
     static func make(for studio: NeedsKeyStudio) -> NeedsKeyContent {
         switch studio {
@@ -333,21 +348,21 @@ struct NeedsKeyContent: Equatable {
                 title: "Add a key to start chatting",
                 message: "Chat sends your messages to OpenRouter, so it needs an inference API key. Your past conversations stay readable without one.",
                 systemImage: "bubble.left.and.text.bubble.right",
-                actionTitle: "Open Settings"
+                actionTitle: addKeyTitle
             )
         case .agent:
             return NeedsKeyContent(
                 title: "Add a key to run the agent",
                 message: "The agent calls models and tools through OpenRouter, so it needs an inference API key before it can work.",
                 systemImage: "wand.and.stars",
-                actionTitle: "Open Settings"
+                actionTitle: addKeyTitle
             )
         case .generate:
             return NeedsKeyContent(
                 title: "Add a key to generate",
                 message: "Images, video, speech and embeddings are generated through OpenRouter and need an inference API key.",
                 systemImage: "photo.on.rectangle.angled",
-                actionTitle: "Open Settings"
+                actionTitle: addKeyTitle
             )
         }
     }
@@ -368,16 +383,23 @@ extension SidebarSection {
 }
 
 /// Wraps an existing studio view; adds the banner above it and nothing else.
+/// Every gated section (Chat, Agent, Images, Video, Speech, Files,
+/// Embeddings) shows the same banner with the same two actions.
 struct NeedsKeyGate<Content: View>: View {
     let studio: NeedsKeyStudio
     @ViewBuilder var content: () -> Content
     @StateObject private var status = KeyStatusModel()
+    @ObservedObject private var signIn = OpenRouterSignInModel.shared
     @Environment(\.openSettings) private var openSettings
 
     var body: some View {
         VStack(spacing: 0) {
             if status.needsKey {
-                NeedsKeyBanner(content: .make(for: studio)) { SettingsPane.accounts.store(); openSettings() }
+                NeedsKeyBanner(content: .make(for: studio), signIn: signIn) {
+                    NeedsKeyContent.settingsPane.store()
+                    openSettings()
+                }
+                .transition(.opacity)
             }
             content()
         }
@@ -385,36 +407,74 @@ struct NeedsKeyGate<Content: View>: View {
         .onReceive(NotificationCenter.default.publisher(for: NSWindow.didBecomeKeyNotification)) { _ in
             status.refresh()
         }
+        // A browser sign-in from any banner or Settings clears every banner.
+        .onChange(of: signIn.completedCount) { _, _ in status.refresh() }
     }
 }
 
 struct NeedsKeyBanner: View {
     let content: NeedsKeyContent
+    @ObservedObject var signIn: OpenRouterSignInModel
     let action: () -> Void
 
     var body: some View {
         HStack(alignment: .center, spacing: ORBMetrics.spacingSM) {
-            Image(systemName: content.systemImage)
-                .font(.title2)
-                .foregroundStyle(ORBTheme.accent)
-                .accessibilityHidden(true)
+            ZStack {
+                Circle().fill(ORBTheme.accentSubtle)
+                Image(systemName: content.systemImage)
+                    .orbFont(.title3)
+                    .foregroundStyle(ORBTheme.accent)
+            }
+            .frame(width: 40, height: 40)
+            .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: 2) {
-                Text(content.title).font(ORBFont.headline)
+                Text(content.title)
+                    .orbFont(.headline)
+                    .accessibilityAddTraits(.isHeader)
                 Text(content.message)
-                    .font(ORBFont.footnote)
+                    .orbFont(.footnote)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
+                if let failure = signIn.failureMessage {
+                    Label(failure, systemImage: "exclamationmark.triangle.fill")
+                        .orbFont(.caption)
+                        .foregroundStyle(ORBTheme.danger)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
             }
             Spacer(minLength: ORBMetrics.spacingSM)
-            Button(content.actionTitle, action: action)
-                .buttonStyle(.borderedProminent)
-                .tint(ORBTheme.accent)
-                .help("Open Settings to add your OpenRouter API key")
+            if signIn.isWaiting {
+                HStack(spacing: ORBMetrics.spacingXS) {
+                    ProgressView().controlSize(.small)
+                    Text("Approve in your browser…").orbFont(.footnote).foregroundStyle(.secondary)
+                    Button("Cancel") { signIn.cancel() }
+                }
+            } else {
+                ViewThatFits(in: .horizontal) {
+                    HStack(spacing: ORBMetrics.spacingXS) { buttons }
+                    VStack(alignment: .trailing, spacing: ORBMetrics.spacingXXS) { buttons }
+                }
+            }
         }
-        .padding(ORBMetrics.spacingSM)
+        .padding(.horizontal, ORBMetrics.spacingMD)
+        .padding(.vertical, ORBMetrics.spacingSM)
         .background(ORBTheme.accentSubtle)
-        .overlay(alignment: .bottom) { Divider() }
+        .overlay(alignment: .bottom) { Rectangle().fill(ORBTheme.stroke).frame(height: 1) }
         .accessibilityElement(children: .contain)
+    }
+
+    @ViewBuilder
+    private var buttons: some View {
+        Button {
+            Task { await signIn.signIn() }
+        } label: {
+            Label(content.signInTitle, systemImage: "person.badge.key")
+        }
+        .help("Opens openrouter.ai in your browser to create a key for ORB. No copy and paste needed.")
+        Button(content.actionTitle, action: action)
+            .buttonStyle(.borderedProminent)
+            .tint(ORBTheme.accent)
+            .help("Open Settings → \(NeedsKeyContent.settingsPane.title) to paste an OpenRouter API key")
     }
 }
 
@@ -571,8 +631,10 @@ struct OnboardingView: View {
                 } else if let error = controller.managementError {
                     Text(error).font(ORBFont.caption).foregroundStyle(ORBTheme.danger)
                 }
+                Link("Create a management key on openrouter.ai →", destination: OpenRouterLinks.managementKeys)
+                    .font(ORBFont.footnote)
             }
-            Text("You can add or change either key later in Settings.")
+            Text("You can add or change either key later in Settings → \(SettingsPane.accounts.title).")
                 .font(ORBFont.caption).foregroundStyle(.secondary)
         }
     }

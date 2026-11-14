@@ -106,7 +106,11 @@ enum ORBPalette {
     }()
 }
 
-// MARK: - Accent choice (Settings > Appearance, persisted as `orb.accent`)
+// MARK: - Accent choice (persisted as `orb.accent`)
+//
+// Not user-selectable yet: `ORBTheme.accent` is a static dynamic colour, so a
+// live switch would only repaint views that happen to redraw. Expose a
+// picker once the accent is read from the environment.
 
 /// Curated accent set. Each carries a light and a dark variant so accent
 /// text/links and `onAccent` fills pass contrast in both appearances.

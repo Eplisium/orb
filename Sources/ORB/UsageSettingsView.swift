@@ -1,7 +1,7 @@
 import SwiftUI
 import Charts
 
-/// Settings → Usage: saved spend, requests, and tokens from the local ledger,
+/// Settings → Usage & Credits: saved spend, requests, and tokens from the local ledger,
 /// plus observable pending-write failures and an explicit retry action.
 struct UsageSettingsView: View {
     @ObservedObject private var ledger = UsageLedger.shared
@@ -42,14 +42,9 @@ struct UsageSettingsView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 20) {
-            HStack {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Usage & Cost").font(.title3.weight(.semibold))
-                    Text(firstDate.map { "Saved usage since \($0.formatted(date: .abbreviated, time: .omitted)). Stored locally on this Mac." }
-                         ?? "Successfully saved requests appear here. Local totals may not include every request.")
-                        .font(.caption).foregroundStyle(.secondary)
-                }
-                Spacer()
+            HStack(alignment: .top) {
+                SettingsSectionHeader(Self.title, symbol: "internaldrive",
+                                      subtitle: Self.subtitle(firstDate: firstDate))
                 Picker("Range", selection: $range) {
                     ForEach(Range.allCases) { Text($0.rawValue).tag($0) }
                 }
@@ -57,7 +52,7 @@ struct UsageSettingsView: View {
             }
 
             HStack(spacing: 12) {
-                stat("Total spend", Self.money(totalCost), icon: "dollarsign.circle.fill")
+                stat("Spend · \(range.rawValue.lowercased())", Self.money(totalCost), icon: "dollarsign.circle.fill")
                 stat("Requests", totalRequests.formatted(), icon: "arrow.up.arrow.down.circle.fill")
                 stat("Tokens", Self.compact(totalTokens), icon: "text.word.spacing")
                 stat("Top feature", features.first(where: { $0.cost > 0 })?.key ?? features.max { $0.requests < $1.requests }?.key ?? "—",
@@ -67,7 +62,7 @@ struct UsageSettingsView: View {
             if let warning = ledger.persistenceWarning {
                 VStack(alignment: .leading, spacing: 8) {
                     Label(warning, systemImage: "exclamationmark.triangle.fill")
-                        .font(.callout).foregroundStyle(.orange)
+                        .orbFont(.footnote).foregroundStyle(ORBTheme.warning)
                     if let error = ledger.persistenceError {
                         Text(error).font(.caption).foregroundStyle(.secondary)
                     }
@@ -78,7 +73,7 @@ struct UsageSettingsView: View {
 
             if unpriced > 0 {
                 Text("\(unpriced) request\(unpriced == 1 ? "" : "s") had no cost reported by the provider (for example speech audio), so real spend may be higher than shown.")
-                    .font(.caption).foregroundStyle(.orange)
+                    .orbFont(.caption).foregroundStyle(ORBTheme.warning)
             }
 
             if !features.isEmpty { charts }
@@ -192,7 +187,7 @@ struct UsageSettingsView: View {
                         Text("\(row.requests) req · \(Self.compact(row.tokens)) tok")
                             .font(.caption2.monospacedDigit()).foregroundStyle(.secondary)
                         Text(Self.money(row.cost))
-                            .font(.system(size: 12, weight: .semibold).monospacedDigit()).frame(minWidth: 70, alignment: .trailing)
+                            .orbFont(size: 12, weight: .semibold).monospacedDigit().frame(minWidth: 70, alignment: .trailing)
                         if showShare, totalCost > 0 {
                             Text("\(Int((row.cost / totalCost * 100).rounded()))%")
                                 .font(.caption2.monospacedDigit()).foregroundStyle(.secondary).frame(width: 34, alignment: .trailing)
@@ -212,9 +207,16 @@ struct UsageSettingsView: View {
         .background(.orbSurface(0.03), in: RoundedRectangle(cornerRadius: 12))
     }
 
-    static func money(_ value: Double) -> String {
-        guard value > 0 else { return "$0.00" }
-        return value < 0.01 ? String(format: "$%.4f", value) : String(format: "$%.2f", value)
+    /// Ledger spend is never negative; the shared formatter keeps every
+    /// money figure in ORB written the same way.
+    static func money(_ value: Double) -> String { ORBMoney.format(max(0, value)) }
+
+    /// Section title: the ledger is this Mac's record, not the account's.
+    static let title = "Recorded on this Mac"
+
+    static func subtitle(firstDate: Date?) -> String {
+        let since = firstDate.map { " since \($0.formatted(date: .abbreviated, time: .omitted))" } ?? ""
+        return "Requests ORB saved on this Mac\(since). Other apps and devices using your keys are not included — see “OpenRouter account” above for account-wide figures."
     }
 
     static func compact(_ value: Int) -> String {

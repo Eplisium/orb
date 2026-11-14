@@ -35,10 +35,17 @@ enum ORBToastKind: Equatable, Sendable {
     var defaultDuration: TimeInterval { self == .error ? 8 : 4 }
 }
 
+/// An optional button on a toast that opens a URL ("View Release").
+struct ORBToastLink: Equatable, Sendable {
+    let title: String
+    let url: URL
+}
+
 struct ORBToastItem: Identifiable, Equatable, Sendable {
     let id: UUID
     let kind: ORBToastKind
     let message: String
+    var link: ORBToastLink? = nil
 }
 
 /// Queue of transient messages. Show with `show(_:kind:)`; the host modifier
@@ -56,8 +63,9 @@ final class ToastCenter {
     }
 
     @discardableResult
-    func show(_ message: String, kind: ORBToastKind = .info, duration: TimeInterval? = nil) -> UUID {
-        let item = ORBToastItem(id: UUID(), kind: kind, message: message)
+    func show(_ message: String, kind: ORBToastKind = .info, duration: TimeInterval? = nil,
+              link: ORBToastLink? = nil) -> UUID {
+        let item = ORBToastItem(id: UUID(), kind: kind, message: message, link: link)
         toasts.append(item)
         while toasts.count > maxVisible { dismiss(toasts[0].id) }
         let seconds = duration ?? kind.defaultDuration
@@ -92,13 +100,14 @@ final class ToastCenter {
 private struct ORBToastHost: ViewModifier {
     let center: ToastCenter
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.orbForcesReducedMotion) private var forcedReduceMotion
 
     func body(content: Content) -> some View {
         content.overlay(alignment: .bottom) {
             VStack(spacing: ORBMetrics.spacingXS) {
                 ForEach(center.toasts) { toast in
                     ORBToast(item: toast) { center.dismiss(toast.id) }
-                        .transition(ORBMotion.transition(reduceMotion: reduceMotion))
+                        .transition(ORBMotion.transition(reduceMotion: ORBMotion.reduces(system: reduceMotion, forced: forcedReduceMotion)))
                 }
             }
             .padding(ORBMetrics.spacingMD)

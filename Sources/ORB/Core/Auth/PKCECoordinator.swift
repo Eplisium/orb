@@ -408,15 +408,8 @@ final class PKCELoopbackListener: @unchecked Sendable {
             return
         }
         let request = Self.parse(head)
-        if request == nil {
-            Self.respond(client, status: "400 Bad Request", body: "ORB could not parse this request.")
-        } else {
-            Self.respond(
-                client,
-                status: "200 OK",
-                body: "ORB received the OpenRouter callback. You can close this window and return to ORB."
-            )
-        }
+        let page = PKCECallbackPage.response(parsed: request != nil)
+        Self.respond(client, status: page.status, body: page.html)
         // Fail closed on an unparseable head too: the empty path can never
         // match the registered callback path.
         deliver(request ?? PKCECallbackRequest(hostHeader: nil, path: "", queryItems: []))
@@ -484,7 +477,7 @@ final class PKCELoopbackListener: @unchecked Sendable {
         return PKCECallbackRequest(hostHeader: host, path: comps.path, queryItems: comps.queryItems ?? [])
     }
 
-    private static func respond(_ client: Int32, status: String, body: String) {
+    fileprivate static func respond(_ client: Int32, status: String, body: String) {
         let bodyBytes = Data(body.utf8)
         let head = "HTTP/1.1 \(status)\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: \(bodyBytes.count)\r\nConnection: close\r\n\r\n"
         var payload = Data(head.utf8)
@@ -830,5 +823,43 @@ final class PKCECoordinator: @unchecked Sendable {
     private static func timeInterval(for duration: Duration) -> TimeInterval {
         let components = duration.components
         return TimeInterval(components.seconds) + TimeInterval(components.attoseconds) / 1e18
+    }
+}
+
+
+// MARK: - Callback page
+
+/// What the browser shows after OpenRouter redirects back. The page is sent
+/// before ORB validates the state and exchanges the code, so it never claims
+/// success: it hands the user back to ORB, which shows the real outcome
+/// (and comes to the front by itself). Static text only — nothing from the
+/// request is echoed into the page.
+enum PKCECallbackPage {
+    static let returnTitle = "Return to ORB"
+    static let returnMessage = "ORB is finishing your sign-in. You can close this tab — ORB will show whether it worked."
+    static let badRequestTitle = "Request not understood"
+    static let badRequestMessage = "ORB couldn't read this request. Go back to ORB and try signing in again."
+
+    static func response(parsed: Bool) -> (status: String, html: String) {
+        parsed
+            ? ("200 OK", html(title: returnTitle, message: returnMessage, closeTab: true))
+            : ("400 Bad Request", html(title: badRequestTitle, message: badRequestMessage, closeTab: false))
+    }
+
+    static func html(title: String, message: String, closeTab: Bool) -> String {
+        let script = closeTab ? "<script>setTimeout(function(){window.close()},1500)</script>" : ""
+        return """
+        <!doctype html><html lang="en"><head><meta charset="utf-8">\
+        <meta name="viewport" content="width=device-width,initial-scale=1">\
+        <meta name="color-scheme" content="light dark"><title>ORB — \(title)</title>\
+        <style>body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;\
+        font:15px/1.5 -apple-system,BlinkMacSystemFont,"Helvetica Neue",sans-serif;background:#f5f4fa;color:#1d1b26}\
+        main{max-width:420px;padding:32px;text-align:center}\
+        .orb{width:56px;height:56px;margin:0 auto 16px;border-radius:50%;\
+        background:radial-gradient(circle at 35% 30%,#b9aaff,#7360d1 60%,#4a3b9c)}\
+        h1{font-size:20px;margin:0 0 8px}p{margin:0;color:#5b5868}\
+        @media(prefers-color-scheme:dark){body{background:#17161c;color:#f1eff8}p{color:#a9a6b6}}</style>\
+        </head><body><main><div class="orb" aria-hidden="true"></div><h1>\(title)</h1><p>\(message)</p></main>\(script)</body></html>
+        """
     }
 }

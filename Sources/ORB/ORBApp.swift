@@ -1,4 +1,5 @@
 import SwiftUI
+import AppKit
 
 @main
 struct ORBApp: App {
@@ -11,7 +12,11 @@ struct ORBApp: App {
     @StateObject private var environment = AppEnvironment()
 
     var body: some Scene {
-        WindowGroup {
+        // One main window (SHELL-1 / CORE-3). `Window` is single-instance:
+        // an orb:// link or a menu command reuses it (or reopens it after
+        // ⌘W) instead of opening a second window with its own browser model
+        // and Chat/Agent services writing the same database.
+        Window("ORB", id: ORBShell.mainWindowID) {
             ContentView()
                 .orbAppearance()
                 .environmentObject(focusManager)
@@ -39,44 +44,95 @@ struct ORBApp: App {
 }
 
 /// Menu bar commands. Shortcuts are routed through `ShellController`;
-/// `ContentView` performs them (and ignores them while locked). `orb://`
-/// links are handled by `ContentView.onOpenURL`, which holds them until unlock.
+/// `ContentView` performs them. While ORB is locked every item that would
+/// act on the app is disabled (the lock screen ignores them anyway); only
+/// Quit, About and Help stay live. `orb://` links are handled by
+/// `ContentView.onOpenURL`, which holds them until unlock.
 struct ShellCommands: Commands {
     @ObservedObject var shell: ShellController
     let focusManager: FocusManager
+    @ObservedObject var lock: AppLock = .shared
+    @ObservedObject var updates: UpdateChecker = .shared
+    @Environment(\.openWindow) private var openWindow
+    @FocusedValue(\.conversationActions) private var conversationActions
+
+    private var locked: Bool { lock.isLocked }
+
+    private var findTarget: FindTarget {
+        FindRouting.target(for: shell.currentSection, hasSessionSearch: conversationActions?.searchSessions != nil)
+    }
+
+    /// Brings the main window back (it may have been closed with ⌘W), then
+    /// queues the request for it.
+    private func send(_ action: ShellAction) {
+        openWindow(id: ORBShell.mainWindowID)
+        shell.send(action)
+    }
 
     var body: some Commands {
         CommandGroup(replacing: .appInfo) {
             Button("About ORB") { AboutWindow.show() }
+            Button("Check for Updates…") { Task { await updates.checkNow() } }
+                .disabled(updates.isChecking)
+        }
+        CommandGroup(after: .appSettings) {
+            Button("Lock ORB") { lock.lock() }
+                .shortcut(.lockNow)
+                .disabled(locked || !lock.isEnabled)
         }
         CommandGroup(replacing: .newItem) {
-            Button("New Chat") { shell.send(.newChat) }
+            Button("New Chat") { send(.newChat) }
                 .shortcut(.newChat)
-            Button("New Agent Session") { shell.send(.newAgent) }
+                .disabled(locked)
+            Button("New Agent Session") { send(.newAgent) }
                 .shortcut(.newAgent)
+                .disabled(locked)
         }
         CommandGroup(after: .textEditing) {
-            Button("Find Models") { focusManager.searchFocused = true }
-                .shortcut(.find)
+            let target = findTarget
+            Button(target.menuTitle) {
+                switch target {
+                case .browserSearch:
+                    openWindow(id: ORBShell.mainWindowID)
+                    focusManager.searchFocused = true
+                case .sessionSearch:
+                    conversationActions?.searchSessions?()
+                case .unavailable:
+                    break
+                }
+            }
+            .shortcut(.find)
+            .disabled(locked || target == .unavailable)
         }
         CommandMenu("Go") {
-            Button("Command Palette…") { shell.send(.showPalette) }
+            Button("Command Palette…") { send(.showPalette) }
                 .shortcut(.palette)
-            Button("Refresh Models") { shell.send(.refreshModels) }
+                .disabled(locked)
+            Button("Refresh Models") { send(.refreshModels) }
                 .shortcut(.refresh)
+                .disabled(locked)
             Divider()
             ForEach(Array(ShellShortcuts.numberedSections.enumerated()), id: \.offset) { offset, section in
-                Button(section.title) { shell.send(.section(section)) }
+                Button(section.title) { send(.section(section)) }
                     .keyboardShortcut(KeyEquivalent(Character("\(offset + 1)")), modifiers: .command)
+                    .disabled(locked)
             }
             ForEach(ShellShortcuts.extraSectionCommands, id: \.1) { section, command in
-                Button(section.title) { shell.send(.section(section)) }
+                Button(section.title) { send(.section(section)) }
                     .shortcut(command)
+                    .disabled(locked)
             }
         }
-        CommandGroup(after: .help) {
-            Button("Keyboard Shortcuts") { shell.send(.showShortcuts) }
+        // Replaces the default "ORB Help" item, which only says help isn't
+        // available.
+        CommandGroup(replacing: .help) {
+            Button("Keyboard Shortcuts") { send(.showShortcuts) }
                 .shortcut(.shortcuts)
+                .disabled(locked)
+            Divider()
+            Button("ORB on GitHub") { NSWorkspace.shared.open(ORBProjectLinks.readme) }
+            Button("Report an Issue…") { NSWorkspace.shared.open(ORBProjectLinks.issues) }
+            Button("Release Notes") { NSWorkspace.shared.open(ORBProjectLinks.releases) }
         }
     }
 }
@@ -115,6 +171,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @MainActor
     func applicationWillFinishLaunching(_ notification: Notification) {
         AppAppearance.apply(AppearancePrefs.load().scheme)
+        // ORB has one main window: no window tabs, no "+" tab button, no
+        // Show Tab Bar / Merge All Windows items.
+        NSWindow.allowsAutomaticWindowTabbing = false
+    }
+
+    @MainActor
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        // Public, unauthenticated release check; silent unless an update exists.
+        UpdateChecker.shared.startBackgroundChecks()
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {

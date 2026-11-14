@@ -254,7 +254,7 @@ struct AdvancedSettingsView: View {
                     Toggle("Strict mode", isOn: $schemaDraft.strict)
                     if let schemaError = schemaDraft.error {
                         Label(schemaError, systemImage: "exclamationmark.triangle")
-                            .font(.caption).foregroundStyle(.orange)
+                            .orbFont(.caption).foregroundStyle(ORBTheme.warning)
                     }
                 }
             }

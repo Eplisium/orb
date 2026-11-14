@@ -13,7 +13,7 @@ struct SettingsSceneView: View {
                 ContentUnavailableView(
                     "ORB is locked",
                     systemImage: "lock.fill",
-                    description: Text("Unlock ORB to change settings.")
+                    description: Text("Unlock ORB in its main window to change settings.")
                 )
             }
         }
@@ -25,6 +25,7 @@ struct SettingsSceneView: View {
 /// management key is configured (no network is attempted then).
 struct SidebarAccountChip: View {
     @StateObject private var account: AccountService
+    @ObservedObject private var ledger = UsageLedger.shared
     @Environment(\.openSettings) private var openSettings
 
     init() {
@@ -51,10 +52,10 @@ struct SidebarAccountChip: View {
             HStack(spacing: 8) {
                 Image(systemName: state.systemImage)
                     .foregroundStyle(state.isLow ? ORBTheme.warning : ORBTheme.accent)
-                    .font(.title3)
+                    .orbFont(.title3)
                 VStack(alignment: .leading, spacing: 1) {
-                    Text(state.title).font(ORBFont.footnote.weight(.semibold)).lineLimit(1)
-                    Text(state.subtitle).font(ORBFont.caption).foregroundStyle(.secondary)
+                    Text(state.title).orbFont(.footnote, weight: .semibold).lineLimit(1)
+                    Text(state.subtitle).orbFont(.caption).foregroundStyle(.secondary)
                         .lineLimit(2).fixedSize(horizontal: false, vertical: true)
                 }
                 Spacer(minLength: 0)
@@ -74,16 +75,30 @@ struct SidebarAccountChip: View {
         // A replacement keeps presence true, but changes the opaque revision.
         // Refresh immediately rather than waiting for window focus to change.
         .task(id: account.credentialRevision) {
+            account.noteLedgerRevision(ledger.revision)
             if account.hasManagementKey && !account.isLoadingCredits { await account.fetchCredits() }
         }
         .onReceive(NotificationCenter.default.publisher(for: NSWindow.didBecomeKeyNotification)) { _ in
             let revision = account.credentialRevision
             account.refreshManagementKeyPresence()
-            // A changed revision is owned by the task above. Focus can still
-            // retry an empty/error state without launching a duplicate fetch.
-            if revision == account.credentialRevision && account.hasManagementKey
-                && account.credits == nil && !account.isLoadingCredits {
-                Task { await account.fetchCredits() }
+            // A changed revision is owned by the task above. Focus retries an
+            // empty/error state and refreshes a balance older than a minute.
+            if revision == account.credentialRevision {
+                Task { await account.refreshCreditsIfStale() }
+            }
+        }
+        // ORB just recorded spend: the balance is out of date. Debounced so
+        // a burst of requests (an agent run, a batch) is one fetch.
+        .task(id: ledger.revision) {
+            try? await Task.sleep(for: .seconds(2))
+            guard !Task.isCancelled else { return }
+            await account.refreshCreditsIfStale(ledgerRevision: ledger.revision)
+            // Throttled: try once more when the interval has passed, so the
+            // chip settles on the balance after the last request of a burst.
+            if account.hasManagementKey, account.balanceLags(ledgerRevision: ledger.revision) {
+                try? await Task.sleep(for: .seconds(AccountService.spendRefreshInterval))
+                guard !Task.isCancelled else { return }
+                await account.refreshCreditsIfStale(ledgerRevision: ledger.revision)
             }
         }
     }

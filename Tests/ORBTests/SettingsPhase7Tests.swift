@@ -32,18 +32,18 @@ struct AppearancePrefsTests {
         p.scheme = .system; #expect(p.preferredColorScheme == nil)
     }
 
-    @Test("Text sizes step monotonically and the default is the SwiftUI default")
+    @Test("Text sizes step monotonically; the control stays hidden until every view scales")
     func textSize() {
-        let sizes = AppearancePrefs.TextSize.allCases.map(\.dynamicTypeSize)
-        #expect(sizes == sizes.sorted())
-        #expect(AppearancePrefs.TextSize.standard.dynamicTypeSize == .large)
+        let scales = AppearancePrefs.TextSize.allCases.map(\.scale)
+        #expect(scales == scales.sorted())
+        #expect(AppearancePrefs.TextSize.standard.scale == 1)
+        #expect(!AppearancePrefs.TextSize.isOffered)
+        #expect(AppearancePrefs.TextSize.allCases.allSatisfy { $0.effectiveScale == 1 })
         #expect(Set(AppearancePrefs.TextSize.allCases.map(\.title)).count == AppearancePrefs.TextSize.allCases.count)
     }
 
-    @Test("Density changes spacing and row height but never below the 28pt hit target")
+    @Test("Density sets the control size app-wide")
     func density() {
-        #expect(AppearancePrefs.Density.compact.rowPadding < AppearancePrefs.Density.comfortable.rowPadding)
-        #expect(AppearancePrefs.Density.compact.minimumRowHeight >= 28)
         #expect(AppearancePrefs.Density.compact.controlSize == .small)
         #expect(AppearancePrefs.Density.comfortable.controlSize == .regular)
     }
@@ -79,18 +79,18 @@ struct AppearancePrefsTests {
 
 @Suite("Phase 7: settings panes")
 struct SettingsPaneTests {
-    @Test("Six panes in the planned order, each with a title and symbol")
+    @Test("Five panes in the planned order (Network folded into Advanced), each with a title and symbol")
     func order() {
-        #expect(SettingsPane.allCases.map(\.title) == ["General", "Accounts & Keys", "Usage & Credits", "MCP", "Network", "Advanced"])
+        #expect(SettingsPane.allCases.map(\.title) == ["General", "Accounts & Keys", "Usage & Credits", "MCP", "Advanced"])
         #expect(SettingsPane.allCases.allSatisfy { !$0.symbol.isEmpty })
-        #expect(Set(SettingsPane.allCases.map(\.symbol)).count == 6)
+        #expect(Set(SettingsPane.allCases.map(\.symbol)).count == 5)
     }
 
     @Test("Every legacy tab lands somewhere, so no deep link is lost")
     func legacy() {
         let map: [(String, SettingsPane)] = [
             ("API Key", .accounts), ("Credits", .usage), ("Usage", .usage), ("Activity", .usage),
-            ("Key Info", .accounts), ("Providers", .advanced), ("MCP Servers", .mcp), ("Advanced", .network),
+            ("Key Info", .accounts), ("Providers", .advanced), ("MCP Servers", .mcp), ("Advanced", .advanced), ("Network", .advanced),
         ]
         for (legacy, pane) in map { #expect(SettingsPane.fromLegacy(legacy) == pane, "\(legacy)") }
         #expect(SettingsPane.fromLegacy("something else") == .general)
@@ -100,8 +100,11 @@ struct SettingsPaneTests {
     func persistence() {
         let d = freshDefaults()
         #expect(SettingsPane.restore(from: d) == .general)
+        SettingsPane.usage.store(in: d)
+        #expect(SettingsPane.restore(from: d) == .usage)
+        // A pane stored before Network moved into Advanced still opens.
         SettingsPane.network.store(in: d)
-        #expect(SettingsPane.restore(from: d) == .network)
+        #expect(SettingsPane.restore(from: d) == .advanced)
         d.set("gone", forKey: SettingsPane.storageKey)
         #expect(SettingsPane.restore(from: d) == .general)
     }

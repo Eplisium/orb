@@ -54,7 +54,8 @@ enum FuzzyMatcher {
 enum PaletteGroup: String, CaseIterable, Identifiable {
     case sections = "Sections"
     case actions = "Actions"
-    case models = "Favourite models"
+    /// Favourites when the query is empty; the whole catalog once you type.
+    case models = "Models"
     case conversations = "Recent conversations"
     var id: String { rawValue }
 }
@@ -69,6 +70,18 @@ struct PaletteConversation: Equatable {
     let title: String
     let mode: PlaygroundMode
     let createdAt: Date
+    /// Newest message time. A month-old chat continued today is recent.
+    var lastActivityAt: Date? = nil
+
+    var recency: Date { max(lastActivityAt ?? createdAt, createdAt) }
+}
+
+/// Palette items the palette performs itself rather than handing to the
+/// main window (they don't need it, or must work from any section).
+enum PaletteLocalCommand: Equatable, Hashable {
+    case lock
+    case openSettingsPane(SettingsPane)
+    case checkForUpdates
 }
 
 struct PaletteItem: Identifiable, Equatable {
@@ -79,6 +92,8 @@ struct PaletteItem: Identifiable, Equatable {
     let symbol: String
     let shortcut: String?
     let action: ShellAction
+    /// When set, the palette runs this instead of sending `action`.
+    var localCommand: PaletteLocalCommand? = nil
 }
 
 struct PaletteGroupResult: Equatable {
@@ -92,6 +107,15 @@ struct PaletteIndex {
 
     var favoriteModels: [PaletteModel]
     var conversations: [PaletteConversation]
+    /// Every catalog model; searched once the user types.
+    var catalogModels: [PaletteModel] = []
+    /// The browser's selected model, for "Copy Model ID".
+    var focusedModelID: String? = nil
+    /// Whether "Lock ORB" is offered (the lock is turned on).
+    var canLock = false
+
+    /// A favourite outranks an equally good catalog match.
+    static let favoriteBonus = 40.0
 
     static let actionItems: [PaletteItem] = [
         PaletteItem(id: "act.newChat", group: .actions, title: "New Chat", subtitle: nil,
@@ -106,7 +130,39 @@ struct PaletteIndex {
                     symbol: "gearshape", shortcut: "⌘,", action: .openSettings),
         PaletteItem(id: "act.shortcuts", group: .actions, title: "Keyboard Shortcuts", subtitle: nil,
                     symbol: "keyboard", shortcut: "⌘/", action: .showShortcuts),
+        PaletteItem(id: "act.compare", group: .actions, title: "Open Compare", subtitle: nil,
+                    symbol: "square.split.2x1", shortcut: ShortcutCommand.openCompare.combo.display, action: .openCompare),
     ]
+    + ModelExportFormat.allCases.map { format in
+        PaletteItem(id: "act.export.\(format.rawValue)", group: .actions, title: "Export Model List as \(format.title)…",
+                    subtitle: nil, symbol: "square.and.arrow.up", shortcut: nil, action: .exportModels(format))
+    }
+    + SettingsPane.allCases.map { pane in
+        PaletteItem(id: "act.settings.\(pane.rawValue)", group: .actions, title: "Settings: \(pane.title)",
+                    subtitle: nil, symbol: pane.symbol, shortcut: nil, action: .openSettings,
+                    localCommand: .openSettingsPane(pane))
+    }
+    + [
+        PaletteItem(id: "act.updates", group: .actions, title: "Check for Updates…", subtitle: nil,
+                    symbol: "arrow.down.circle", shortcut: nil, action: .openSettings,
+                    localCommand: .checkForUpdates),
+    ]
+
+    /// Actions that depend on app state (selected model, lock).
+    var contextualActionItems: [PaletteItem] {
+        var items: [PaletteItem] = []
+        if let id = focusedModelID {
+            items.append(PaletteItem(id: "act.copyModelID", group: .actions, title: "Copy Model ID", subtitle: id,
+                                     symbol: "doc.on.doc", shortcut: ShortcutCommand.copyModelID.combo.display,
+                                     action: .copyModelID(id)))
+        }
+        if canLock {
+            items.append(PaletteItem(id: "act.lock", group: .actions, title: "Lock ORB", subtitle: nil,
+                                     symbol: "lock", shortcut: ShortcutCommand.lockNow.combo.display,
+                                     action: .openSettings, localCommand: .lock))
+        }
+        return items
+    }
 
     static var sectionItems: [PaletteItem] {
         ShellShortcuts.sidebarOrder.map { section in
@@ -123,11 +179,18 @@ struct PaletteIndex {
         let query = rawQuery.trimmingCharacters(in: .whitespacesAndNewlines)
         let limit = query.isEmpty ? Self.emptyQueryLimit : Self.queryLimit
 
-        let models = favoriteModels.map { model in
+        let favoriteIDs = Set(favoriteModels.map(\.id))
+        var models = favoriteModels.map { model in
             PaletteItem(id: "model.\(model.id)", group: .models, title: model.name, subtitle: model.id,
                         symbol: "star.fill", shortcut: nil, action: .selectModel(model.id))
         }
-        let recent = conversations.sorted { $0.createdAt > $1.createdAt }.map { c in
+        if !query.isEmpty {
+            models += catalogModels.filter { !favoriteIDs.contains($0.id) }.map { model in
+                PaletteItem(id: "model.\(model.id)", group: .models, title: model.name, subtitle: model.id,
+                            symbol: "cpu", shortcut: nil, action: .selectModel(model.id))
+            }
+        }
+        let recent = conversations.sorted { $0.recency > $1.recency }.map { c in
             PaletteItem(id: "conv.\(c.id.uuidString)", group: .conversations, title: c.title,
                         subtitle: c.mode.rawValue,
                         symbol: c.mode == .chat ? "bubble.left" : "wand.and.stars",
@@ -136,7 +199,7 @@ struct PaletteIndex {
 
         let candidates: [(PaletteGroup, [PaletteItem], Int?)] = [
             (.sections, Self.sectionItems, nil),
-            (.actions, Self.actionItems, nil),
+            (.actions, Self.actionItems + contextualActionItems, nil),
             (.models, models, limit),
             (.conversations, recent, limit),
         ]
@@ -148,7 +211,10 @@ struct PaletteIndex {
                 ranked = items.enumerated().compactMap { offset, item -> (Double, Int, PaletteItem)? in
                     let titleScore = FuzzyMatcher.score(query: query, in: item.title)
                     let subScore = item.subtitle.flatMap { FuzzyMatcher.score(query: query, in: $0) }.map { $0 * 0.9 }
-                    guard let best = [titleScore, subScore].compactMap({ $0 }).max() else { return nil }
+                    guard var best = [titleScore, subScore].compactMap({ $0 }).max() else { return nil }
+                    if group == .models, case .selectModel(let id) = item.action, favoriteIDs.contains(id) {
+                        best += Self.favoriteBonus
+                    }
                     return (best, offset, item)
                 }
                 .sorted { $0.0 != $1.0 ? $0.0 > $1.0 : $0.1 < $1.1 }

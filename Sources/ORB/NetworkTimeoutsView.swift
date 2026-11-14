@@ -18,39 +18,35 @@ struct NetworkTimeoutsView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
-            Label("Network Timeouts", systemImage: "clock.badge.exclamationmark")
-                .font(.headline)
-
-            Text(
-                "Increase these if you're on a slow connection or using long-running "
-                + "upstream models. Changes apply to new requests immediately."
+            SettingsSectionHeader(
+                "Network Timeouts", symbol: "clock.badge.exclamationmark",
+                subtitle: "Increase these if you're on a slow connection or using long-running "
+                    + "upstream models. Changes apply to new requests immediately."
             )
-            .font(.callout)
-            .foregroundStyle(.secondary)
 
             HStack(spacing: 10) {
                 Text("Fetch tool")
-                    .font(.callout)
+                    .orbFont(.footnote)
                     .frame(width: 110, alignment: .leading)
                 TextField("Seconds", text: $fetchText)
                     .textFieldStyle(.roundedBorder)
                     .frame(width: 90)
                     .focused($focusedField, equals: .fetch)
                 Text("seconds (5–300)")
-                    .font(.caption)
+                    .orbFont(.caption)
                     .foregroundStyle(.secondary)
             }
 
             HStack(spacing: 10) {
                 Text("API request")
-                    .font(.callout)
+                    .orbFont(.footnote)
                     .frame(width: 110, alignment: .leading)
                 TextField("Seconds", text: $requestText)
                     .textFieldStyle(.roundedBorder)
                     .frame(width: 90)
                     .focused($focusedField, equals: .request)
                 Text("seconds (30–900)")
-                    .font(.caption)
+                    .orbFont(.caption)
                     .foregroundStyle(.secondary)
             }
 
@@ -68,8 +64,8 @@ struct NetworkTimeoutsView: View {
 
                 if let validationMessage {
                     Text(validationMessage)
-                        .font(.caption)
-                        .foregroundStyle(.orange)
+                        .orbFont(.caption)
+                        .foregroundStyle(ORBTheme.warning)
                 }
             }
 
@@ -77,7 +73,7 @@ struct NetworkTimeoutsView: View {
                 "Fetch tool: how long the agent's web-page fetch waits before giving up. "
                 + "API request: how long OpenRouter calls (including stream setup) may take."
             )
-            .font(.caption)
+            .orbFont(.caption)
             .foregroundStyle(.secondary)
         }
         .onChange(of: fetchText) { _, newValue in

@@ -62,6 +62,7 @@ enum ShortcutCommand: String, CaseIterable, Sendable {
     case palette, refresh, newChat, newAgent, find, shortcuts, settings, toggleSidebar
     case toggleFavorite, copyModelID, chatWithModel, openCompare
     case sectionEmbeddings, sectionTestSuite
+    case lockNow
 
     var combo: KeyCombo {
         switch self {
@@ -81,6 +82,8 @@ enum ShortcutCommand: String, CaseIterable, Sendable {
         case .openCompare: return KeyCombo(key: "c", modifiers: [.command, .control])
         case .sectionEmbeddings: return .cmd("0")
         case .sectionTestSuite: return .shiftCmd("e")
+        // ⌃⌘Q is the system Lock Screen; ⌃⌘L is free in macOS and ORB.
+        case .lockNow: return KeyCombo(key: "l", modifiers: [.command, .control])
         }
     }
 
@@ -90,7 +93,7 @@ enum ShortcutCommand: String, CaseIterable, Sendable {
         case .refresh: return "Refresh models"
         case .newChat: return "New chat"
         case .newAgent: return "New agent session"
-        case .find: return "Find models"
+        case .find: return "Find in this section"
         case .shortcuts: return "Keyboard shortcuts"
         case .settings: return "Settings"
         case .toggleSidebar: return "Toggle sidebar"
@@ -100,6 +103,7 @@ enum ShortcutCommand: String, CaseIterable, Sendable {
         case .openCompare: return "Open Compare"
         case .sectionEmbeddings: return "Embeddings"
         case .sectionTestSuite: return "Test Suite"
+        case .lockNow: return "Lock ORB"
         }
     }
 }
@@ -136,10 +140,12 @@ extension ShellShortcuts {
 /// The "Model" menu, acting on the browser's selected model.
 struct ModelCommands: Commands {
     @ObservedObject var shell: ShellController
+    @ObservedObject var lock: AppLock = .shared
 
     var body: some Commands {
         CommandMenu("Model") {
-            let id = shell.focusedModelID
+            // Nothing acts on a model while the lock screen is up.
+            let id = lock.isLocked ? nil : shell.focusedModelID
             Button(shell.focusedModelIsFavorite ? "Remove from Favorites" : "Add to Favorites") {
                 if let id { shell.send(.toggleFavorite(id)) }
             }
@@ -149,6 +155,7 @@ struct ModelCommands: Commands {
                 .disabled(id == nil)
             Button("Open Compare") { shell.send(.openCompare) }
                 .shortcut(.openCompare)
+                .disabled(lock.isLocked)
             Divider()
             Button("Copy Model ID") { if let id { shell.send(.copyModelID(id)) } }
                 .shortcut(.copyModelID)
@@ -164,6 +171,7 @@ struct ModelCommands: Commands {
                     Button("As \(format.title)…") { shell.send(.exportModels(format)) }
                 }
             }
+            .disabled(lock.isLocked)
         }
     }
 }

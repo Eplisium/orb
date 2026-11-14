@@ -1,21 +1,28 @@
 import SwiftUI
+import AppKit
 
-/// Settings view: API key management, account credits, and usage activity.
+/// Settings: General (appearance, prices, notifications, security, updates,
+/// about), Accounts & Keys, Usage & Credits, MCP and Advanced (network,
+/// storage & diagnostics, provider directory). One header style
+/// (`SettingsSectionHeader`) and the semantic colour tokens throughout.
 struct SettingsView: View {
     @StateObject private var account = AccountService()
     @StateObject private var directory = DirectoryService()
-    @State private var apiKeyInput = ""
-    @State private var showKeyDeleted = false
-    @State private var showKey = false
-    @State private var showRemoveKeyConfirmation = false
-    @State private var keyActionError: String?
     @StateObject private var keySave = SaveFeedback(what: "API key")
     @StateObject private var managementSave = SaveFeedback(what: "Management key")
+    @StateObject private var storage = StorageDiagnosticsModel()
+    @ObservedObject private var signIn = OpenRouterSignInModel.shared
+    @ObservedObject private var updates = UpdateChecker.shared
     @AppStorage(SettingsPane.storageKey) private var paneRaw = SettingsPane.general.rawValue
     private var pane: Binding<SettingsPane> {
-        Binding(get: { SettingsPane(rawValue: paneRaw) ?? .general }, set: { paneRaw = $0.rawValue })
+        Binding(get: { (SettingsPane(rawValue: paneRaw) ?? .general).visiblePane }, set: { paneRaw = $0.rawValue })
     }
-    @State private var selectedTab: SettingsTab = .apiKey
+    /// Inference-key state, cached: the Keychain is read on appear and after
+    /// save/remove/sign-in, never on every redraw (each keystroke in the key
+    /// field redraws the pane).
+    @State private var inference = InferenceKeyPanel()
+    @State private var showKey = false
+    @State private var showRemoveKeyConfirmation = false
     // Management key section (F03/W04). The draft lives in a small panel
     // struct so the save/remove rules are unit-testable; the configured state
     // itself is always read from `account.hasManagementKey`.
@@ -25,17 +32,7 @@ struct SettingsView: View {
     @AppStorage(OPMode.key) private var opMode = false
     @State private var confirmOPMode = false
     @AppStorage(AppLockPolicy.idleMinutesKey) private var idleMinutes = AppLockPolicy.defaultIdleMinutes
-
-    enum SettingsTab: String, CaseIterable {
-        case apiKey = "API Key"
-        case credits = "Credits"
-        case usage = "Usage"
-        case activity = "Activity"
-        case keyInfo = "Key Info"
-        case providers = "Providers"
-        case mcp = "MCP Servers"
-        case advanced = "Advanced"
-    }
+    @AppStorage(UpdateChecker.autoCheckKey) private var autoCheckUpdates = true
 
     var body: some View {
         // Native toolbar tabs (the standard macOS Settings look).
@@ -53,10 +50,15 @@ struct SettingsView: View {
         }
         .frame(minWidth: 500, minHeight: 400)
         .task {
+            reloadInferenceKey()
             await refreshAccount()
         }
         .onChange(of: account.hasManagementKey) { _, has in
             if has { Task { await refreshAccount() } }
+        }
+        .onChange(of: signIn.completedCount) { _, _ in
+            reloadInferenceKey()
+            Task { await refreshAccount() }
         }
         .confirmationDialog(
             "Remove the OpenRouter API key?",
@@ -64,18 +66,14 @@ struct SettingsView: View {
             titleVisibility: .visible
         ) {
             Button("Remove Key", role: .destructive) {
-                if KeychainManager.deleteAPIKey() {
-                    keyActionError = nil
-                    showKeyDeleted = true
+                let removed = KeychainManager.deleteAPIKey()
+                inference.didRemove(success: removed)
+                if removed {
                     // Only the inference key's own panel is cleared. Credits
                     // and activity belong to the management key, which is
                     // still configured.
                     directory.keyInfo = nil
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
-                        showKeyDeleted = false
-                    }
-                } else {
-                    keyActionError = "The API key could not be removed from Keychain."
+                    AppToasts.center.show("API key removed", kind: .success, duration: 2)
                 }
             }
             Button("Cancel", role: .cancel) {}
@@ -89,6 +87,9 @@ struct SettingsView: View {
         ) {
             Button(ManagementKeyPanel.removeButtonLabel, role: .destructive) {
                 management.removeKey(into: account)
+                if management.actionError == nil {
+                    AppToasts.center.show("Management key removed", kind: .success, duration: 2)
+                }
             }
             Button("Cancel", role: .cancel) {}
         } message: {
@@ -98,7 +99,7 @@ struct SettingsView: View {
 
     @ViewBuilder
     private func paneContent(_ pane: SettingsPane) -> some View {
-        switch pane {
+        switch pane.visiblePane {
         case .general:
             VStack(alignment: .leading, spacing: 24) {
                 AppearanceSettingsSection()
@@ -108,6 +109,8 @@ struct SettingsView: View {
                 NotificationSettingsSection()
                 Divider()
                 securitySection
+                Divider()
+                updatesSection
                 Divider()
                 AboutPane()
             }
@@ -123,59 +126,28 @@ struct SettingsView: View {
             VStack(alignment: .leading, spacing: 24) {
                 creditsSection
                 Divider()
-                UsageSettingsView(accent: ORBTheme.accent)
-                Divider()
                 activitySection
+                Divider()
+                UsageSettingsView(accent: ORBTheme.accent)
             }
         case .mcp: MCPSettingsView(accent: .accentColor)
-        case .network: NetworkTimeoutsView(accent: .accentColor)
-        case .advanced:
+        case .advanced, .network:
             VStack(alignment: .leading, spacing: 24) {
-                opModeSection
+                NetworkTimeoutsView(accent: ORBTheme.accent)
+                Divider()
+                storageSection
                 Divider()
                 providersSection
             }
         }
     }
 
-    // MARK: - OP Mode
-
-    private var opModeSection: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Label("OP Mode", systemImage: "bolt.shield.fill")
-                .font(.title3.weight(.semibold))
-            Text("Skips the approval prompt for risky agent tools: terminal commands, computer control and MCP tools. The agent can then run them without asking. It does not change what the agent is allowed to use: Web Only and Computer Access still apply.")
-                .font(.callout)
-                .foregroundStyle(.secondary)
-            Toggle("Run risky tools without asking", isOn: Binding(
-                get: { opMode },
-                set: { on in if on { confirmOPMode = true } else { opMode = false } }
-            ))
-            .toggleStyle(.switch)
-            if opMode {
-                Label("OP Mode is on. Agent commands run immediately.", systemImage: "exclamationmark.triangle.fill")
-                    .font(.callout.weight(.semibold))
-                    .foregroundStyle(ORBTheme.warning)
-            }
-        }
-        .confirmationDialog("Turn on OP Mode?", isPresented: $confirmOPMode, titleVisibility: .visible) {
-            Button("Turn On OP Mode", role: .destructive) { opMode = true }
-            Button("Cancel", role: .cancel) {}
-        } message: {
-            Text("The agent will run terminal commands and control this Mac without asking. Only use it with models and prompts you trust.")
-        }
-    }
-
-    // MARK: - Security
+    // MARK: - Security (App Lock + OP Mode)
 
     private var securitySection: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Label("Security", systemImage: "lock.fill")
-                .font(.title3.weight(.semibold))
-
-            Text("ORB asks for \(appLock.biometricLabel) or your Mac password at launch and locks again when your Mac sleeps or locks. Keys are stored in the Keychain for this Mac only, readable by ORB alone — no Keychain password prompts.")
-                .font(.callout)
-                .foregroundStyle(.secondary)
+            SettingsSectionHeader("Security", symbol: "lock.fill",
+                                  subtitle: LockCopy.settingsDescription(biometric: appLock.biometricName))
 
             Toggle("Require unlock at launch", isOn: Binding(
                 get: { appLock.isEnabled },
@@ -196,7 +168,6 @@ struct SettingsView: View {
                     KeychainSecrets.migrateAllLegacy(force: true)
                 }
                 .buttonStyle(.bordered)
-                .font(.callout)
             }
 
             Button {
@@ -206,7 +177,34 @@ struct SettingsView: View {
             }
             .buttonStyle(.bordered)
             .disabled(!appLock.isEnabled)
-            .help(appLock.isEnabled ? "Lock immediately" : "Turn on \"Require unlock at launch\" to use the lock")
+            .help(appLock.isEnabled ? "Lock immediately (\(ShortcutCommand.lockNow.combo.display))" : "Turn on \"Require unlock at launch\" to use the lock")
+
+            opModeControls
+                .padding(.top, 8)
+        }
+    }
+
+    private var opModeControls: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            SettingsSubheading("OP Mode")
+            Text("Skips the approval prompt for risky agent tools: terminal commands, computer control and MCP tools. The agent can then run them without asking. It does not change what the agent is allowed to use: Web Only and Computer Access still apply.")
+                .orbFont(.footnote)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            Toggle("Run risky tools without asking", isOn: Binding(
+                get: { opMode },
+                set: { on in if on { confirmOPMode = true } else { opMode = false } }
+            ))
+            .toggleStyle(.switch)
+            if opMode {
+                SettingsNotice(kind: .warning, message: "OP Mode is on. Agent commands run immediately.")
+            }
+        }
+        .confirmationDialog("Turn on OP Mode?", isPresented: $confirmOPMode, titleVisibility: .visible) {
+            Button("Turn On OP Mode", role: .destructive) { opMode = true }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("The agent will run terminal commands and control this Mac without asking. Only use it with models and prompts you trust.")
         }
     }
 
@@ -214,319 +212,301 @@ struct SettingsView: View {
         KeychainSecrets.pendingLegacyAccounts().count
     }
 
+    // MARK: - Updates
+
+    private var updatesSection: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            SettingsSectionHeader("Updates", symbol: "arrow.down.circle",
+                                  subtitle: "ORB asks GitHub (no account, no keys sent) whether a newer release of ORB exists. Nothing is downloaded or installed automatically.")
+            Toggle("Check for updates once a day", isOn: $autoCheckUpdates)
+                .toggleStyle(.switch)
+            HStack(spacing: 10) {
+                Button("Check Now") { Task { await updates.checkNow() } }
+                    .disabled(updates.isChecking)
+                if updates.isChecking {
+                    ProgressView().controlSize(.small)
+                } else if let result = updates.lastResult {
+                    Text(result.summary).orbFont(.footnote).foregroundStyle(.secondary)
+                    if case .available(let release) = result {
+                        Link("View Release →", destination: release.pageURL).orbFont(.footnote)
+                    }
+                }
+            }
+            Text("This is version \(updates.currentVersion).")
+                .orbFont(.caption).foregroundStyle(.secondary)
+        }
+    }
+
     // MARK: - API Key
 
     private var apiKeySection: some View {
         VStack(alignment: .leading, spacing: 16) {
-            Label("Inference Key", systemImage: "key.fill")
-                .orbFont(size: 17, weight: .semibold)
+            SettingsSectionHeader("Inference Key", symbol: "key.fill",
+                                  subtitle: ManagementKeyPanel.inferenceExplanation)
 
-            Text(ManagementKeyPanel.inferenceExplanation)
-                .font(.callout)
-                .foregroundStyle(.secondary)
+            SettingsStatusRow(
+                tone: inference.hasKey ? .ok : .attention,
+                title: inference.statusTitle,
+                detail: inference.maskedKey
+            )
 
-            Divider()
-
-            // Current key status
-            HStack {
-                Image(systemName: KeychainManager.hasAPIKey ? "checkmark.circle.fill" : "exclamationmark.circle.fill")
-                    .foregroundStyle(KeychainManager.hasAPIKey ? Color.green : Color.red)
-                Text(KeychainManager.hasAPIKey ? "Inference key configured" : "No inference key set")
-                    .font(.subheadline.weight(.medium))
-
-                Spacer()
-
-                if let masked = KeychainManager.maskedKey {
-                    Text(masked)
-                        .orbFont(size: 12, design: .monospaced)
-                        .foregroundStyle(.secondary)
+            if !inference.hasKey {
+                VStack(alignment: .leading, spacing: 6) {
+                    OpenRouterSignInButton(model: signIn)
+                    Text("Creates a key for ORB on openrouter.ai and saves it here. Or paste a key below.")
+                        .orbFont(.caption).foregroundStyle(.secondary)
                 }
             }
-            .padding(12)
-            .background(.orbSurface(0.04), in: RoundedRectangle(cornerRadius: 10))
-            .overlay { RoundedRectangle(cornerRadius: 10).stroke(.orbSurface(0.07), lineWidth: 0.5) }
 
             // Key input
             VStack(alignment: .leading, spacing: 8) {
-                Text("Enter Inference Key")
-                    .font(.subheadline.weight(.medium))
+                Text(inference.hasKey ? "Replace Inference Key" : "Paste an Inference Key")
+                    .orbFont(.body, weight: .medium)
 
                 HStack {
                     Group {
                         if showKey {
-                            TextField("sk-or-v1-...", text: $apiKeyInput)
+                            TextField("sk-or-v1-...", text: $inference.draft)
                         } else {
-                            SecureField("sk-or-v1-...", text: $apiKeyInput)
+                            SecureField("sk-or-v1-...", text: $inference.draft)
                         }
                     }
                     .textFieldStyle(.roundedBorder)
                     .orbFont(size: 13, design: .monospaced)
+                    .onSubmit(saveInferenceKey)
 
                     Button {
                         showKey.toggle()
                     } label: {
                         Image(systemName: showKey ? "eye.slash" : "eye")
                     }
-                    .buttonStyle(.plain)
+                    .buttonStyle(.borderless)
                     .help(showKey ? "Hide key" : "Show key")
+                    .accessibilityLabel(showKey ? "Hide key" : "Show key")
                 }
 
-                if let hint = KeyFieldValidation.check(apiKeyInput).message {
+                if let hint = KeyFieldValidation.check(inference.draft).message {
                     Label(hint, systemImage: "info.circle")
-                        .font(.callout).foregroundStyle(.secondary)
+                        .orbFont(.footnote).foregroundStyle(.secondary)
                         .accessibilityLabel("Key format note: \(hint)")
                 }
                 HStack {
-                    Button("Save Key") {
-                        let trimmed = apiKeyInput.trimmingCharacters(in: .whitespacesAndNewlines)
-                        guard !trimmed.isEmpty else { return }
-                        var failure: String?
-                        if keySave.run({ failure = KeychainManager.saveAPIKey(trimmed); return failure }) {
-                            keyActionError = nil
-                            apiKeyInput = ""
-                            Task { await refreshAccount() }
-                        } else {
-                            keyActionError = failure
-                        }
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .disabled(apiKeyInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    Button(inference.hasKey ? "Replace Key" : "Save Key", action: saveInferenceKey)
+                        .buttonStyle(.borderedProminent)
+                        .tint(ORBTheme.accent)
+                        .disabled(!inference.canSave)
 
                     SaveStatusLabel(status: keySave.status)
 
                     Spacer()
 
-                    if KeychainManager.hasAPIKey {
+                    if inference.hasKey {
                         Button("Remove Key", role: .destructive) {
                             showRemoveKeyConfirmation = true
                         }
                         .buttonStyle(.bordered)
-
-                        if showKeyDeleted {
-                            Label("Removed", systemImage: "trash.fill")
-                                .foregroundStyle(.red)
-                                .font(.subheadline)
-                        }
                     }
                 }
 
-                if let keyActionError {
-                    Label(keyActionError, systemImage: "exclamationmark.triangle.fill")
-                        .font(.caption)
-                        .foregroundStyle(.red)
+                if let error = inference.actionError {
+                    SettingsNotice(kind: .error, message: error)
                 }
             }
 
-            Divider()
-
-            // Quick link
-            HStack {
-                Link("Get an API key from OpenRouter →", destination: URL(string: "https://openrouter.ai/settings/keys")!)
-                    .font(.callout)
-                Spacer()
-            }
+            Link("Get an API key from OpenRouter →", destination: OpenRouterLinks.keys)
+                .orbFont(.footnote)
         }
+    }
+
+    private func saveInferenceKey() {
+        guard inference.canSave else { return }
+        let trimmed = inference.trimmedDraft
+        var failure: String?
+        if keySave.run({ failure = KeychainManager.saveAPIKey(trimmed); return failure }) {
+            inference.didSave(masked: KeychainManager.maskedKey)
+            Task { await refreshAccount() }
+        } else {
+            inference.actionError = failure
+        }
+    }
+
+    private func reloadInferenceKey() {
+        let has = KeychainManager.hasAPIKey
+        inference.reload(hasKey: has, masked: has ? KeychainManager.maskedKey : nil)
     }
 
     // MARK: - Management Key (role-aware credentials, F03/W04)
 
     private var managementKeySection: some View {
         VStack(alignment: .leading, spacing: 16) {
-            Label("Management Key", systemImage: "lock.shield")
-                .orbFont(size: 17, weight: .semibold)
+            SettingsSectionHeader("Management Key", symbol: "lock.shield",
+                                  subtitle: ManagementKeyPanel.explanation)
 
-            Text(ManagementKeyPanel.explanation)
-                .font(.callout)
-                .foregroundStyle(.secondary)
-
-            // Current configured state, read from the service.
-            HStack {
-                Image(systemName: account.hasManagementKey ? "checkmark.circle.fill" : "minus.circle")
-                    .foregroundStyle(account.hasManagementKey ? Color.green : Color.orange)
-                Text(account.hasManagementKey
-                    ? "Management key configured"
-                    : "No management key set")
-                    .font(.subheadline.weight(.medium))
-                Spacer()
-            }
-            .padding(12)
-            .background(.orbSurface(0.04), in: RoundedRectangle(cornerRadius: 10))
-            .overlay { RoundedRectangle(cornerRadius: 10).stroke(.orbSurface(0.07), lineWidth: 0.5) }
+            SettingsStatusRow(
+                tone: account.hasManagementKey ? .ok : .neutral,
+                title: account.hasManagementKey ? "Management key configured" : "No management key set"
+            )
 
             VStack(alignment: .leading, spacing: 8) {
-                Text(account.hasManagementKey ? "Replace Management Key" : "Enter Management Key")
-                    .font(.subheadline.weight(.medium))
+                Text(account.hasManagementKey ? "Replace Management Key" : "Paste a Management Key")
+                    .orbFont(.body, weight: .medium)
 
                 // Write-only by design: a SecureField with no reveal affordance.
                 // The value is never displayed back, echoed, or logged.
                 SecureField("sk-or-...", text: $management.draftKey)
                     .textFieldStyle(.roundedBorder)
                     .orbFont(size: 13, design: .monospaced)
+                    .onSubmit(saveManagementKey)
+
+                if let hint = management.formatHint {
+                    Label(hint, systemImage: "info.circle")
+                        .orbFont(.footnote).foregroundStyle(.secondary)
+                        .accessibilityLabel("Key format note: \(hint)")
+                }
 
                 HStack {
-                    Button(account.hasManagementKey ? "Replace Key" : "Save Key") {
-                        managementSave.begin()
-                        management.saveDraft(into: account)
-                        // A newly-authorized role can now load the locked panels.
-                        if management.showSaved {
-                            managementSave.succeed()
-                            Task { await refreshAccount() }
-                        } else if let reason = management.actionError {
-                            managementSave.fail(reason)
-                        } else {
-                            managementSave.fail("The key was not accepted.")
-                        }
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .disabled(!management.canSave)
+                    Button(account.hasManagementKey ? "Replace Key" : "Save Key", action: saveManagementKey)
+                        .buttonStyle(.borderedProminent)
+                        .tint(ORBTheme.accent)
+                        .disabled(!management.canSave)
 
                     SaveStatusLabel(status: managementSave.status)
 
                     Spacer()
 
                     if account.hasManagementKey {
-                        Button("Remove Key") {
+                        Button("Remove Key", role: .destructive) {
                             showRemoveManagementKeyConfirmation = true
                         }
-                        .foregroundStyle(.red)
+                        .buttonStyle(.bordered)
                     }
                 }
 
                 if let error = management.actionError {
-                    Label(error, systemImage: "exclamationmark.triangle.fill")
-                        .font(.caption)
-                        .foregroundStyle(.red)
+                    SettingsNotice(kind: .error, message: error)
                 }
             }
 
-            Link(
-                "Create a management key on openrouter.ai →",
-                destination: URL(string: "https://openrouter.ai/settings/keys")!
-            )
-            .font(.callout)
+            Link("Create a management key on openrouter.ai →", destination: OpenRouterLinks.managementKeys)
+                .orbFont(.footnote)
         }
     }
 
-    // MARK: - Credits
+    private func saveManagementKey() {
+        guard management.canSave else { return }
+        managementSave.begin()
+        management.saveDraft(into: account)
+        // A newly-authorized role can now load the locked panels.
+        if management.showSaved {
+            managementSave.succeed()
+            Task { await refreshAccount() }
+        } else if let reason = management.actionError {
+            managementSave.fail(reason)
+        } else {
+            managementSave.fail("The key was not accepted.")
+        }
+    }
+
+    // MARK: - Credits (OpenRouter account)
 
     private var creditsSection: some View {
         VStack(alignment: .leading, spacing: 16) {
-            HStack {
-                Label("Account Credits", systemImage: "dollarsign.circle.fill")
-                    .orbFont(size: 17, weight: .semibold)
-                Spacer()
-                if account.isLoadingCredits {
-                    ProgressView().scaleEffect(0.7)
-                } else {
-                    Button {
-                        Task { await account.fetchCredits() }
-                    } label: {
-                        Image(systemName: "arrow.clockwise")
-                    }
-                    .buttonStyle(.plain)
-                    .help("Refresh credits")
+            SettingsSectionHeader("OpenRouter Account · Balance", symbol: "dollarsign.circle.fill",
+                                  subtitle: "Account-wide, from OpenRouter. Includes every app and device using your keys.") {
+                SettingsRefreshButton(isLoading: account.isLoadingCredits, help: "Refresh credits") {
+                    Task { await account.fetchCredits() }
                 }
             }
 
             if !panelAvailable(.credits) {
-                noKeyBanner(.credits)
+                SettingsNotice(kind: .info, message: AccountPanel.credits.missingKeyMessage)
             } else if let error = account.creditsError {
-                ErrorBanner(message: error)
+                SettingsNotice(kind: .error, message: error)
             } else if let credits = account.credits {
+                let usedShare = credits.totalCredits > 0 ? min(credits.totalUsage / credits.totalCredits, 1) : 0
                 LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 16) {
-                    CreditCard(title: "Total Credits", value: formatCurrency(credits.totalCredits), icon: "banknote.fill", color: .green)
-                    CreditCard(title: "Total Used", value: formatCurrency(credits.totalUsage), icon: "chart.line.downtrend.xyaxis", color: .orange)
-                    CreditCard(title: "Remaining", value: formatCurrency(credits.remaining), icon: "wallet.bifold.fill", color: credits.remaining > 0 ? .blue : .red)
-                    CreditCard(title: "Usage %", value: credits.totalCredits > 0 ? String(format: "%.1f%%", credits.totalUsage / credits.totalCredits * 100) : "0%", icon: "percent", color: .purple)
+                    CreditCard(title: "Remaining", value: ORBMoney.format(credits.remaining), icon: "wallet.bifold.fill",
+                               color: credits.remaining > 0 ? ORBTheme.success : ORBTheme.danger)
+                    CreditCard(title: "Total purchased", value: ORBMoney.format(credits.totalCredits), icon: "banknote.fill", color: ORBTheme.accent)
+                    CreditCard(title: "Used (all time)", value: ORBMoney.format(credits.totalUsage), icon: "chart.line.downtrend.xyaxis", color: ORBTheme.warning)
+                    CreditCard(title: "Used share", value: credits.totalCredits > 0 ? String(format: "%.1f%%", usedShare * 100) : "—",
+                               icon: "percent", color: ORBTheme.info)
                 }
 
-                // Usage bar
                 if credits.totalCredits > 0 {
                     VStack(alignment: .leading, spacing: 4) {
                         GeometryReader { geo in
                             ZStack(alignment: .leading) {
+                                RoundedRectangle(cornerRadius: 4).fill(.quaternary)
                                 RoundedRectangle(cornerRadius: 4)
-                                    .fill(.quaternary)
-                                RoundedRectangle(cornerRadius: 4)
-                                    .fill(credits.remaining > 0 ? Color.blue : Color.red)
-                                    .frame(width: geo.size.width * CGFloat(min(credits.totalUsage / credits.totalCredits, 1.0)))
+                                    .fill(credits.remaining > 0 ? ORBTheme.accent : ORBTheme.danger)
+                                    .frame(width: geo.size.width * CGFloat(usedShare))
                             }
                         }
                         .frame(height: 8)
+                        .accessibilityElement()
+                        .accessibilityLabel("Credits used")
+                        .accessibilityValue(String(format: "%.0f percent", usedShare * 100))
                         HStack {
-                            Text("0%")
-                                .font(.caption2).foregroundStyle(.tertiary)
+                            Text("0%").orbFont(.caption).foregroundStyle(.tertiary)
                             Spacer()
-                            Text("Used \(String(format: "%.1f%%", credits.totalUsage / credits.totalCredits * 100))")
-                                .font(.caption2).foregroundStyle(.secondary)
+                            Text("Used \(String(format: "%.1f%%", usedShare * 100))").orbFont(.caption).foregroundStyle(.secondary)
                             Spacer()
-                            Text("100%")
-                                .font(.caption2).foregroundStyle(.tertiary)
+                            Text("100%").orbFont(.caption).foregroundStyle(.tertiary)
                         }
                     }
                     .padding(.top, 4)
                 }
             } else {
                 Text(ManagementKeyPanel.creditsEmptyMessage)
+                    .orbFont(.footnote)
                     .foregroundStyle(.secondary)
             }
         }
     }
 
-    // MARK: - Activity
+    // MARK: - Activity (OpenRouter account, last 30 days)
 
     private var activitySection: some View {
         VStack(alignment: .leading, spacing: 16) {
-            HStack {
-                Label("Usage Activity", systemImage: "chart.bar.fill")
-                    .orbFont(size: 17, weight: .semibold)
-                Spacer()
-                if account.isLoadingActivity {
-                    ProgressView().scaleEffect(0.7)
-                } else {
-                    Button {
-                        Task { await account.fetchActivity() }
-                    } label: {
-                        Image(systemName: "arrow.clockwise")
-                    }
-                    .buttonStyle(.plain)
-                    .help("Refresh activity")
+            SettingsSectionHeader("OpenRouter Account · Last 30 Days", symbol: "chart.bar.fill",
+                                  subtitle: "Account-wide activity reported by OpenRouter for the last 30 UTC days.") {
+                SettingsRefreshButton(isLoading: account.isLoadingActivity, help: "Refresh activity") {
+                    Task { await account.fetchActivity() }
                 }
             }
 
             if !panelAvailable(.activity) {
-                noKeyBanner(.activity)
+                SettingsNotice(kind: .info, message: AccountPanel.activity.missingKeyMessage)
             } else if let error = account.activityError {
-                ErrorBanner(message: error)
+                SettingsNotice(kind: .error, message: error)
             } else if account.activity.isEmpty && !account.isLoadingActivity {
-                Text("No activity found. Usage data appears after you make API calls.")
+                Text("No activity in the last 30 days. Usage appears here after you make API calls.")
+                    .orbFont(.footnote)
                     .foregroundStyle(.secondary)
             } else {
-                // Summary stats
                 LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible()), GridItem(.flexible())], spacing: 12) {
-                    CreditCard(title: "Total Spend", value: formatCurrency(account.totalSpend), icon: "dollarsign.circle", color: .orange)
-                    CreditCard(title: "Requests", value: "\(account.totalRequests)", icon: "arrow.left.arrow.right", color: .blue)
-                    CreditCard(title: "Models Used", value: "\(account.topModels.count)", icon: "cpu", color: .purple)
+                    CreditCard(title: "Spend · 30 days", value: ORBMoney.format(account.totalSpend), icon: "dollarsign.circle", color: ORBTheme.warning)
+                    CreditCard(title: "Requests · 30 days", value: "\(account.totalRequests)", icon: "arrow.left.arrow.right", color: ORBTheme.info)
+                    CreditCard(title: "Models used", value: "\(account.topModels.count)", icon: "cpu", color: ORBTheme.accent)
                 }
 
-                // Top models
                 if !account.topModels.isEmpty {
                     VStack(alignment: .leading, spacing: 8) {
-                        Text("Top Models")
-                            .font(.headline)
-
+                        SettingsSubheading("Top models")
                         ForEach(account.topModels.prefix(10), id: \.model) { item in
                             HStack {
                                 Text(item.model)
                                     .orbFont(size: 12, design: .monospaced)
                                     .lineLimit(1)
+                                    .truncationMode(.middle)
                                 Spacer()
                                 Text("\(item.requests) reqs")
-                                    .font(.caption)
+                                    .orbFont(.caption)
                                     .foregroundStyle(.secondary)
-                                Text(formatCurrency(item.usage))
+                                Text(ORBMoney.format(item.usage))
                                     .orbFont(size: 12, design: .monospaced)
-                                    .foregroundStyle(.orange)
+                                    .frame(minWidth: 70, alignment: .trailing)
                             }
                             .padding(.vertical, 2)
                         }
@@ -534,20 +514,16 @@ struct SettingsView: View {
                     .padding(.top, 8)
                 }
 
-                // Daily spend
                 if !account.dailySpend.isEmpty {
                     VStack(alignment: .leading, spacing: 8) {
-                        Text("Daily Spend")
-                            .font(.headline)
-
+                        SettingsSubheading("Daily spend")
                         ForEach(account.dailySpend.prefix(14), id: \.date) { item in
                             HStack {
                                 Text(item.date)
                                     .orbFont(size: 12, design: .monospaced)
                                 Spacer()
-                                Text(formatCurrency(item.amount))
+                                Text(ORBMoney.format(item.amount))
                                     .orbFont(size: 12, design: .monospaced)
-                                    .foregroundStyle(.orange)
                             }
                             .padding(.vertical, 2)
                         }
@@ -561,32 +537,12 @@ struct SettingsView: View {
     // MARK: - Helpers
 
     private func panelAvailable(_ panel: AccountPanel) -> Bool {
-        panel.isAvailable(hasInferenceKey: KeychainManager.hasAPIKey, hasManagementKey: account.hasManagementKey)
-    }
-
-    private func noKeyBanner(_ panel: AccountPanel) -> some View {
-        HStack(spacing: 8) {
-            Image(systemName: "key.fill")
-                .foregroundStyle(.orange)
-            Text(panel.missingKeyMessage)
-                .font(.callout)
-                .foregroundStyle(.secondary)
-        }
-        .padding(12)
-        .background(.orange.opacity(0.1))
-        .clipShape(RoundedRectangle(cornerRadius: 8))
-    }
-
-    private func formatCurrency(_ value: Double) -> String {
-        if value < 0.01 {
-            return String(format: "$%.4f", value)
-        }
-        return String(format: "$%.2f", value)
+        panel.isAvailable(hasInferenceKey: inference.hasKey, hasManagementKey: account.hasManagementKey)
     }
 
     private func refreshAccount() async {
         let panels = AccountPanel.panelsToRefresh(
-            hasInferenceKey: KeychainManager.hasAPIKey, hasManagementKey: account.hasManagementKey
+            hasInferenceKey: inference.hasKey, hasManagementKey: account.hasManagementKey
         )
         if panels.contains(.credits) { await account.fetchCredits() }
         if panels.contains(.activity) { await account.fetchActivity() }
@@ -597,44 +553,38 @@ struct SettingsView: View {
 
     private var keyInfoSection: some View {
         VStack(alignment: .leading, spacing: 16) {
-            HStack {
-                Label("Current Key", systemImage: "key.fill")
-                    .orbFont(size: 17, weight: .semibold)
-                Spacer()
-                Button {
+            SettingsSectionHeader("Current Inference Key", symbol: "gauge.with.dots.needle.67percent",
+                                  subtitle: "Limits and spend OpenRouter reports for the inference key above.") {
+                SettingsRefreshButton(isLoading: false, help: "Refresh key info") {
                     Task { await directory.fetchKeyInfo() }
-                } label: {
-                    Image(systemName: "arrow.clockwise")
                 }
-                .buttonStyle(.plain)
-                .help("Refresh key info")
             }
 
             if !panelAvailable(.keyInfo) {
-                noKeyBanner(.keyInfo)
+                SettingsNotice(kind: .info, message: AccountPanel.keyInfo.missingKeyMessage)
             } else if let error = directory.lastError, directory.keyInfo == nil {
-                ErrorBanner(message: error)
+                SettingsNotice(kind: .error, message: error)
             } else if let info = directory.keyInfo {
                 LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 16) {
-                    CreditCard(title: "Label", value: info.label ?? "—", icon: "tag.fill", color: .blue)
+                    CreditCard(title: "Label", value: info.label ?? ORBMoney.unknown, icon: "tag.fill", color: ORBTheme.info)
                     CreditCard(
-                        title: "Spend Limit",
-                        value: info.limit.map { formatCurrency($0) } ?? "No limit",
-                        icon: "gauge.with.dots.needle.67percent", color: .purple
+                        title: "Spend limit",
+                        value: info.limit.map { ORBMoney.format($0) } ?? "No limit",
+                        icon: "gauge.with.dots.needle.67percent", color: ORBTheme.accent
                     )
                     CreditCard(
-                        title: "Remaining",
-                        value: info.limitRemaining.map { formatCurrency($0) } ?? "—",
+                        title: "Limit remaining",
+                        value: ORBMoney.format(info.limitRemaining),
                         icon: "wallet.bifold.fill",
-                        color: (info.limitRemaining ?? 1) > 0 ? .green : .red
+                        color: (info.limitRemaining ?? 1) > 0 ? ORBTheme.success : ORBTheme.danger
                     )
-                    CreditCard(title: "Used (total)", value: formatCurrency(info.usage ?? 0), icon: "chart.line.uptrend.xyaxis", color: .orange)
+                    CreditCard(title: "Used (all time)", value: ORBMoney.format(info.usage), icon: "chart.line.uptrend.xyaxis", color: ORBTheme.warning)
                 }
                 VStack(alignment: .leading, spacing: 6) {
-                    keyInfoRow("Reset", info.limitReset ?? "—")
-                    keyInfoRow("Today", formatCurrency(info.usageDaily ?? 0))
-                    keyInfoRow("This week", formatCurrency(info.usageWeekly ?? 0))
-                    keyInfoRow("This month", formatCurrency(info.usageMonthly ?? 0))
+                    keyInfoRow("Reset", info.limitReset ?? ORBMoney.unknown)
+                    keyInfoRow("Today", ORBMoney.format(info.usageDaily))
+                    keyInfoRow("This week", ORBMoney.format(info.usageWeekly))
+                    keyInfoRow("This month", ORBMoney.format(info.usageMonthly))
                     if info.isFreeTier == true {
                         keyInfoRow("Tier", "Free")
                     }
@@ -651,6 +601,7 @@ struct SettingsView: View {
                 .padding(.top, 4)
             } else {
                 Text(ManagementKeyPanel.keyInfoEmptyMessage)
+                    .orbFont(.footnote)
                     .foregroundStyle(.secondary)
             }
         }
@@ -658,43 +609,87 @@ struct SettingsView: View {
 
     private func keyInfoRow(_ label: String, _ value: String) -> some View {
         HStack {
-            Text(label).font(.callout).foregroundStyle(.secondary)
+            Text(label).orbFont(.footnote).foregroundStyle(.secondary)
             Spacer()
             Text(value).orbFont(size: 12, design: .monospaced)
         }
         .padding(.vertical, 2)
     }
 
+    // MARK: - Storage & Diagnostics
+
+    private var storageSection: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            SettingsSectionHeader("Storage & Diagnostics", symbol: "internaldrive",
+                                  subtitle: "Disk space ORB's own data uses on this Mac.") {
+                SettingsRefreshButton(isLoading: storage.isMeasuring, help: "Measure again") {
+                    Task { await storage.refresh() }
+                }
+            }
+            .task { await storage.refresh() }
+
+            if let report = storage.report {
+                Grid(alignment: .leadingFirstTextBaseline, horizontalSpacing: 16, verticalSpacing: 6) {
+                    storageRow("Database", StorageFormat.bytes(report.databaseBytes))
+                    storageRow("Database journal (WAL)", StorageFormat.bytes(report.walBytes))
+                    storageRow("Saved media", "\(StorageFormat.bytes(report.assetsBytes)) · \(report.assetFileCount) file\(report.assetFileCount == 1 ? "" : "s")")
+                    storageRow("Recovery backups", "\(StorageFormat.bytes(report.recoveryBackupBytes)) · \(report.recoveryBackupCount)")
+                    Divider().gridCellUnsizedAxes(.horizontal)
+                    storageRow("Total", StorageFormat.bytes(report.totalBytes), emphasized: true)
+                }
+            } else {
+                HStack(spacing: 8) {
+                    ProgressView().controlSize(.small)
+                    Text("Measuring…").orbFont(.footnote).foregroundStyle(.secondary)
+                }
+            }
+
+            HStack(spacing: 10) {
+                Button("Reveal in Finder") { storage.revealInFinder() }
+                Button("Copy Diagnostics") {
+                    let text = storage.diagnosticsText(
+                        hasInferenceKey: OnboardingGate.isReviewMode() ? nil : inference.hasKey,
+                        hasManagementKey: OnboardingGate.isReviewMode() ? nil : account.hasManagementKey
+                    )
+                    AppToasts.copy(text, what: "Diagnostics")
+                }
+                .help("Copies versions, counts and sizes for a bug report. No keys, file paths or conversation content.")
+            }
+        }
+    }
+
+    private func storageRow(_ label: String, _ value: String, emphasized: Bool = false) -> some View {
+        GridRow {
+            Text(label).orbFont(.footnote, weight: emphasized ? .semibold : nil).foregroundStyle(emphasized ? .primary : .secondary)
+            Text(value).orbFont(.footnote, weight: emphasized ? .semibold : nil).monospacedDigit()
+        }
+    }
+
     // MARK: - Providers (`GET /providers`)
 
     private var providersSection: some View {
         VStack(alignment: .leading, spacing: 16) {
-            HStack {
-                Label("Providers", systemImage: "building.2.fill")
-                    .orbFont(size: 17, weight: .semibold)
-                Spacer()
-                Button {
+            SettingsSectionHeader("Provider Directory", symbol: "building.2.fill",
+                                  subtitle: "Read-only: the inference providers that serve models on OpenRouter.") {
+                SettingsRefreshButton(isLoading: false, help: "Refresh providers") {
                     Task { await directory.fetchProviders() }
-                } label: {
-                    Image(systemName: "arrow.clockwise")
                 }
-                .buttonStyle(.plain)
-                .help("Refresh providers")
             }
             .task { await directory.fetchProviders() }
 
             if let error = directory.lastError, directory.providers.isEmpty {
-                ErrorBanner(message: error)
+                SettingsNotice(kind: .error, message: error)
             } else if directory.providers.isEmpty {
                 Text("No providers loaded yet.")
+                    .orbFont(.footnote)
                     .foregroundStyle(.secondary)
             } else {
                 Text("\(directory.providers.count) inference providers serve models on OpenRouter.")
-                    .font(.callout).foregroundStyle(.secondary)
+                    .orbFont(.footnote).foregroundStyle(.secondary)
                 LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 8) {
                     ForEach(directory.providers) { provider in
                         HStack(spacing: 6) {
-                            Circle().fill(Color.accentColor.opacity(0.6)).frame(width: 7, height: 7)
+                            Circle().fill(ORBTheme.accent.opacity(0.6)).frame(width: 7, height: 7)
                             VStack(alignment: .leading, spacing: 1) {
                                 Text(provider.name).orbFont(size: 12, weight: .medium).lineLimit(1)
                                 Text(provider.slug).orbFont(size: 11, design: .monospaced).foregroundStyle(.tertiary).lineLimit(1)
@@ -703,10 +698,74 @@ struct SettingsView: View {
                         }
                         .padding(8)
                         .background(.orbSurface(0.04))
-                        .clipShape(RoundedRectangle(cornerRadius: 8))
+                        .clipShape(RoundedRectangle(cornerRadius: ORBMetrics.radiusSM))
                     }
                 }
             }
+        }
+    }
+}
+
+// MARK: - Inference key panel
+
+/// Cached state for the Settings inference-key section. The view fills it
+/// from the Keychain on appear and after save/remove/sign-in, so a redraw
+/// (every keystroke in the field) never reads the secret.
+struct InferenceKeyPanel: Equatable {
+    enum Status: Equatable {
+        case unknown
+        case missing
+        case configured(masked: String?)
+        /// Just removed: shown as "Key removed" until the next save.
+        case removed
+    }
+
+    var status: Status = .unknown
+    var draft = ""
+    var actionError: String?
+
+    var trimmedDraft: String { draft.trimmingCharacters(in: .whitespacesAndNewlines) }
+    /// Format-valid keys only, same rule as onboarding.
+    var canSave: Bool { KeyFieldValidation.check(draft) == .valid }
+
+    var hasKey: Bool {
+        if case .configured = status { return true }
+        return false
+    }
+
+    var maskedKey: String? {
+        if case .configured(let masked) = status { return masked }
+        return nil
+    }
+
+    var statusTitle: String {
+        switch status {
+        case .configured: return "Inference key configured"
+        case .removed: return "Key removed"
+        case .missing, .unknown: return "No inference key set"
+        }
+    }
+
+    mutating func reload(hasKey: Bool, masked: String?) {
+        if hasKey {
+            status = .configured(masked: masked)
+        } else if status != .removed {
+            status = .missing
+        }
+    }
+
+    mutating func didSave(masked: String?) {
+        draft = ""
+        actionError = nil
+        status = .configured(masked: masked)
+    }
+
+    mutating func didRemove(success: Bool) {
+        if success {
+            actionError = nil
+            status = .removed
+        } else {
+            actionError = "The API key could not be removed from Keychain."
         }
     }
 }
@@ -744,7 +803,10 @@ struct ManagementKeyPanel {
 
     static let keyInfoEmptyMessage = "Click the refresh button to load key limits and usage."
 
-    var canSave: Bool { !normalizedDraft.isEmpty }
+    /// Format-valid keys only (same rule as the inference key and onboarding).
+    var canSave: Bool { KeyFieldValidation.check(draftKey) == .valid }
+    /// Why Save is disabled, shown under the field.
+    var formatHint: String? { KeyFieldValidation.check(draftKey).message }
     private var normalizedDraft: String {
         draftKey.trimmingCharacters(in: .whitespacesAndNewlines)
     }
@@ -801,8 +863,9 @@ struct CreditCard: View {
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(12)
-        .background(color.opacity(0.08))
-        .clipShape(RoundedRectangle(cornerRadius: 10))
+        .background(color.opacity(ORBPalette.subtleFillAlpha))
+        .clipShape(RoundedRectangle(cornerRadius: ORBMetrics.radiusMD))
+        .accessibilityElement(children: .combine)
     }
 }
 
@@ -810,15 +873,6 @@ struct ErrorBanner: View {
     let message: String
 
     var body: some View {
-        HStack(spacing: 8) {
-            Image(systemName: "exclamationmark.triangle.fill")
-                .foregroundStyle(.red)
-            Text(message)
-                .font(.callout)
-                .foregroundStyle(.secondary)
-        }
-        .padding(12)
-        .background(.red.opacity(0.08))
-        .clipShape(RoundedRectangle(cornerRadius: 8))
+        SettingsNotice(kind: .error, message: message)
     }
 }

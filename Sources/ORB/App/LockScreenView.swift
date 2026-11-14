@@ -1,18 +1,21 @@
 import SwiftUI
+import AppKit
 
 /// Full-window gate shown until the user performs the one "allow all access"
 /// gesture (Touch ID, Apple Watch, or the Mac password). Replaces the legacy
 /// keychain password dialog with modern authentication.
+///
+/// The system prompt starts by itself once per lock episode while ORB is the
+/// active app (at launch, or when you come back after an idle relock), so
+/// unlocking is one touch rather than a click and then a touch.
 struct LockScreenView: View {
     @ObservedObject var lock: AppLock
     let accent: Color
     /// Opens Settings on the pane that holds the lock preference (the caller
     /// stores `SettingsPane.lockSettings` first), so it is one click away.
     var onOpenSettings: (() -> Void)? = nil
-
-    /// Deepened accent for the primary button: white on the raw accent is only
-    /// ~3.4:1 contrast, this keeps the label comfortably above 4.5:1.
-    private let buttonFill = Color(red: 0.34, green: 0.27, blue: 0.69)
+    /// Injected so the view can be rendered in tests without an active app.
+    var appIsActive: () -> Bool = { NSApp?.isActive ?? false }
 
     var body: some View {
         ZStack {
@@ -28,21 +31,23 @@ struct LockScreenView: View {
                             .foregroundStyle(accent)
                     }
                     .frame(width: 84, height: 84)
+                    .accessibilityHidden(true)
 
                     // Semantic label colours: the gate sits on the window
                     // background, which is light in the Light appearance.
                     Text("ORB is locked")
                         .orbFont(size: 22, weight: .semibold)
                         .foregroundStyle(.primary)
+                        .accessibilityAddTraits(.isHeader)
 
                     VStack(spacing: 6) {
-                        Text("Unlock with \(lock.biometricLabel) or your Mac password.")
+                        Text(LockCopy.prompt(biometric: lock.biometricName))
+                            .orbFont(size: 13)
                             .foregroundStyle(.primary.opacity(0.85))
                         Text("Your API keys and sessions stay protected. ORB locks again when your Mac sleeps or locks, or after a period of inactivity.")
                             .orbFont(size: 12)
                             .foregroundStyle(.secondary)
                     }
-                    .orbFont(size: 13)
                     .multilineTextAlignment(.center)
                     .frame(maxWidth: 350)
                 }
@@ -55,27 +60,31 @@ struct LockScreenView: View {
                             if lock.isUnlocking {
                                 ProgressView()
                                     .controlSize(.small)
-                                    .tint(.white)
+                                    .tint(ORBTheme.onAccent)
                             } else {
                                 Image(systemName: "lock.open")
                             }
                             Text(lock.isUnlocking ? "Authenticating…" : "Unlock")
                         }
                         .orbFont(size: 13, weight: .semibold)
-                        .foregroundStyle(.white)
+                        // onAccent on the accent fill is contrast-tested
+                        // (≥ 4.5:1) for every accent in both appearances.
+                        .foregroundStyle(ORBTheme.onAccent)
                         .padding(.horizontal, 22)
                         .padding(.vertical, 10)
-                        .background(buttonFill)
-                        .clipShape(RoundedRectangle(cornerRadius: 10))
+                        .background(ORBTheme.accent)
+                        .clipShape(RoundedRectangle(cornerRadius: ORBMetrics.radiusMD))
                     }
                     .buttonStyle(.plain)
                     .keyboardShortcut(.defaultAction)
                     .disabled(lock.isUnlocking)
 
                     if let failure = lock.lastFailureMessage {
-                        Text(failure)
-                            .orbFont(size: 11)
-                            .foregroundStyle(.red)
+                        Label(failure, systemImage: "exclamationmark.triangle.fill")
+                            .orbFont(size: 12)
+                            .foregroundStyle(ORBTheme.danger)
+                            .multilineTextAlignment(.center)
+                            .frame(maxWidth: 360)
                     }
 
                     if let onOpenSettings {
@@ -89,11 +98,11 @@ struct LockScreenView: View {
                         } label: {
                             Label("Lock settings", systemImage: "gearshape")
                                 .orbFont(size: 12, weight: .medium)
-                                .foregroundStyle(accent)
+                                .foregroundStyle(ORBTheme.accentLink)
                                 .padding(.horizontal, 10)
                                 .padding(.vertical, 6)
-                                .background(accent.opacity(0.12))
-                                .clipShape(RoundedRectangle(cornerRadius: 6))
+                                .background(ORBTheme.accentSubtle)
+                                .clipShape(RoundedRectangle(cornerRadius: ORBMetrics.radiusSM))
                         }
                         .buttonStyle(.plain)
                         .disabled(lock.isUnlocking)
@@ -122,5 +131,14 @@ struct LockScreenView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color(nsColor: .windowBackgroundColor).ignoresSafeArea())
+        .task {
+            // Let the window finish appearing so the system prompt attaches
+            // to a visible ORB window, then ask once.
+            try? await Task.sleep(for: .milliseconds(250))
+            await lock.autoPromptIfNeeded(appIsActive: appIsActive())
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+            Task { await lock.autoPromptIfNeeded(appIsActive: true) }
+        }
     }
 }
