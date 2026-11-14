@@ -66,9 +66,12 @@ struct ReviewPolishTests {
             catalogIds: catalog, favoriteIds: [], selectedModelId: "c/third") == "c/third")
         #expect(PlaygroundModelDefaults.chatFallback(
             catalogIds: catalog, favoriteIds: ["gone/model"], selectedModelId: nil) == "a/first")
+        // Never an ID the catalog lacks: nothing while the catalog is empty
+        // (V-1; it used to be a hard-coded "openai/gpt-4o")…
         #expect(PlaygroundModelDefaults.chatFallback(
-            catalogIds: [], favoriteIds: [], selectedModelId: nil) == "openai/gpt-4o")
+            catalogIds: [], favoriteIds: [], selectedModelId: nil) == "")
+        // …and a curated family's member ahead of the catalog head.
         #expect(PlaygroundModelDefaults.chatFallback(
-            catalogIds: catalog + ["openai/gpt-4o"], favoriteIds: [], selectedModelId: nil) == "openai/gpt-4o")
+            catalogIds: catalog + ["openai/gpt-5.1"], favoriteIds: [], selectedModelId: nil) == "openai/gpt-5.1")
     }
 }

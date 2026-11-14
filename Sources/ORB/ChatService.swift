@@ -135,7 +135,9 @@ final class ChatService: ObservableObject {
     private func loadPersistedConversations() {
         do {
             try store.recoverInterruptedRecords()
-            let records = try store.loadRecords(mode: loadMode).sorted { $0.conversation.createdAt > $1.conversation.createdAt }
+            // Most recently active first, so "first conversation of this mode"
+            // (activation, the session after a delete) is the one last used.
+            let records = try store.loadRecords(mode: loadMode).sorted { $0.conversation.lastActivity > $1.conversation.lastActivity }
             conversations = records.map(\.conversation)
             agentHistories = Dictionary(uniqueKeysWithValues: records.map { ($0.conversation.id, $0.agentHistory) })
         } catch {
@@ -240,22 +242,96 @@ final class ChatService: ObservableObject {
     }
 
     func deleteMessage(_ messageID: UUID, from conversation: ChatConversation) {
-        guard !isRunning(conversationID: conversation.id) else {
+        _ = deleteMessageUndoable(messageID, from: conversation.id)
+    }
+
+    /// What a message delete removed, so the UI can offer Undo.
+    struct MessageDeletion: Equatable {
+        struct Row: Equatable {
+            let message: ChatMessage
+            /// Position in the conversation before the delete.
+            let index: Int
+        }
+        let conversationID: UUID
+        /// Ascending by `index`.
+        let rows: [Row]
+        var count: Int { rows.count }
+    }
+
+    /// The messages a delete of `messageID` removes. A user message "with
+    /// reply" also takes every assistant/tool row up to the next user
+    /// message, so no answer is left without its question.
+    static func messagesDeleted(by messageID: UUID, in messages: [ChatMessage], includingReply: Bool) -> [Int] {
+        guard let start = messages.firstIndex(where: { $0.id == messageID }) else { return [] }
+        guard includingReply, messages[start].role == "user" else { return [start] }
+        var end = start + 1
+        while end < messages.count, messages[end].role != "user" { end += 1 }
+        return Array(start..<end)
+    }
+
+    /// Storage-first delete: rows are removed from the store before memory
+    /// changes, then the conversation is rewritten once so sort order stays
+    /// dense for later incremental saves. Nil, with memory unchanged, when it
+    /// was refused or a removal failed.
+    @discardableResult
+    func deleteMessageUndoable(_ messageID: UUID, from conversationID: UUID, includingReply: Bool = false) -> MessageDeletion? {
+        guard !isRunning(conversationID: conversationID) else {
             lastError = "Messages cannot be deleted while this conversation is running. Stop it first."
-            return
+            return nil
         }
-        guard let index = conversations.firstIndex(where: { $0.id == conversation.id }) else { return }
+        guard let index = conversations.firstIndex(where: { $0.id == conversationID }) else { return nil }
+        let doomed = Self.messagesDeleted(by: messageID, in: conversations[index].messages, includingReply: includingReply)
+        guard !doomed.isEmpty else { return nil }
+        let rows = doomed.map { MessageDeletion.Row(message: conversations[index].messages[$0], index: $0) }
+        var replacement = conversations[index]
+        let removedIDs = Set(rows.map(\.message.id))
+        replacement.messages.removeAll { removedIDs.contains($0.id) }
+        let history = agentHistory(for: replacement)
+        var removed: [UUID] = []
         do {
-            try store.removeMessage(messageID)
+            for row in rows {
+                try store.removeMessage(row.message.id)
+                removed.append(row.message.id)
+            }
         } catch {
+            // Put back anything a multi-row delete already removed.
+            if !removed.isEmpty {
+                try? store.saveRecord(.init(conversation: conversations[index], agentHistory: agentHistories[conversationID] ?? []))
+            }
             lastError = "Could not delete message: \(error.localizedDescription)"
-            return
+            return nil
         }
-        conversations[index].messages.removeAll { $0.id == messageID }
-        rebuildAgentHistory(for: conversation.id)
-        synchronizeActive(conversation.id)
-        do { try saveRecord(conversation.id) }
+        conversations[index] = replacement
+        agentHistories[conversationID] = history
+        synchronizeActive(conversationID)
+        do { try store.saveRecord(.init(conversation: replacement, agentHistory: history)) }
         catch { lastError = "Could not delete message: \(error.localizedDescription)" }
+        return MessageDeletion(conversationID: conversationID, rows: rows)
+    }
+
+    /// Undo for `deleteMessageUndoable`: puts the rows back where they were
+    /// (idempotent; rows already present are skipped) and saves.
+    @discardableResult
+    func restoreMessages(_ deletion: MessageDeletion) -> Bool {
+        guard !isRunning(conversationID: deletion.conversationID),
+              let index = conversations.firstIndex(where: { $0.id == deletion.conversationID }) else { return false }
+        var replacement = conversations[index]
+        let present = Set(replacement.messages.map(\.id))
+        for row in deletion.rows where !present.contains(row.message.id) {
+            replacement.messages.insert(row.message, at: min(row.index, replacement.messages.count))
+        }
+        guard replacement.messages != conversations[index].messages else { return true }
+        let history = agentHistory(for: replacement)
+        do {
+            try store.saveRecord(.init(conversation: replacement, agentHistory: history))
+        } catch {
+            lastError = "Could not restore the message: \(error.localizedDescription)"
+            return false
+        }
+        conversations[index] = replacement
+        agentHistories[deletion.conversationID] = history
+        synchronizeActive(deletion.conversationID)
+        return true
     }
 
     // MARK: - Session management (Phase 5)
@@ -270,7 +346,7 @@ final class ChatService: ObservableObject {
         guard !trimmed.isEmpty, let index = conversations.firstIndex(where: { $0.id == id }) else { return false }
         conversations[index].title = trimmed
         synchronizeActive(id)
-        persist(id)
+        persistMeta(id)
         return true
     }
 
@@ -301,8 +377,11 @@ final class ChatService: ObservableObject {
             },
             systemPrompt: source.systemPrompt
         )
-        copy.totalCost = source.totalCost
-        copy.totalTokens = source.totalTokens
+        // Only the spend that produced the copied messages: a branch of the
+        // first two turns must not inherit the whole source's meter.
+        let totals = Self.copiedUsageTotals(copy.messages)
+        copy.totalCost = totals.cost
+        copy.totalTokens = totals.tokens
         conversations.insert(copy, at: 0)
         rebuildAgentHistory(for: copy.id)
         do {
@@ -315,6 +394,15 @@ final class ChatService: ObservableObject {
         }
         activeConversation = copy
         return copy
+    }
+
+    /// Known cost and tokens recorded on `messages` themselves.
+    static func copiedUsageTotals(_ messages: [ChatMessage]) -> (cost: Double, tokens: Int) {
+        messages.reduce(into: (cost: 0.0, tokens: 0)) { totals, message in
+            guard let usage = message.usage else { return }
+            totals.cost += usage.knownCostSubtotal
+            totals.tokens += usage.totalTokens ?? 0
+        }
     }
 
     /// Edit-and-resend: drops a user message and everything after it and
@@ -430,7 +518,7 @@ final class ChatService: ObservableObject {
             do { try store.saveRecord(record) }
             catch { lastError = "Could not restore a session: \(error.localizedDescription)" }
         }
-        conversations.sort { $0.createdAt > $1.createdAt }
+        conversations.sort { $0.lastActivity > $1.lastActivity }
         // Undo restores into the set the delete left: re-activate a restored
         // session so it is the one on screen again.
         if activeConversation == nil || !conversations.contains(where: { $0.id == activeConversation?.id }) {
@@ -497,6 +585,7 @@ final class ChatService: ObservableObject {
               let conversationIndex = conversations.firstIndex(where: { $0.id == conversationID }),
               commitEdit(edit, in: conversationID) else { return nil }
 
+        var startRows: Set<UUID> = []
         if appendUser {
             let userMessage: ChatMessage
             if let parts, !parts.isEmpty {
@@ -504,6 +593,7 @@ final class ChatService: ObservableObject {
             } else {
                 userMessage = ChatMessage(role: "user", content: text)
             }
+            startRows.insert(userMessage.id)
             conversations[conversationIndex].messages.append(userMessage)
             if conversations[conversationIndex].messages.count == 1 {
                 conversations[conversationIndex].title = Self.derivedTitle(text)
@@ -517,9 +607,13 @@ final class ChatService: ObservableObject {
         } else {
             assistant = ChatMessage(role: "assistant", content: "", status: .streaming)
             conversations[conversationIndex].messages.append(assistant)
+            startRows.insert(assistant.id)
         }
         synchronizeActive(conversationID)
-        persist(conversationID)
+        // Incremental: the new rows only (CORE-4). A regeneration leaves the
+        // replaced reply's row untouched on disk until new output arrives, so
+        // a crash mid-regeneration still has the original answer (CHAT-1).
+        persistRows(conversationID, startRows)
 
         var messages: [AgentAPIMessage] = []
         let conversation = conversations[conversationIndex]
@@ -619,7 +713,9 @@ final class ChatService: ObservableObject {
                     contentCoalescer.flush()
                     reasoningCoalescer.flush()
                     detailCoalescer.flush()
-                    if fullContent.isEmpty, restoreRegeneration(context, message: error.message, usage: latestUsage) { return }
+                    // A failed regeneration keeps the original reply, even
+                    // after partial new text (CHAT-1).
+                    if restoreRegeneration(context, message: error.message, usage: latestUsage, discardedText: fullContent) { return }
                     fail(context: context, message: error.message, status: .failed, finishReason: finishReason, usage: latestUsage)
                     return
                 default: break
@@ -651,14 +747,19 @@ final class ChatService: ObservableObject {
             contentCoalescer.flush()
             reasoningCoalescer.flush()
             detailCoalescer.flush()
-            if fullContent.isEmpty, restoreRegeneration(context, message: "Regeneration was cancelled.", usage: latestUsage) { return }
+            // Stopping a regeneration is a decision against the new reply:
+            // put the original back. No failure phase, so no failure notice.
+            if restoreRegeneration(
+                context, message: "Regeneration stopped. Your previous reply was kept.",
+                usage: latestUsage, phase: .interrupted("cancelled")
+            ) { return }
             finish(context: context, status: .interrupted, finishReason: "cancelled", usage: latestUsage)
         } catch {
             guard owns(context.runID) else { return }
             contentCoalescer.flush()
             reasoningCoalescer.flush()
             detailCoalescer.flush()
-            if fullContent.isEmpty, restoreRegeneration(context, message: error.localizedDescription, usage: latestUsage) { return }
+            if restoreRegeneration(context, message: error.localizedDescription, usage: latestUsage, discardedText: fullContent) { return }
             fail(context: context, message: error.localizedDescription, status: .interrupted, finishReason: finishReason, usage: latestUsage)
         }
     }
@@ -770,23 +871,45 @@ final class ChatService: ObservableObject {
         terminalCleanup(context)
     }
 
-    /// Restores the replaced assistant message of a failed regeneration. The
-    /// attempt still consumed tokens, so its reported usage is applied before
-    /// cleanup — a regeneration that ends with no text must not silently drop
-    /// the spend from the totals and the ledger.
+    /// Restores the replaced assistant message of a regeneration that did not
+    /// complete — failed, cancelled, or empty — whether or not new text had
+    /// already streamed. The attempt still consumed tokens, so its usage
+    /// reaches the conversation totals and the ledger, but not the restored
+    /// reply's own usage footer (that describes the original answer).
+    ///
+    /// Wave 2 (CHAT-6, alternatives): a successful regeneration will push the
+    /// backup into the reply's alternatives instead of discarding it in
+    /// `terminalCleanup`; this restore path stays as is.
     @discardableResult
-    private func restoreRegeneration(_ context: PlaygroundRunContext, message: String, usage: ChatUsage?) -> Bool {
+    private func restoreRegeneration(
+        _ context: PlaygroundRunContext,
+        message: String,
+        usage: ChatUsage?,
+        discardedText: String = "",
+        phase: PlaygroundRunPhase? = nil
+    ) -> Bool {
         guard let backup = regenerationBackups.removeValue(forKey: context.runID),
               mutateMessage(context, mutation: { $0 = backup }) else { return false }
-        lastError = message
+        reasoningActiveRunID = nil
+        let notice = discardedText.isEmpty || phase != nil ? message : "\(message) Your previous reply was kept."
+        lastError = notice
         lastErrorConversationID = context.conversationID
-        apply(usage: usage, to: context)
-        runState.phase = .failed(message)
+        apply(usage: usage, to: context, attachToMessage: false)
+        runState.phase = phase ?? .failed(notice)
         terminalCleanup(context)
         return true
     }
 
-    private func apply(usage: ChatUsage?, to context: PlaygroundRunContext) {
+    /// True while a regeneration has produced nothing visible yet: the
+    /// original reply's stored row must not be overwritten by an empty one.
+    private func regenerationAwaitingOutput(_ context: PlaygroundRunContext) -> Bool {
+        guard regenerationBackups[context.runID] != nil,
+              let message = conversations.first(where: { $0.id == context.conversationID })?
+                .messages.first(where: { $0.id == context.assistantMessageID }) else { return false }
+        return message.content.isEmpty && (message.images ?? []).isEmpty
+    }
+
+    private func apply(usage: ChatUsage?, to context: PlaygroundRunContext, attachToMessage: Bool = true) {
         let index = conversations.firstIndex(where: { $0.id == context.conversationID })
         // Stable run IDs keep model accounting idempotent. Mixed Agent usage
         // gets separate priced/unpriced rows, retaining its known lower bound
@@ -803,25 +926,28 @@ final class ChatService: ObservableObject {
         if let completion = usage.completionTokens {
             tokensPerSecond = Double(completion) / elapsed
         }
-        if let messageIndex = conversations[index].messages.firstIndex(where: { $0.id == context.assistantMessageID }) {
+        if attachToMessage,
+           let messageIndex = conversations[index].messages.firstIndex(where: { $0.id == context.assistantMessageID }) {
             conversations[index].messages[messageIndex].usage = MessageUsage(usage, elapsed: elapsed)
-            synchronizeActive(context.conversationID)
         }
+        synchronizeActive(context.conversationID)
     }
 
     /// Crash-safety snapshot while a run streams: upserts the conversation row
     /// and only the rows this run touches (assistant + inserted tool results).
-    /// The full record is written once at start and once at terminal cleanup.
+    /// Start and terminal cleanup use the same incremental path; full
+    /// rewrites are reserved for operations that remove rows.
     private func checkpoint(_ context: PlaygroundRunContext, force: Bool = false) {
         guard owns(context.runID) else { return }
         let now = ContinuousClock.now
         if !force, let lastCheckpoint,
            lastCheckpoint.duration(to: now) < Self.streamCheckpointInterval { return }
         guard let conversation = conversations.first(where: { $0.id == context.conversationID }) else { return }
+        let rows = runRows(context)
+        guard !rows.isEmpty else { return }
         do {
             try store.saveMessages(
-                runInsertedMessageIDs.union([context.assistantMessageID]),
-                of: .init(conversation: conversation, agentHistory: agentHistories[context.conversationID] ?? [])
+                rows, of: .init(conversation: conversation, agentHistory: agentHistories[context.conversationID] ?? [])
             )
         } catch {
             lastError = "Could not save conversation: \(error.localizedDescription)"
@@ -829,10 +955,18 @@ final class ChatService: ObservableObject {
         lastCheckpoint = now
     }
 
+    /// Rows a run owns: its assistant reply and the tool rows it inserted.
+    /// An empty regeneration placeholder is left out so the stored original
+    /// survives until new output exists.
+    private func runRows(_ context: PlaygroundRunContext) -> Set<UUID> {
+        var rows = runInsertedMessageIDs
+        if !regenerationAwaitingOutput(context) { rows.insert(context.assistantMessageID) }
+        return rows
+    }
+
     private func terminalCleanup(_ context: PlaygroundRunContext) {
         denyPendingApprovals()
         reasoningActiveRunID = nil
-        regenerationBackups[context.runID] = nil
         agentContentCoalescer?.cancel()
         agentReasoningCoalescer?.cancel()
         agentDetailCoalescer?.cancel()
@@ -843,7 +977,10 @@ final class ChatService: ObservableObject {
         agentToolPreviewCoalescer = nil
         agentToolPreviews.removeAll()
         synchronizeActive(context.conversationID)
-        persist(context.conversationID)
+        // After a restore the assistant row holds the original again, so it
+        // is written back (it was never overwritten unless output arrived).
+        regenerationBackups[context.runID] = nil
+        persistRows(context.conversationID, runInsertedMessageIDs.union([context.assistantMessageID]))
         streamingContent = ""
         activityLabel = ""
         streamTask = nil
@@ -877,7 +1014,7 @@ final class ChatService: ObservableObject {
         case .interrupted(let reason):
             if reason == "cancelled" { return nil }
             return ("\(mode.rawValue) stopped early", reason.map { "\(name): \($0)" } ?? name)
-        case .idle, .connecting, .streaming, .executingTool, .stopping:
+        case .idle, .connecting, .streaming, .executingTool, .awaitingApproval, .stopping:
             return nil
         }
     }
@@ -886,9 +1023,31 @@ final class ChatService: ObservableObject {
         let presenter = approvalPresenter
         let approvals = approvals
         Task {
-            await approvals.setHandler { request in
-                await presenter.present(request)
+            await approvals.setHandler { [weak self] request in
+                await self?.approvalPromptOpened(request)
+                let decision = await presenter.present(request)
+                await self?.approvalPromptClosed(request, decision: decision)
+                return decision
             }
+        }
+    }
+
+    /// The run is blocked on the user, not executing anything: say so in the
+    /// status strip and the activity row (AGENT-3).
+    private func approvalPromptOpened(_ request: ApprovalCoordinator.Request) {
+        guard runState.isActive, runState.phase != .stopping, runState.context?.mode == .agent else { return }
+        runState.phase = .awaitingApproval(request.toolName)
+        activityLabel = PlaygroundRunPhase.awaitingApprovalText
+    }
+
+    private func approvalPromptClosed(_ request: ApprovalCoordinator.Request, decision: ApprovalCoordinator.Decision) {
+        guard case .awaitingApproval = runState.phase else { return }
+        // Further prompts may already be queued for the same turn.
+        guard approvalPresenter.queue.current == nil else { return }
+        runState.phase = .executingTool(request.toolName)
+        switch decision {
+        case .approved, .approvedForSession: activityLabel = "Running \(request.toolName)…"
+        default: activityLabel = "Tool declined · continuing…"
         }
     }
 
@@ -957,12 +1116,13 @@ final class ChatService: ObservableObject {
         guard let conversationID = activeConversation?.id,
               let index = conversations.firstIndex(where: { $0.id == conversationID }),
               commitEdit(edit, in: conversationID) else { return }
-        conversations[index].messages.append(ChatMessage(role: "user", content: text))
+        let userMessage = ChatMessage(role: "user", content: text)
+        conversations[index].messages.append(userMessage)
         if conversations[index].messages.count == 1 { conversations[index].title = Self.derivedTitle(text) }
         let assistant = ChatMessage(role: "assistant", content: "", status: .streaming)
         conversations[index].messages.append(assistant)
         synchronizeActive(conversationID)
-        persist(conversationID)
+        persistRows(conversationID, [userMessage.id, assistant.id])
         let context = PlaygroundRunContext(runID: UUID(), conversationID: conversationID, assistantMessageID: assistant.id, mode: .agent, startedAt: Date())
         runState = .init(context: context, phase: .connecting)
         activityLabel = "Thinking…"
@@ -1261,12 +1421,17 @@ final class ChatService: ObservableObject {
     /// strict providers reject an empty assistant message, and a failed
     /// partial answer is not something the model actually said. Image-only
     /// replies are skipped too: they would replay as an empty string.
+    ///
+    /// An assistant turn is replayed only as the answer to the user turn just
+    /// before it. Deleting a user message can leave its reply orphaned; two
+    /// assistant turns in a row (or a leading one) are not something the
+    /// conversation actually contained, so the orphan is not sent.
     static func wireHistory(_ messages: [ChatMessage]) -> [ChatMessage] {
         var result: [ChatMessage] = []
         for message in messages {
             switch message.role {
             case "assistant":
-                guard Self.isReplayableAssistant(message) else { continue }
+                guard Self.isReplayableAssistant(message), result.last?.role == "user" else { continue }
                 result.append(message)
             case "user":
                 result.append(message)
@@ -1317,12 +1482,17 @@ final class ChatService: ObservableObject {
             results[id] = message
         }
         var history: [AgentAPIMessage] = []
+        // One assistant run answers one user message; a reply whose question
+        // was deleted (or a leading reply) is an orphan and is not replayed.
+        var awaitingAnswer = false
         for message in conversation.messages {
             if message.role == "user" {
                 history.append(wireMessage(for: message))
+                awaitingAnswer = true
                 continue
             }
-            guard message.role == "assistant" else { continue }
+            guard message.role == "assistant", awaitingAnswer else { continue }
+            awaitingAnswer = false
             let pairedCalls = (message.toolCalls ?? []).filter { toolResults[$0.id] != nil }
             if !pairedCalls.isEmpty {
                 let apiCalls = pairedCalls.map { call in
@@ -1363,6 +1533,22 @@ final class ChatService: ObservableObject {
         }
         do { try saveRecord(conversationID) }
         catch { lastError = "Could not save conversation: \(error.localizedDescription)" }
+    }
+
+    /// Conversation row plus just `rows` (CORE-4). No rows → the conversation
+    /// row alone. Never deletes or rewrites other messages.
+    private func persistRows(_ conversationID: UUID, _ rows: Set<UUID>) {
+        if pendingPromptSave?.conversationID == conversationID {
+            pendingPromptSave?.task.cancel()
+            pendingPromptSave = nil
+        }
+        guard !rows.isEmpty else { persistMeta(conversationID); return }
+        guard let conversation = conversations.first(where: { $0.id == conversationID }) else { return }
+        do {
+            try store.saveMessages(rows, of: .init(conversation: conversation, agentHistory: agentHistories[conversationID] ?? []))
+        } catch {
+            lastError = "Could not save conversation: \(error.localizedDescription)"
+        }
     }
 
     /// Conversation row only (title/model/prompt/totals) — no message rows.

@@ -162,14 +162,18 @@ struct IncrementalPersistenceTests {
         let service = ChatService(client: client, store: store, apiKeyProvider: { "fixture" })
         service.sendMessage("hello", modelId: "test/model")
         let assistantID = try #require(service.activeConversation?.messages.last?.id)
+        let userID = try #require(service.activeConversation?.messages.first?.id)
         let fullBefore = store.fullSaves
-        for _ in 0..<500 where store.messageSaves.isEmpty { try await Task.sleep(for: .milliseconds(2)) }
+        // Start writes just the two new rows (CORE-4)…
+        #expect(store.messageSaves.first == [userID, assistantID])
+        for _ in 0..<500 where store.messageSaves.count < 2 { try await Task.sleep(for: .milliseconds(2)) }
         #expect(store.fullSaves == fullBefore, "no full rewrite while streaming")
-        #expect(!store.messageSaves.isEmpty)
-        #expect(store.messageSaves.allSatisfy { $0 == [assistantID] })
+        // …and every checkpoint after it only the assistant row.
+        #expect(store.messageSaves.dropFirst().allSatisfy { $0 == [assistantID] })
         try await waitUntilIdle(service)
-        // Exactly one full save at the terminal transition.
-        #expect(store.fullSaves == fullBefore + 1)
+        // The terminal transition is incremental too: no full rewrite at all.
+        #expect(store.fullSaves == fullBefore)
+        #expect(store.messageSaves.dropFirst().allSatisfy { $0 == [assistantID] })
         #expect(store.records.values.first?.conversation.messages.last?.content == "one two three")
     }
 
@@ -326,9 +330,12 @@ struct WireHistoryTests {
             ChatMessage(role: "assistant", content: "x", status: .failed),
             ChatMessage(role: "tool", content: "t"),
             ChatMessage(role: "assistant", content: "ok", status: .truncated),
+            ChatMessage(role: "user", content: "b"),
             ChatMessage(role: "assistant", content: "stopped", status: .interrupted),
+            // An orphan (its question was deleted) is not replayed (CHAT-10).
+            ChatMessage(role: "assistant", content: "orphan", status: .complete),
         ]
-        #expect(ChatService.wireHistory(messages).map(\.content) == ["a", "ok", "stopped"])
+        #expect(ChatService.wireHistory(messages).map(\.content) == ["a", "ok", "b", "stopped"])
     }
 }
 
@@ -410,8 +417,9 @@ struct PlaygroundPerfTests {
     func sectionsMemoized() {
         let cache = ConversationSectionsCache()
         var conversation = ChatConversation(modelId: "m", mode: .chat)
+        conversation.messages.append(ChatMessage(role: "assistant", content: ""))
         _ = cache.sections([conversation], query: "", pinned: [], pinOrder: [])
-        conversation.messages.append(ChatMessage(role: "assistant", content: "token"))
+        conversation.messages[0].content = "token"
         _ = cache.sections([conversation], query: "", pinned: [], pinOrder: [])
         #expect(cache.computeCount == 1, "streaming text does not affect sections without a query")
         conversation.title = "New"
@@ -422,6 +430,11 @@ struct PlaygroundPerfTests {
         conversation.messages[0].content = "tokens"
         _ = cache.sections([conversation], query: "tok", pinned: [], pinOrder: [])
         #expect(cache.computeCount == 4, "with a query, message changes recompute")
+        // A new message moves the session's last activity (CHAT-8): recompute.
+        conversation.messages.append(ChatMessage(role: "user", content: "more", createdAt: Date().addingTimeInterval(60)))
+        _ = cache.sections([conversation], query: "tok", pinned: [], pinOrder: [])
+        _ = cache.sections([conversation], query: "", pinned: [], pinOrder: [])
+        #expect(cache.computeCount == 6)
     }
 
     @Test("a service loads only its own mode's conversations")

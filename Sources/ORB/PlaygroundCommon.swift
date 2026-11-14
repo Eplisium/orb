@@ -39,19 +39,43 @@ enum PlaygroundModelDefaults {
 
     /// Chat's model when nothing is pinned: the first favourite in catalog
     /// order (what the picker promises and what Agent already does), then the
-    /// model selected in the browser, then the head of the catalog.
+    /// model selected in the browser, then `CatalogModelPreference` (most
+    /// recent, then a curated family's newest member, then the head of the
+    /// catalog). Never an ID the catalog lacks; empty only while the catalog
+    /// is empty (not loaded yet).
     static func chatFallback(
         catalogIds: [String],
         favoriteIds: Set<String>,
         selectedModelId: String?,
-        lastResort: String = "openai/gpt-4o"
+        recentIds: [String] = [],
+        catalog: [CatalogModelPreference.Candidate]? = nil
     ) -> String {
-        if let favorite = catalogIds.first(where: favoriteIds.contains) { return favorite }
-        if let selectedModelId { return selectedModelId }
-        // A first-run user gets a well-known model rather than whichever id
-        // happens to sort first in the catalog.
-        if catalogIds.contains(lastResort) { return lastResort }
-        return catalogIds.first ?? lastResort
+        let candidates = catalog ?? catalogIds.map { CatalogModelPreference.Candidate(id: $0) }
+        let eligible = candidates.filter { $0.satisfies(.textChat) }.map(\.id)
+        if let favorite = eligible.first(where: favoriteIds.contains) { return favorite }
+        if let selectedModelId, eligible.contains(selectedModelId) { return selectedModelId }
+        return CatalogModelPreference.resolve(catalog: candidates, recents: recentIds, requirement: .textChat) ?? ""
+    }
+
+    static func chatFallback(
+        models: [ModelInfo], favoriteIds: Set<String>, selectedModelId: String?, recentIds: [String] = []
+    ) -> String {
+        chatFallback(catalogIds: models.map(\.id), favoriteIds: favoriteIds, selectedModelId: selectedModelId,
+                     recentIds: recentIds, catalog: models.map(CatalogModelPreference.Candidate.init))
+    }
+
+    /// Agent / Test Suite model when nothing is pinned: a tool-capable
+    /// favourite, then the browser selection if it can call tools, then
+    /// `CatalogModelPreference` for `.toolCalling`. Empty while the catalog
+    /// has no tool-capable model.
+    static func agentFallback(
+        models: [ModelInfo], favoriteIds: Set<String>, selectedModelId: String?, recentIds: [String] = []
+    ) -> String {
+        let candidates = models.map(CatalogModelPreference.Candidate.init)
+        let eligible = candidates.filter { $0.satisfies(.toolCalling) }.map(\.id)
+        if let favorite = eligible.first(where: favoriteIds.contains) { return favorite }
+        if let selectedModelId, eligible.contains(selectedModelId) { return selectedModelId }
+        return CatalogModelPreference.resolve(catalog: candidates, recents: recentIds, requirement: .toolCalling) ?? ""
     }
 }
 
@@ -557,6 +581,7 @@ struct PlaygroundMessageView: View, Equatable {
             && lhs.accent == rhs.accent
             && lhs.showToolCalls == rhs.showToolCalls
             && (lhs.onDelete == nil) == (rhs.onDelete == nil)
+            && (lhs.onDeleteWithReply == nil) == (rhs.onDeleteWithReply == nil)
             && (lhs.onRegenerate == nil) == (rhs.onRegenerate == nil)
             && (lhs.onEdit == nil) == (rhs.onEdit == nil)
             && (lhs.onBranch == nil) == (rhs.onBranch == nil)
@@ -568,6 +593,9 @@ struct PlaygroundMessageView: View, Equatable {
     let accent: Color
     var isReasoning: Bool = false
     var onDelete: (() -> Void)?
+    /// User messages only: delete the message and the reply that answers it,
+    /// so no orphaned answer stays behind.
+    var onDeleteWithReply: (() -> Void)?
     var onRegenerate: (() -> Void)?
     var onEdit: (() -> Void)?
     var onBranch: (() -> Void)?
@@ -623,6 +651,9 @@ struct PlaygroundMessageView: View, Equatable {
             if !isStreaming, let onDelete {
                 Button("Delete message", systemImage: "trash", role: .destructive) { onDelete() }
             }
+            if !isStreaming, let onDeleteWithReply {
+                Button("Delete with reply", systemImage: "trash", role: .destructive) { onDeleteWithReply() }
+            }
         }
         .accessibilityActions {
             if !message.content.isEmpty { Button("Copy message") { copyMessage() } }
@@ -630,6 +661,7 @@ struct PlaygroundMessageView: View, Equatable {
             if !isStreaming, let onEdit { Button("Edit and resend") { onEdit() } }
             if !isStreaming, let onBranch { Button("Branch from here") { onBranch() } }
             if !isStreaming, let onDelete { Button("Delete message") { onDelete() } }
+            if !isStreaming, let onDeleteWithReply { Button("Delete with reply") { onDeleteWithReply() } }
         }
     }
 
@@ -671,7 +703,25 @@ struct PlaygroundMessageView: View, Equatable {
             actionButton("pencil", "Edit and resend", onEdit)
             actionButton("arrow.triangle.branch", "Branch from here", onBranch)
 
-            if let onDelete {
+            if let onDelete, let onDeleteWithReply {
+                // Click deletes the message; the menu offers its reply too.
+                Menu {
+                    Button("Delete message", role: .destructive) { onDelete() }
+                    Button("Delete with reply", role: .destructive) { onDeleteWithReply() }
+                } label: {
+                    Image(systemName: "trash")
+                        .orbFont(size: 11, weight: .semibold)
+                        .foregroundStyle(.red.opacity(0.7))
+                        .frame(width: 24, height: 24)
+                } primaryAction: {
+                    onDelete()
+                }
+                .menuStyle(.borderlessButton)
+                .menuIndicator(.hidden)
+                .fixedSize()
+                .help("Delete message (press and hold for Delete with reply)")
+                .accessibilityLabel("Delete message")
+            } else if let onDelete {
                 Button {
                     onDelete()
                 } label: {
@@ -974,9 +1024,20 @@ extension PlaygroundMessageView {
 // MARK: - Error Banner
 
 /// Maps known failure shapes to plain language plus a suggested next step.
+///
+/// Hints only name controls that exist where the banner is shown: Chat has
+/// Regenerate and a Max tokens setting; Agent has neither, so its advice is
+/// to send again or change the request. `mode == nil` (studio and other
+/// sections) keeps neutral wording.
 enum PlaygroundErrorSummary {
-    static func summarize(_ message: String) -> (headline: String, hint: String?) {
+    static func summarize(_ message: String, mode: PlaygroundMode? = nil) -> (headline: String, hint: String?) {
         let lowered = message.lowercased()
+        let again: String = switch mode {
+        case .chat: "regenerate"
+        case .agent: "send your message again"
+        case nil: "try again"
+        }
+        let againSentence = again.prefix(1).uppercased() + again.dropFirst()
         // No key saved is not a rejected key: nothing was sent to OpenRouter.
         // Checked first because these messages mention "API key" too.
         if lowered.contains("add your openrouter api key") || lowered.contains("no api key") {
@@ -986,22 +1047,29 @@ enum PlaygroundErrorSummary {
             return ("OpenRouter rejected your API key", "Update it in Settings → Accounts & Keys.")
         }
         if lowered.contains("credits") || lowered.contains("402") {
-            return ("Your OpenRouter credits are exhausted", "Add credits, then retry.")
+            return ("Your OpenRouter credits are exhausted", "Add credits, then \(again).")
         }
         if lowered.contains("rate limit") || lowered.contains("429") {
-            return ("Rate limited by OpenRouter", "Wait a moment, then retry.")
+            return ("Rate limited by OpenRouter", "Wait a moment, then \(again).")
+        }
+        // Before the generic tool-call branch: the truncation error itself
+        // says "tool call", and would otherwise read as "malformed".
+        if lowered.contains("truncated") {
+            let hint: String = switch mode {
+            case .agent: "Ask for smaller steps (for example, write a large file in several parts), or pick a model with a larger output limit."
+            case .chat: "Raise Max tokens in the chat settings, then regenerate."
+            case nil: "Ask for a smaller response, or pick a model with a larger output limit."
+            }
+            return ("The model ran out of output room mid-tool-call", hint)
         }
         if lowered.contains("tool call") || lowered.contains("json arguments") {
-            return ("The model sent a malformed tool call", "Retry, or switch to a model with stronger function-calling support.")
-        }
-        if lowered.contains("truncated") {
-            return ("The model ran out of output room mid-tool-call", "Retry, or raise the max-tokens limit.")
+            return ("The model sent a malformed tool call", "\(againSentence), or switch to a model with stronger function-calling support.")
         }
         if lowered.contains("tool-call limit") {
             return ("The agent hit its tool-call limit", "Ask a narrower question or split the task.")
         }
         if lowered.contains("network") || lowered.contains("timed out") || lowered.contains("idle") {
-            return ("Lost connection to OpenRouter", "Check your network, then retry.")
+            return ("Lost connection to OpenRouter", "Check your network, then \(again).")
         }
         return ("Something went wrong", nil)
     }
@@ -1015,10 +1083,18 @@ enum PlaygroundErrorSummary {
 struct PlaygroundErrorBanner: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     let message: String
+    /// Chat or Agent, so the hint names controls that exist there.
+    var mode: PlaygroundMode?
     let onDismiss: () -> Void
     @State private var showsDetail = false
 
-    private var summary: (headline: String, hint: String?) { PlaygroundErrorSummary.summarize(message) }
+    init(message: String, mode: PlaygroundMode? = nil, onDismiss: @escaping () -> Void) {
+        self.message = message
+        self.mode = mode
+        self.onDismiss = onDismiss
+    }
+
+    private var summary: (headline: String, hint: String?) { PlaygroundErrorSummary.summarize(message, mode: mode) }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {

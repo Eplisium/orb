@@ -7,6 +7,16 @@ import Foundation
 
 // MARK: Sidebar search, grouping and pinning
 
+extension ChatConversation {
+    /// When the session was last used: its newest message, or its creation
+    /// for an empty one. Derived (no schema change): messages are appended in
+    /// time order and keep their original `createdAt`.
+    var lastActivity: Date {
+        guard let last = messages.last?.createdAt else { return createdAt }
+        return max(createdAt, last)
+    }
+}
+
 enum ConversationListModel {
     struct Section: Identifiable, Equatable {
         let title: String
@@ -44,7 +54,9 @@ enum ConversationListModel {
         var result: [Section] = []
         if !pinnedItems.isEmpty { result.append(Section(title: "Pinned", items: pinnedItems)) }
 
-        let rest = visible.filter { !pinned.contains($0.id) }.sorted { $0.createdAt > $1.createdAt }
+        // Ordered and bucketed by last activity, so a chat you just continued
+        // moves to Today; pinned sessions keep their own order on top.
+        let rest = visible.filter { !pinned.contains($0.id) }.sorted { $0.lastActivity > $1.lastActivity }
         let startOfToday = calendar.startOfDay(for: now)
         let startOfYesterday = calendar.date(byAdding: .day, value: -1, to: startOfToday) ?? startOfToday
         let startOfWeek = calendar.date(byAdding: .day, value: -7, to: startOfToday) ?? startOfToday
@@ -56,7 +68,7 @@ enum ConversationListModel {
             ("Older", { $0 < startOfWeek }),
         ]
         for (title, test) in buckets {
-            let items = rest.filter { test($0.createdAt) }
+            let items = rest.filter { test($0.lastActivity) }
             if !items.isEmpty { result.append(Section(title: title, items: items)) }
         }
         return result
@@ -71,7 +83,7 @@ enum ConversationListModel {
 final class ConversationSectionsCache {
     struct Key: Equatable {
         struct Item: Equatable {
-            let id: UUID, title: String, modelId: String, createdAt: Date
+            let id: UUID, title: String, modelId: String, lastActivity: Date
             let messageCount: Int, lastMessageLength: Int
         }
         let items: [Item]
@@ -92,7 +104,7 @@ final class ConversationSectionsCache {
         let searching = !query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         let key = Key(
             items: conversations.map {
-                .init(id: $0.id, title: $0.title, modelId: $0.modelId, createdAt: $0.createdAt,
+                .init(id: $0.id, title: $0.title, modelId: $0.modelId, lastActivity: $0.lastActivity,
                       messageCount: searching ? $0.messages.count : 0,
                       lastMessageLength: searching ? ($0.messages.last?.content.count ?? 0) : 0)
             },
@@ -376,6 +388,10 @@ enum UndoToast {
         "Deleted \(count) session\(count == 1 ? "" : "s")"
     }
 
+    static func message(deletedMessages count: Int) -> String {
+        count == 1 ? "Deleted message" : "Deleted \(count) messages"
+    }
+
 }
 
 // MARK: Edit in progress
@@ -561,6 +577,9 @@ final class ApprovalPresenter: ObservableObject {
             Task { @MainActor in self.decide(request.id, .denied) }
         }
     }
+
+    /// True while any approval prompt is open.
+    var isWaiting: Bool { queue.current != nil }
 
     func decide(_ id: UUID, _ decision: ApprovalCoordinator.Decision) {
         guard let continuation = waiting.removeValue(forKey: id) else { return }

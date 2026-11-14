@@ -5,6 +5,9 @@ enum PlaygroundRunPhase: Equatable, Sendable {
     case connecting
     case streaming
     case executingTool(String)
+    /// An Agent tool call is waiting for the user's approval; nothing runs
+    /// until they decide.
+    case awaitingApproval(String)
     case stopping
     case completed
     case failed(String)
@@ -25,8 +28,28 @@ struct PlaygroundRunState: Equatable, Sendable {
 
     var isActive: Bool {
         switch phase {
-        case .connecting, .streaming, .executingTool, .stopping: true
+        case .connecting, .streaming, .executingTool, .awaitingApproval, .stopping: true
         default: false
         }
+    }
+}
+
+extension PlaygroundRunPhase {
+    static let awaitingApprovalText = "Waiting for your approval"
+
+    /// Short status for the Agent run strip. A pending approval is not a
+    /// running tool: nothing executes until the user decides.
+    var agentStatusText: String {
+        switch self {
+        case .awaitingApproval: Self.awaitingApprovalText
+        case .executingTool: "Running tool"
+        case .stopping: "Stopping…"
+        default: "Agent working"
+        }
+    }
+
+    var isAwaitingApproval: Bool {
+        if case .awaitingApproval = self { return true }
+        return false
     }
 }
