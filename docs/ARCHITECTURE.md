@@ -9,7 +9,7 @@ A short map of how ORB is put together. It describes responsibilities, not every
 | `ORB` | `Sources/ORB` | SwiftPM executable (SwiftUI app, macOS 14+) |
 | `ORBTests` | `Tests/ORBTests` | Swift Testing suite plus JSON/SSE/MCP fixtures |
 
-There are no third-party dependencies. The app uses only Apple frameworks: SwiftUI, AppKit, Foundation, Security, LocalAuthentication, SQLite3, and QuickLook. `build_app.sh` wraps the built binary in an `.app` bundle. The icon is pre-rendered by `scripts/make_icon.swift` into `Resources/AppIcon.icns`.
+There are no third-party dependencies. The app uses only Apple frameworks: SwiftUI, AppKit, Foundation, Combine, Observation, Charts, AVFoundation, ImageIO, Quartz (Quick Look), UniformTypeIdentifiers, UserNotifications, Security, CryptoKit, LocalAuthentication, and SQLite3. `build_app.sh` wraps the optimized release binary (or the debug one with `--debug`) in an `.app` bundle and writes its `Info.plist`, including the Apple Events usage string the Agent's AppleScript tools need. The icon is pre-rendered by `scripts/make_icon.swift` into `Resources/AppIcon.icns`.
 
 ## Layers
 
@@ -84,7 +84,9 @@ Direct MCP connects join one identity-bearing startup attempt; process existence
 
 ### Persistence
 
-`DatabaseManager` owns `~/Library/Application Support/ORB/favorites.sqlite3` (WAL mode). Migrations are idempotent (`CREATE TABLE IF NOT EXISTS` plus `addColumnIfMissing`) and versioned through `PRAGMA user_version`. If a database file fails to open, it is moved aside and the app continues with a temporary database. Under tests the manager isolates itself to a temporary database on its own.
+`DatabaseManager` owns `~/Library/Application Support/ORB/favorites.sqlite3` (WAL mode). Migrations are idempotent (`CREATE TABLE IF NOT EXISTS`, `CREATE INDEX IF NOT EXISTS`, and `addColumnIfMissing`) and versioned through `PRAGMA user_version` (`DatabaseManager.schemaVersion`). The stored version is read before anything touches the file: a database from a newer ORB is left untouched and the session runs on a temporary in-memory database with an explanatory launch error, and the stamp is never lowered. If the file can't be opened or migrated, ORB also continues on an in-memory database. Originals are never moved or deleted; only genuine corruption (`SQLITE_CORRUPT`/`SQLITE_NOTADB`) makes byte-verified forensic copies under `.orb-database-backups/`, while busy, locked, or other operational failures leave the files alone. Under tests the manager isolates itself to a temporary database on its own.
+
+One connection (`SQLITE_OPEN_FULLMUTEX`) is shared by the main thread and background work. Single-statement writers take the recursive `dbLock` (`locked { }`); transactions use `withImmediateTransaction { }` / `withAssetReservation { }`, which hold `dbLock` *and* SQLite's connection mutex around `BEGIN IMMEDIATE … COMMIT`, so another thread's statement waits instead of running inside the transaction and being rolled back with it. Hot paths are indexed: messages by `(conversation_id, sort_order)`, conversations by `(mode, created_at)`, and a partial index for rows still `streaming` at launch. `loadMessagesGroupedChecked(mode:)` loads every transcript in one query. `compact()` checkpoints the WAL and runs `VACUUM`; call it off the main thread.
 
 Conversation loads use checked SQLite reads: preparation and mid-iteration failures cannot masquerade as empty transcripts. Edit truncation publishes memory only after a transactional replacement save. SQLite text is bound/read with explicit UTF-8 lengths, including embedded NULs.
 

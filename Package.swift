@@ -2,10 +2,10 @@
 import PackageDescription
 
 /// Swift 6 data-race diagnostics at the `targeted` level, reported as warnings
-/// while the package stays in the Swift 5 language mode. Measured when enabled
-/// (Swift 6.4, unique warnings in Sources/): 13 without → 26 `targeted` → 38
-/// `complete`. None are errors. Move toward `complete` and then the Swift 6
-/// language mode by fixing these, not by silencing them.
+/// while the package stays in the Swift 5 language mode. None are errors. The
+/// current unique-warning counts (clean build, Swift 6.4) are the ceiling in
+/// `scripts/warnings-baseline.txt`, which CI enforces. Move toward `complete`
+/// and then the Swift 6 language mode by fixing these, not by silencing them.
 let strictConcurrency: [SwiftSetting] = [
     .enableExperimentalFeature("StrictConcurrency=targeted")
 ]

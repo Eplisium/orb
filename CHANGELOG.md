@@ -1,138 +1,87 @@
 # Changelog
 
-All notable changes to ORB are listed here. The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses [Semantic Versioning](https://semver.org/). The marketing version lives in [`VERSION`](VERSION). The bundle build number is the git commit count.
+All notable changes to ORB are listed here. The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses [Semantic Versioning](https://semver.org/). The marketing version lives in [`VERSION`](VERSION); the bundle build number is the git commit count. Each released version has one **Added**, **Changed**, and **Fixed** list. Pushing a `vX.Y.Z` tag publishes that version's section as the GitHub Release notes (`.github/workflows/release.yml`).
 
-## [Unreleased] — 1.1.0
+## [1.2.0] — Unreleased
 
-### Backend reliability and safety
-- Failed initial and later job writes preserve complete snapshots in a private local recovery journal. Generation-aware acknowledgement and expected-base checks prevent stale replay from overwriting changed SQLite state. Video offers local-only retry/conflict resolution, with a separate lost-on-quit warning when both stores fail.
-- Open Jobs trays receive current records, and Resume revalidates the latest pending-aware record before callbacks, credential access, or polling.
-- Direct concurrent MCP connects share initialization readiness; cancelled joiners detach independently and failed/shutdown attempts can be retried on the same connection.
-- Batch lookup excludes empty and repeated custom IDs while retaining all raw results and opaque identifiers.
-- Refresh during Files pagination replaces the stale page with authoritative page one and clears prior errors when the new request starts.
-- Batch result HTTP-success classification requires an explicit 2xx status and no per-item error; malformed or failed embedded responses no longer count as successes. Raw result bodies remain available.
-- Reasoning details retain unexpected known-field JSON shapes and explicit nulls through persistence and tool continuation, without displaying opaque values.
-- Responses/Messages SSE limits apply to the active line/event rather than an entire network delivery, so coalesced legal events no longer fail based on chunk boundaries.
-- Job core state and recovery fields now commit in one statement; failed parameter bindings cannot silently clear persisted values.
-- Speech/transcription/embedding/rerank discovery is model-owned, so replacement views await the shared refresh despite the first caller's cancellation.
-- Failed/partial job reads and malformed persisted identities stop lifecycle mutations with a visible persistence error instead of erasing prompts/links or creating duplicate remote-job records.
-- Fail-closed missing approvals, explicit Agent OP Mode opt-in, and per-run Test Suite command approvals with safe cancellation/navigation handling.
-- Checked conversation reads, transactional edit truncation, and lossless SQLite text/streaming Unicode handling.
-- Credential migration preserves unavailable current items and deletion tombstones; account services invalidate stale data and late responses across key changes.
-- Missing model-turn prices remain unknown; web-search helper usage is recorded separately. Failed ledger writes expose an in-memory retry queue in Usage Settings.
-- Checked integer conversions and file offsets prevent malformed-input crashes; advanced adapters honor terminal events before residual framing validation.
+### Added
+- **Releases:** tagged builds (`v*`) publish an optimized, ad-hoc signed `ORB.app` zip with a `SHA256SUMS` file on the GitHub Releases page.
+- **Storage:** `DatabaseManager.compact()` checkpoints the WAL and vacuums the database, safe to run off the main thread.
 
-- Collision-resistant bounded MCP names preserve routing/approval separation without exceeding provider limits. Nonblocking ordered stdin writes honor cancellation and deadlines; changed live configurations restart safely and obsolete results are rejected.
-- Failed asset/Library saves preserve retry inputs; remote file deletion requires confirmation for the requested file. Shared Image/Video catalog refreshes survive departing callers.
-- Video polls validate job identity before state changes and preserve known costs through sparse/resumed responses, including explicit zero.
+### Changed
+- **Packaging:** `build_app.sh` packages the optimized release configuration by default; `--debug` opts in to the unoptimized build. CI compiles and packages the release configuration.
+- **Info.plist:** adds an Apple Events usage description (Agent automation, only with Computer Access on), the Developer Tools app category, a copyright line, and the development region.
+- **CI:** runs on `main` are no longer cancelled by a newer push (only superseded pull-request runs are). The build fails if unique compiler warnings rise above `scripts/warnings-baseline.txt`.
 
-- Endpoint table identities reserve literal suffix-looking tags before assigning duplicate IDs, keeping decoded endpoint rows distinct.
-- Remote Files pagination is owned by one shared refresh task: stale in-flight pages cannot restore a deleted row or overwrite a newer list, successful uploads/deletes start a fresh first-page fetch instead of being dropped behind a busy guard, and duplicate IDs or repeating cursors stop pagination rather than duplicating rows or looping.
-- Cancelled MCP registry waiters leave lifecycle queues promptly without cancelling the startup owner or applying a late Stop. Cancelled initial startup remains retryable and is not shown as a server failure.
-- MCP startup rejects transport shutdown/replacement or server exit during discovery rather than reporting a dead connection as successful.
-- Cancelling MCP resource/prompt discovery aborts startup instead of publishing a partially initialized connection; ordinary optional-discovery RPC errors remain tolerated.
+### Fixed
+- **Launch speed:** messages, conversations, and interrupted-stream recovery use indexes, so opening ORB with a long chat history no longer scans the whole messages table once per conversation.
+- **Database safety:** ORB refuses to open a database written by a newer version (it shows an error and runs with a temporary database instead) and never lowers the stored schema version.
+- **Database safety:** a write from one thread can no longer be rolled back by another thread's failed asset or Library transaction.
+- **MCP / tool cards:** top-level JSON strings are escaped correctly, and NaN or infinite numbers are written as `null` instead of invalid JSON.
 
-### Library data protection
-- Single/bulk exports and source-file cleanup protect the complete job-recovery and database-backup directories, including aliases and not-yet-created paths.
-- Corruption preservation now makes verified copies of the database and observed SQLite sidecars without moving or deleting originals. Incomplete copies are reported explicitly; the app remains memory-only until the original storage is repaired. These forensic copies are not consistent snapshots of concurrent writers.
-- Asset deletion commits metadata removal plus a SQLite cleanup inventory before unlinking. Failed cleanup is retried on reopen; database-wide reservations coordinate participating stores, dedupe and attachments. Root/catalog bindings fail closed on mixed stores, and stale manifest writers are rejected.
-- Registered Library contents, expiring Undo tokens and import ownership now commit in SQLite before JSON compatibility export. Export failure warns without triggering duplicate saves. Binding markers publish complete staged files exclusively, preventing partial first-write markers.
-- **Ownership-aware removal:** new managed roots reclaim unowned Library files after durable Undo/import holds expire. Shared, attached and standalone assets remain protected. Existing legacy roots still retain backing bytes; safe copy-and-activate migration is not included.
-- Chat/Agent assistant image-card exports now surface encoding/write failures and protect managed Library destinations through atomic staging. Re-encoded non-JPEG images are correctly named PNG instead of WebP/GIF/SVG.
-- Video saves retain the remote job identity in the Library manifest, so a failed separate job-link write can be retried after reopening without downloading/indexing a duplicate.
-- Asset cleanup aborts on failed/partial SQLite metadata reads or undecodable rows instead of removing metadata and orphaning bytes.
-- Keep shared asset bytes while another window still offers Undo. Attachment lookup failures stop cleanup rather than authorizing deletion.
-- Single-item Library/Video/Speech and generated Image/Speech exports reject managed assets, manifests, SQLite files and sidecars, including filesystem aliases. Failed replacements preserve existing destinations; recovery export works before the first successful Library save.
+## [1.1.0] — 2026-11-13
 
-### Repository and packaging
-- GitHub Actions CI on macOS: build, unique-warning count in the job summary, test, ad-hoc packaged `ORB.app` artifact, and uploaded logs.
-- `build_app.sh` hardening: strict mode, `swift build --show-bin-path` instead of searching `.build`, and `--release`, `--build`, `--adhoc` (automatic under `CI`), and `--output` options.
-- Version now comes from `VERSION` (`CFBundleShortVersionString`), and `CFBundleVersion` is the commit count.
-- The app icon is now committed as `Resources/AppIcon.icns`. The generator moved to `scripts/make_icon.swift`.
-- `orb://` URL scheme registered in the bundle's Info.plist.
-- Swift strict concurrency checking (`targeted`) enabled as warnings.
-- Opt-in integration and snapshot tests now report as **skipped** rather than silently passing.
-- Expanded `.gitignore` coverage for signing material, env files, local databases, and agent workspaces.
-- New README, architecture notes, contributing and security guides, and issue/PR templates.
+Never tagged; this is the version stamped into builds from `main` between 1.0.0 and 1.2.0.
 
-### Agent
-- OP Mode setting (off by default) skips the approval prompt for risky tools without granting extra capabilities.
-- Real approval prompt for terminal, computer-control, and MCP tools, approve-for-run, and stopping a run denies pending approvals.
+### Added
+- **App shell:** regrouped sidebar (Browse / Create / Evaluate), command palette, tabbed Settings scene, first-run onboarding, empty states for a missing key, app toasts, a job notification sound, and an About window.
+- **Model browser:** filters, side-by-side compare, redesigned rows and detail view, and offline and empty states.
+- **Chat and Agent:** session search, date groups, pinning, a context gauge, slash commands, presets, a run strip, jump-to-unread, message actions, rename, duplicate/branch, undoable delete, an inspector, and a drop target.
+- **Agent:** a real approval prompt for terminal, computer-control, and MCP tools, with approve-for-run; stopping a run denies pending approvals. OP Mode (off by default) skips the prompt without granting extra capabilities.
+- **Generate:** a shared Library with grid and list views, search, type filters, bulk export, Quick Look, and delete with Undo. Presets for Images, Speech, and Embeddings, spend-ceiling progress, and honest job states in Video.
+- **Accessibility:** 11 pt minimum text size, labelled icon buttons, Reduce Motion and Increase Contrast support, a working text-size setting, and accent color choice.
+- **Test Suite:** sortable results with a verdict legend.
+- **Repository:** GitHub Actions CI (build, warning count, test, ad-hoc `ORB.app` artifact, logs), `VERSION`-driven versioning, a committed app icon (`Resources/AppIcon.icns`, generated by `scripts/make_icon.swift`), the `orb://` URL scheme, strict concurrency checking (`targeted`, as warnings), a README, architecture notes, contributing and security guides, and issue/PR templates.
 
-### Interface
-- Unified app shell: regrouped sidebar (Browse / Create / Evaluate), command palette, tabbed Settings scene, first-run onboarding, and empty states for a missing key.
-- Model browser: filters, side-by-side compare, redesigned rows and detail view, offline and empty states.
-- Chat and Agent chrome: session search, date groups, pinning, context gauge, slash commands, presets, run strip, jump-to-unread, message actions, rename, duplicate/branch, undoable delete, inspector, and drop target.
-- Shared Library: grid and list views, search, type filters, bulk export, Quick Look, and delete with undo.
-- Studio presets for Images, Speech, and Embeddings, spend-ceiling progress, and honest job states in the Video studio.
-- Accessibility and polish: 11 pt minimum text size, labelled icon buttons, Reduce Motion and Increase Contrast support, working text-size setting, app toasts, job notification sound, and an About window.
-- Sortable Test Suite results with a verdict legend.
-- Design tokens, accent color choice, and shared components.
+### Changed
+- **Packaging:** `build_app.sh` runs in strict mode, finds the binary with `swift build --show-bin-path`, and gained `--release`, `--build`, `--adhoc` (automatic under `CI`), and `--output`.
+- **Storage:** registered Library contents, expiring Undo tokens, and import ownership commit to SQLite first; `creations.json` is a compatibility export written afterwards. New managed Library roots reclaim unowned files once their Undo/import holds expire. Existing (legacy) roots still keep removed files' bytes.
+- **Storage:** asset deletion commits metadata removal and a cleanup inventory before unlinking files, and interrupted cleanup resumes on the next open.
+- **Corruption recovery:** ORB makes byte-verified copies of the database and its sidecars and never moves or deletes the originals. It stays on a temporary database until the original is repaired.
+- **Video:** failed job writes keep complete snapshots in a private local recovery journal. Changed records need an explicit local choice instead of a timestamp overwrite, and records that exist only in memory are labelled as lost on quit.
+- **Tests:** opt-in integration and snapshot tests report as skipped instead of silently passing. `.gitignore` covers signing material, env files, local databases, and agent workspaces.
 
-### Fixed (bug audit and UI review, 2026-11-12)
-- **Chat and Agent:** Shift-Return inserts a new line (it used to do nothing and leave the draft selected, so the next key replaced it). A restored draft keeps the caret at its end. Editing a message no longer deletes the rest of the conversation until the edit is sent, and it can be cancelled at any time. Sessions open at the latest message. Chat sampling settings persist. Stop is recorded as interrupted, not as a finished answer. A missing API key is no longer reported as a rejected key. First-run Chat defaults to a well-known model.
-- **Agent and MCP:** startup race that orphaned server processes, crashed servers still being advertised, enabling a server not connecting it, arguments with spaces being split, tool results capped at 100 KB, tool-call ids reused across turns, and four crash paths.
-- **Generate:** a video job that was polling when ORB quit can be resumed, a rejected submission is recorded as failed rather than unconfirmed, a remote failure is no longer shown as a network error, split image requests get distinct seeds, Generate waits for the model's options, and `.mov` and `.gif` creations keep their extension.
-- **Model browser:** compare selections are pruned against the catalog, the detail pane refreshes with the catalog, loading state renders during a refresh, free endpoints rank first, uptime is rounded, and notes are flushed on quit.
-- **Settings and shell:** JSON Schema fields are saved, `orb://` links arriving while locked run after unlock, Open Compare moved to ⌃⌘C (⌥⌘C is Copy Last Reply), usage totals match the chart, and removing the inference key leaves management-key data alone.
-- **Core:** thread-safe database access, streamed events up to 32 MB (images), `Retry-After` honoured only up to the retry ceiling, string error codes in streams, and offline sends fail fast.
-- **Interface:** the Chat and Agent welcome fits above the composer, Generate is pinned in Images, the lock screen is readable in light mode, and Appearance controls are aligned.
-
-### Fixed (hands-on UI audit, 2026-10-07)
-- Theme: switching Light → System no longer leaves black text and light controls on dark Settings surfaces. Appearance is applied once at the app level (`NSApp.appearance`) instead of per-window `preferredColorScheme`.
-- Favorites: the sidebar badge and the list header now count the same resolved favorites. Favorites missing from the current catalog show as "N unavailable" with an explanation; they are kept, not deleted.
-- Model browser: switching between All Models, Favorites and New This Week no longer leaves a model from another collection in detail. A selection hidden by a search or filter is labelled "Not in the current list".
-- Accounts & Keys: the first section is now "Inference Key" and describes Chat, Agent and Generate. Credits and activity are only described under the management key.
-- MCP settings: copy now matches the real policy (offered to the Agent only with Computer Access, each call needs approval) and each server shows its availability. README limitations updated.
-- Accessibility: model rows and sidebar destinations expose a name, provider, favorite/compare state and counts; model-detail actions name their model.
-- Usage chart: dated x-axis with readable "Oct 7" labels at most weekly, hover readout of each day's spend, and a title that states the real 30-day window under All Time.
-- Images: result cards no longer show a duplicate Save button next to Export. Saved results offer "View in Library". In chat, the image button is now "Export…".
-- Library: list rows show thumbnails, a short title from the prompt and a content tag (`#a1b2c3`) shared by list and grid, with the full prompt in the tooltip.
-- Sidebar copy: the account chip says "Management key needed" with the full hint in its tooltip; Chat/Agent subtitles fit; session rows show their full title on hover.
-
-### Fixes
-- Inspector attached to the pane root, sidebar header truncation, uniform Library grid, and no stray focus ring.
+### Fixed
+- **Chat and Agent:** Shift-Return inserts a new line, and a restored draft keeps the caret at its end. Editing a message no longer deletes the rest of the conversation until the edit is sent. Sessions open at the latest message. Chat sampling settings persist. Stop is recorded as interrupted. A missing API key is no longer reported as a rejected key. First-run Chat defaults to a well-known model.
+- **Agent and MCP:** a startup race that orphaned server processes, crashed servers still being advertised, enabling a server not connecting it, arguments with spaces being split, oversized tool results (now capped at 100 KB), tool-call IDs reused across turns, and four crash paths. Concurrent connects share one startup; cancelled startup or discovery never publishes a half-connected server and can be retried. MCP tool names stay unique and within provider length limits.
+- **Approvals:** missing approval infrastructure denies the call. Test Suite project commands always ask, even in OP Mode.
+- **Generate:** a video job that was polling when ORB quit can be resumed; a rejected submission is recorded as failed; a remote failure is no longer shown as a network error; split image requests get distinct seeds; Generate waits for the model's options; `.mov` and `.gif` creations keep their extension. Video polls check the job ID and keep known costs, including an explicit $0.
+- **Generate:** failed saves keep the paid output for retry; a video re-download after a failed link write no longer duplicates the Library entry; shared bytes stay while another window still offers Undo; failed metadata reads stop cleanup instead of orphaning files. Exports refuse managed assets, manifests, and database files (including aliases) and never destroy an existing destination on failure. Assistant image exports report write failures and use a filename matching the JPEG/PNG encoding.
+- **Files:** pagination has one owner, so a stale page can't restore a deleted file or overwrite a newer list; uploads and deletes refresh from page one; duplicate rows or repeating cursors stop loading instead of looping. Deleting a remote file requires confirmation.
+- **Model browser:** compare selections are pruned against the catalog, the detail pane refreshes with the catalog, loading state renders during a refresh, free endpoints rank first, uptime is rounded, notes are flushed on quit, endpoint rows stay distinct, and switching collections no longer leaves another collection's model in detail. Favorites badge and list agree; favorites missing from the catalog show as "N unavailable" and are kept.
+- **Settings and shell:** switching Light → System no longer leaves mismatched text and controls. JSON Schema fields are saved, `orb://` links arriving while locked run after unlock, Open Compare moved to ⌃⌘C, usage totals match the chart (with a dated axis and hover readout), and removing the inference key leaves management-key data alone. Credential migration never overwrites a current key or a deletion; account data refreshes after a key change.
+- **Core:** thread-safe database access, checked conversation reads, transactional edit truncation, lossless Unicode in SQLite and streams, streamed events up to 32 MB (images), `Retry-After` honoured only up to the retry ceiling, string error codes in streams, offline sends that fail fast, and checked numeric conversions that prevent malformed-input crashes. Responses/Messages/Batch adapters frame events independent of network chunk boundaries and only count explicit 2xx batch items as successes. Reasoning details keep unexpected field shapes for tool continuation.
+- **Usage:** missing prices stay unknown instead of $0, web-search helper costs are recorded separately, and failed ledger writes can be retried from Settings → Usage.
+- **Interface:** the Chat and Agent welcome fits above the composer, Generate is pinned in Images, the lock screen is readable in light mode, Appearance controls are aligned, the inspector attaches to the pane root, the Library grid is uniform, and there is no stray focus ring. Accessibility labels name each model row, sidebar destination, and detail action.
 
 ## [1.0.0] — 2026-10-01
 
 First public release under the MIT license.
 
-### Model browser
-- Public OpenRouter catalog with search, modality and capability filters, sorting, per-provider endpoint details, favorites, and notes.
-- Model picker recents and sorting. Separate Chat and Agent default models.
-
-### Chat
-- Streaming chat completions with full generation settings, multimodal attachments, Markdown rendering (incremental block parsing, tables, nested and task lists), cost and token tracking.
-- Inline reasoning disclosures, grouped tool rows, and a persisted transcript order.
-- Multi-select bulk session deletion, conversation export, and recovery of interrupted streams after relaunch.
-
-### Agent
-- Native function-calling agent: files, shell (process-group cancellation), AppleScript, screen capture, input events, memory, and planning.
-- Deny-by-default tool policy, workspace path guard, and turn-budget final summary.
-- Recovery from phantom or malformed tool calls, reasoning-only turns, TLS and 5xx retries, and 400 responses caused by reasoning payloads.
-
-### MCP
-- Stdio MCP servers with namespaced tools, resources, and prompts bridged as synthetic tools. Configuration import, probing, and migration of secret environment variables to the Keychain.
-
-### Generate
-- Unified studio for Images (multi-image, editing, reference images, full-screen viewer, prompt enhance), Video (durable resumable jobs), Speech and transcription, Files, and Embeddings and rerank.
-- Saved creations, a content-addressed asset store, and a permanent usage and cost ledger with a Settings Usage tab.
-- Studio work keeps running across navigation.
-
-### Account and security
-- Separate inference and management key roles in the Keychain. Credits and activity use the management key only.
-- Touch ID / password lock screen with auto-lock. Keychain storage restricted to ORB, with a one-time migration of legacy items.
-- PKCE sign-in coordinator.
-- Responses, Messages, and Batch API adapters plus read-only management inventory (contract-tested).
-
-### Test Suite
-- Built-in project scenarios and text probes. Deterministic verdicts separate project builds from unverified text answers. Dollar spend ceiling for comparison batches. Optional user input added to scenarios.
-
-### Platform
-- SQLite persistence with graceful recovery, configurable network timeouts, and a stable self-signed code-signing identity for local builds.
+### Added
+- **Model browser:** Public OpenRouter catalog with search, modality and capability filters, sorting, per-provider endpoint details, favorites, and notes.
+- **Model browser:** Model picker recents and sorting. Separate Chat and Agent default models.
+- **Chat:** Streaming chat completions with full generation settings, multimodal attachments, Markdown rendering (incremental block parsing, tables, nested and task lists), cost and token tracking.
+- **Chat:** Inline reasoning disclosures, grouped tool rows, and a persisted transcript order.
+- **Chat:** Multi-select bulk session deletion, conversation export, and recovery of interrupted streams after relaunch.
+- **Agent:** Native function-calling agent: files, shell (process-group cancellation), AppleScript, screen capture, input events, memory, and planning.
+- **Agent:** Deny-by-default tool policy, workspace path guard, and turn-budget final summary.
+- **Agent:** Recovery from phantom or malformed tool calls, reasoning-only turns, TLS and 5xx retries, and 400 responses caused by reasoning payloads.
+- **MCP:** Stdio MCP servers with namespaced tools, resources, and prompts bridged as synthetic tools. Configuration import, probing, and migration of secret environment variables to the Keychain.
+- **Generate:** Unified studio for Images (multi-image, editing, reference images, full-screen viewer, prompt enhance), Video (durable resumable jobs), Speech and transcription, Files, and Embeddings and rerank.
+- **Generate:** Saved creations, a content-addressed asset store, and a permanent usage and cost ledger with a Settings Usage tab.
+- **Generate:** Studio work keeps running across navigation.
+- **Account and security:** Separate inference and management key roles in the Keychain. Credits and activity use the management key only.
+- **Account and security:** Touch ID / password lock screen with auto-lock. Keychain storage restricted to ORB, with a one-time migration of legacy items.
+- **Account and security:** PKCE sign-in coordinator.
+- **Account and security:** Responses, Messages, and Batch API adapters plus read-only management inventory (contract-tested).
+- **Test Suite:** Built-in project scenarios and text probes. Deterministic verdicts separate project builds from unverified text answers. Dollar spend ceiling for comparison batches. Optional user input added to scenarios.
+- **Platform:** SQLite persistence with graceful recovery, configurable network timeouts, and a stable self-signed code-signing identity for local builds.
 
 ## Pre-1.0 (2026-08)
 
 - Initial SwiftUI model browser ("OpenRouterBrowser"), renamed to ORB.
 - API key management, credits and activity, chat playground.
 - First native function-calling agent, MCP support, conversation store, streaming and Markdown rendering, and the `StreamPublishCoalescer`.
+
+[1.2.0]: https://github.com/Eplisium/orb/releases/tag/v1.2.0

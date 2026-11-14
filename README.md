@@ -24,19 +24,43 @@
 
 ## Screenshots
 
-<!-- screenshots -->
-<!-- Add PNGs under docs/images/ (for example browser.png, chat.png, agent.png, studio.png) and reference them here. -->
+<!-- The images below are placeholders until real captures land in docs/images/. -->
+
+| Browse | Chat |
+|---|---|
+| ![Model browser: search, filters, and per-provider endpoint details](docs/images/browse.png) | ![Chat with streaming Markdown and inline reasoning](docs/images/chat.png) |
+| **Agent** | **Generate studio** |
+| ![Agent run with tool-call cards and an approval prompt](docs/images/agent.png) | ![Images studio with generated results](docs/images/studio.png) |
+| **Test Suite** | |
+| ![Test Suite results with deterministic verdicts](docs/images/testsuite.png) | |
+
+## Features
+
+- **Browse every OpenRouter model.** Search the public catalog, filter by modality and capability, sort by price, context, release date, or benchmark scores, and compare models side by side. Each model shows pricing, supported parameters, benchmarks, and its per-provider endpoints (uptime, quantization, and latency and throughput where OpenRouter reports them). Favorites and notes stay on your Mac. No API key needed.
+- **Chat with any model.** Responses stream as rendered Markdown with code, tables, and reasoning shown inline. Attach images and files, tune temperature, reasoning effort, and provider routing, and watch tokens, cost, and context use live. Sessions can be searched, pinned, branched, and exported.
+- **Run a native agent.** ORB drives its own tool loop against OpenRouter: web search and fetch, files in a workspace you choose, shell commands, AppleScript, screenshots, and mouse and keyboard control. It starts in Web Only mode; risky tools ask for your approval, and every call shows up as a card in the transcript.
+- **Connect MCP servers.** Add local stdio Model Context Protocol servers or import a standard `mcpServers` JSON file. Their tools, resources, and prompts become available to the Agent, and secret environment variables can be stored in the Keychain.
+- **Generate media.** Separate studios for images, video (jobs resume after a relaunch without being submitted again), speech and transcription, embeddings and reranking, plus your uploaded OpenRouter files. Results land in a shared Library with search, Quick Look, export, and Undo.
+- **Compare models with the Test Suite.** Run built-in project tasks and text probes across models. A project only passes when its files check out; plain text answers are marked "unverified", never passed. Paid comparison runs need your model picks and a dollar ceiling.
+- **Know what you spend.** Credits and activity (with an optional management key), plus a local usage and cost ledger with charts in Settings.
+- **Feels like a Mac app.** Command palette, keyboard shortcuts, light and dark themes with accent colors, adjustable text size, Reduce Motion support, and a Touch ID or password app lock (on by default).
 
 ## Install
 
-### Download a build
+### Download
 
-Every CI run on `main` uploads an ad-hoc signed `ORB.app` as the **ORB-adhoc-&lt;sha&gt;** artifact on the [Actions page](https://github.com/Eplisium/orb/actions/workflows/ci.yml). It is not notarized, so on first launch:
+Get the latest `ORB-<version>.zip` from the [Releases page](https://github.com/Eplisium/orb/releases). Each release also has a `SHA256SUMS` file (`shasum -a 256 -c SHA256SUMS`).
+
+ORB is ad-hoc signed, not notarized, so the first launch needs one extra step:
 
 1. Unzip it and move `ORB.app` to `/Applications`.
-2. **Right-click → Open**, then confirm **Open** in the dialog. Double-clicking will not offer that option the first time. On recent macOS versions you may need **System Settings → Privacy & Security → Open Anyway** instead.
+2. **Right-click → Open**, then confirm **Open**. (Double-clicking won't offer this the first time.) On recent macOS versions you may need **System Settings → Privacy & Security → Open Anyway** instead.
 
-An ad-hoc signature changes with every build, so macOS treats each new download as a different app. Expect Keychain and privacy prompts again after you update.
+macOS treats each ad-hoc signed build as a different app, so expect Keychain and privacy prompts again after you update.
+
+Every CI run on `main` also uploads an untagged build as the **ORB-adhoc-&lt;sha&gt;** artifact on the [Actions page](https://github.com/Eplisium/orb/actions/workflows/ci.yml) (GitHub sign-in required; kept for 14 days).
+
+You need an [OpenRouter API key](https://openrouter.ai/settings/keys) for Chat, Agent, and Generate. The model browser works without one.
 
 ### Build from source
 
@@ -45,34 +69,22 @@ Requirements: macOS 14 Sonoma or newer and Swift 5.9 or newer (Command Line Tool
 ```bash
 git clone https://github.com/Eplisium/orb.git
 cd orb
-swift build
+swift build -c release
 bash build_app.sh --adhoc
 open ORB.app
 ```
 
-`build_app.sh` packages the SwiftPM binary into `ORB.app`. It reads the version from [`VERSION`](VERSION), sets the build number to the git commit count, copies the committed icon from `Resources/AppIcon.icns`, and signs the bundle.
+`build_app.sh` packages the optimized release binary into `ORB.app`. It reads the version from [`VERSION`](VERSION), sets the build number to the git commit count, copies the committed icon from `Resources/AppIcon.icns`, writes `Info.plist`, and signs the bundle.
 
 | Option | Effect |
 |---|---|
-| `--release` / `CONFIG=release` | Package the release build (run `swift build -c release` first, or add `--build`) |
+| `--release` / `CONFIG=release` | Package the optimized release build (the default; run `swift build -c release` first, or add `--build`) |
+| `--debug` / `CONFIG=debug` | Package the unoptimized debug build instead (run `swift build` first) |
 | `--build` | Run `swift build` for the chosen configuration first |
 | `--adhoc` | Ad-hoc signature (`codesign -s -`). Always used when `$CI` is set |
 | `--output DIR` | Write the bundle somewhere other than the repository root |
 
 Without `--adhoc`, the script creates a stable self-signed identity (kept in the git-ignored `codesign/` directory and added to your login keychain) and signs with [`rcodesign`](https://github.com/indygreg/apple-platform-rs) if it is installed. Because the identity stays the same across rebuilds, Keychain access and privacy grants survive local rebuilds.
-
-You need an [OpenRouter API key](https://openrouter.ai/settings/keys) for Chat, Agent, and Generate. The model browser works without a key.
-
-## Features
-
-- **Model browser:** browse the public OpenRouter catalog. Search, filter by modality and capability, and sort by price, context, or date. The detail view shows architecture, pricing, supported parameters, benchmarks, and per-provider endpoint data (latency, throughput, uptime, quantization). You can compare models side by side and keep favorites and notes. Endpoint row identities remain distinct even when literal tags resemble generated duplicate suffixes.
-- **Chat:** stream completions with full generation controls: temperature, max tokens, reasoning effort, provider routing, fallbacks, and response formats. Messages render as Markdown and keep reasoning disclosures inline in arrival order. Chat also supports multimodal attachments, live token, cost, and context tracking, session search, pinning, branching, and export. Assistant image-card exports report write failures, protect managed Library files, and use filenames matching their JPEG/PNG encoding.
-- **Agent:** ORB runs its own function-calling loop against OpenRouter, with web fetch and search, workspace file tools, cancellable shell commands, AppleScript, screen capture, mouse and keyboard control, memory, and planning. Risky tools ask for approval first, and tool calls appear as cards in the transcript.
-- **MCP:** connect stdio Model Context Protocol servers, or import a standard `mcpServers` JSON file. Settings can probe each server. Tools, resources, and prompts are bridged under `mcp__<server>__<tool>` names, and secret environment variables can be moved into the Keychain. Cancelled optional discovery or a transport lost during startup cannot publish a successful partial connection. Cancelled lifecycle waiters return promptly; a cancelled first startup can be retried by the next caller. Enabled servers' tools are offered to the Agent only when Computer Access is on, and every MCP call asks for approval first (OP Mode skips the prompt).
-- **Generate studio:** separate workspaces for Images, Video (durable, resumable jobs), Speech and transcription, Files, and Embeddings and reranking. Outputs are saved to a shared Library. Pending Undo in another window protects shared bytes, and failed attachment/inventory checks retain assets. Failed or malformed job reads stop lifecycle mutations and surface a persistence error instead of clearing recovery fields or duplicating a job. Job state and recovery fields commit together, and failed parameter binding leaves stored records unchanged. Studio model discovery is shared independently of departing view tasks. Video Library entries preserve their job identity so a failed job-link write does not duplicate the saved output on retry or reopen. Single-item Library and studio Image/Speech exports refuse managed asset/index/database destinations and preserve an existing destination if export fails. The remote Files list is owned by one shared refresh task: an older in-flight page can never restore a deleted file or overwrite a newer list, uploads and deletes always reconcile from a fresh first page, and duplicate rows or repeating pagination cursors stop loading instead of looping.
-- **Account:** credits and activity (these need the optional management key), plus a local usage and cost ledger with charts in Settings.
-- **Test Suite:** run built-in project scenarios and text probes across models. Verdicts are deterministic: a project run only passes when its artifacts check out, and a plain text answer is marked "unverified" instead of passed. Paid comparison runs require you to pick the models and set a dollar ceiling.
-- **App shell:** command palette, onboarding, tabbed Settings, accent and text-size preferences, and a Touch ID / password app lock (on by default, configurable in Settings).
 
 ## Security model
 
@@ -89,18 +101,21 @@ To report a vulnerability, see [SECURITY.md](SECURITY.md).
 
 ## Architecture
 
-ORB is a single SwiftPM executable target (`Sources/ORB`) plus one test target (`Tests/ORBTests`). Views and services are `@MainActor`, and MCP connections are actors. Streaming uses a `URLSessionDataDelegate` transport that passes each network chunk into an incremental SSE decoder, so tokens render as soon as they arrive. Persistence is SQLite in WAL mode under `~/Library/Application Support/ORB/`, with idempotent migrations and a fallback to a temporary database if the file is corrupt. Generated assets are stored content-addressed (SHA-256) next to the database.
+ORB is a single SwiftPM executable target (`Sources/ORB`) plus one test target (`Tests/ORBTests`). Views and services are `@MainActor`, and MCP connections are actors. Streaming uses a `URLSessionDataDelegate` transport that passes each network chunk into an incremental SSE decoder, so tokens render as soon as they arrive. Persistence is SQLite in WAL mode under `~/Library/Application Support/ORB/`, with idempotent migrations and a fallback to a temporary in-memory database if the file can't be opened, is corrupt, or was written by a newer ORB. Generated assets are stored content-addressed (SHA-256) next to the database.
 
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the module map and data flow.
 
 ## Development
 
 ```bash
-swift build
-swift test                                  # full offline suite
+swift build --build-tests
+swift test --skip-build --no-parallel       # full offline suite, as CI runs it
 swift test --filter ToolPolicyTests         # one suite
 bash scripts/count_warnings.sh build.log    # unique warnings in a saved build log
+bash scripts/check_warnings.sh build.log    # fails if warnings exceed scripts/warnings-baseline.txt
 ```
+
+Run the full suite with `--no-parallel`: several streaming tests measure wall-clock publish cadence and can fail when hundreds of tests compete for the CPU.
 
 The test suite runs offline. It never reads your Keychain, never calls OpenRouter with a key, and isolates SQLite to temporary files. A few tests need explicit opt-in and show as **skipped** unless their environment variable is set:
 
@@ -122,12 +137,22 @@ Strict concurrency checking (`StrictConcurrency=targeted`) is enabled as warning
 
 ### Continuous integration
 
-[`.github/workflows/ci.yml`](.github/workflows/ci.yml) runs on pushes and pull requests to `main`, and can also be started manually. It runs on `macos-15` with the latest stable Xcode and caches `.build`. The steps are:
+[`.github/workflows/ci.yml`](.github/workflows/ci.yml) runs on pushes and pull requests to `main`, and can also be started manually. It runs on `macos-15` with the latest stable Xcode and caches `.build`. A newer push cancels an older run only on pull requests; every `main` commit gets its own result. The steps are:
 
-1. `swift build --build-tests`, then a unique-warning count written to the job summary.
-2. `swift test --skip-build` (opt-in tests stay skipped; CI never sets the variables above).
-3. `build_app.sh --adhoc`, uploaded as a zipped `ORB.app` artifact.
-4. Build, test, and package logs are uploaded as an artifact, including when the run fails.
+1. A hygiene check that `Sources/` and `Tests/` contain no local tool-cache paths.
+2. `swift build --build-tests`, a unique-warning count in the job summary, and a gate that fails if the count rises above [`scripts/warnings-baseline.txt`](scripts/warnings-baseline.txt).
+3. `swift test --skip-build --no-parallel` (opt-in tests stay skipped; CI never sets the variables above).
+4. `swift build -c release`, then `build_app.sh --release --adhoc`, a bundle check (`scripts/verify_bundle.sh`), and a zipped `ORB.app` artifact.
+5. Build, test, and package logs are uploaded as an artifact, including when the run fails.
+
+### Releases
+
+[`.github/workflows/release.yml`](.github/workflows/release.yml) runs when a `v*` tag is pushed. It checks that the tag matches `VERSION`, runs the tests, builds and packages the release configuration, and publishes a GitHub Release with `ORB-<version>.zip`, `SHA256SUMS`, and that version's [CHANGELOG](CHANGELOG.md) section as the notes (`scripts/changelog_section.sh`). Tags with a suffix (`v1.2.0-beta.1`) become pre-releases.
+
+```bash
+# after updating VERSION and the CHANGELOG section on main
+git tag -s v1.2.0 -m "ORB 1.2.0" && git push origin v1.2.0
+```
 
 ## Known limitations
 
