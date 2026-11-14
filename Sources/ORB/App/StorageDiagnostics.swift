@@ -145,22 +145,66 @@ enum DiagnosticsSummary {
     }
 }
 
+/// Database size around one "Compact Database" run.
+struct DatabaseCompaction: Equatable, Sendable {
+    let beforeBytes: Int64
+    let afterBytes: Int64
+
+    var summary: String {
+        let saved = max(0, beforeBytes - afterBytes)
+        return "Compacted: \(StorageFormat.bytes(beforeBytes)) → \(StorageFormat.bytes(afterBytes))"
+            + (saved > 0 ? " (\(StorageFormat.bytes(saved)) freed)" : " (nothing to reclaim)")
+    }
+
+    /// Checkpoints the WAL and VACUUMs off the main thread.
+    @Sendable static func runShared() async throws -> DatabaseCompaction {
+        try await Task.detached(priority: .utility) {
+            let database = DatabaseManager.shared
+            let before = database.storageByteCount
+            try database.compact()
+            return DatabaseCompaction(beforeBytes: before, afterBytes: database.storageByteCount)
+        }.value
+    }
+}
+
 @MainActor
 final class StorageDiagnosticsModel: ObservableObject {
     @Published private(set) var report: StorageReport?
     @Published private(set) var isMeasuring = false
+    @Published private(set) var isCompacting = false
+    @Published private(set) var lastCompaction: DatabaseCompaction?
+    @Published private(set) var compactionError: String?
 
     let locations: StorageLocations
     private let measure: @Sendable (StorageLocations) async -> StorageReport
+    private let compactor: @Sendable () async throws -> DatabaseCompaction
 
     init(
         locations: StorageLocations = .standard(),
         measure: @escaping @Sendable (StorageLocations) async -> StorageReport = { locations in
             await Task.detached(priority: .utility) { StorageReport.measure(locations) }.value
-        }
+        },
+        compact: @escaping @Sendable () async throws -> DatabaseCompaction = DatabaseCompaction.runShared
     ) {
         self.locations = locations
         self.measure = measure
+        self.compactor = compact
+    }
+
+    /// Reclaims space left by deleted rows, then re-measures. One run at a
+    /// time; a failure is kept for inline display, never thrown.
+    func compactDatabase() async {
+        guard !isCompacting else { return }
+        isCompacting = true
+        compactionError = nil
+        do {
+            lastCompaction = try await compactor()
+        } catch {
+            lastCompaction = nil
+            compactionError = "Could not compact the database: \(error.localizedDescription)"
+        }
+        isCompacting = false
+        await refresh()
     }
 
     func refresh() async {

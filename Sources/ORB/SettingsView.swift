@@ -645,6 +645,12 @@ struct SettingsView: View {
             }
 
             HStack(spacing: 10) {
+                Button("Compact Database") { Task { await storage.compactDatabase() } }
+                    .disabled(storage.isCompacting)
+                    .help("Reclaims disk space left by deleted conversations and images. ORB may pause briefly while it runs.")
+                if storage.isCompacting {
+                    ProgressView().controlSize(.small)
+                }
                 Button("Reveal in Finder") { storage.revealInFinder() }
                 Button("Copy Diagnostics") {
                     let text = storage.diagnosticsText(
@@ -654,6 +660,11 @@ struct SettingsView: View {
                     AppToasts.copy(text, what: "Diagnostics")
                 }
                 .help("Copies versions, counts and sizes for a bug report. No keys, file paths or conversation content.")
+            }
+            if let error = storage.compactionError {
+                SettingsNotice(kind: .error, message: error)
+            } else if let compaction = storage.lastCompaction, !storage.isCompacting {
+                Text(compaction.summary).orbFont(.footnote).foregroundStyle(.secondary).monospacedDigit()
             }
         }
     }
