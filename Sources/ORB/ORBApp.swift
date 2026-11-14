@@ -185,4 +185,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         .terminateNow
     }
+
+    /// Quitting must not orphan commands the agent started: stop every
+    /// process group its tools spawned (SIGTERM, short grace, SIGKILL).
+    func applicationWillTerminate(_ notification: Notification) {
+        NativeAgentTools.terminateAllRunningProcesses()
+    }
 }
