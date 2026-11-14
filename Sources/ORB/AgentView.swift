@@ -19,6 +19,8 @@ struct AgentView: View {
     @State private var unread = UnreadTracker()
     @AppStorage("playground.requireCommandToSend") private var requireCommandToSend = false
     @StudioState("AgentView.undoSnapshot") private var undoSnapshot: UndoToastItem<[StoredConversation]>? = nil
+    /// Undo for the last message delete; shown only while no session undo is.
+    @State private var messageUndo: UndoToastItem<ChatService.MessageDeletion>? = nil
     /// The edit in progress. Nothing is removed until it is sent, so it has
     /// no timer: it lasts until Send or Cancel Edit.
     @StudioState("AgentView.pendingEdit") private var pendingEdit: ChatService.ConversationEdit? = nil
@@ -120,7 +122,7 @@ struct AgentView: View {
                 .frame(height: 1)
             if let error = chatService.lastError,
                chatService.lastErrorConversationID == nil || chatService.lastErrorConversationID == chatService.activeConversation?.id {
-                PlaygroundErrorBanner(message: error) { chatService.lastError = nil }
+                PlaygroundErrorBanner(message: error, mode: .agent) { chatService.lastError = nil }
             }
             if let conversation = chatService.activeConversation,
                chatService.isRunning(conversationID: conversation.id),
@@ -128,7 +130,7 @@ struct AgentView: View {
                 AgentRunStatusStrip(
                     messages: conversation.messages,
                     startedAt: context.startedAt,
-                    phaseText: { if case .executingTool = chatService.runState.phase { return "Running tool" } else { return "Agent working" } }(),
+                    phaseText: chatService.runState.phase.agentStatusText,
                     cancel: { chatService.stopStreaming() }
                 )
             }
@@ -144,6 +146,15 @@ struct AgentView: View {
                     token: toast.id,
                     undo: { chatService.restore(toast.payload); undoSnapshot = nil },
                     dismiss: { undoSnapshot = nil }
+                )
+                .padding(.bottom, 80)
+                .transition(.move(edge: .bottom).combined(with: .opacity))
+            } else if let toast = messageUndo {
+                UndoToastView(
+                    message: UndoToast.message(deletedMessages: toast.payload.count),
+                    token: toast.id,
+                    undo: { chatService.restoreMessages(toast.payload); messageUndo = nil },
+                    dismiss: { messageUndo = nil }
                 )
                 .padding(.bottom, 80)
                 .transition(.move(edge: .bottom).combined(with: .opacity))
@@ -198,7 +209,7 @@ struct AgentView: View {
                     chatService.selectConversation(conversation)
                     selectedModelId = conversation.modelId
                 },
-                onDelete: { chatService.deleteConversation($0) },
+                onDelete: { undoSnapshot = chatService.deleteConversationsUndoable(ids: [$0.id]).map { UndoToastItem($0) } },
                 onExport: { exportConversation($0) },
                 isSelecting: isSelectingSessions,
                 checked: selectedSessionIDs,
@@ -206,6 +217,7 @@ struct AgentView: View {
                     if selectedSessionIDs.contains(id) { selectedSessionIDs.remove(id) } else { selectedSessionIDs.insert(id) }
                 }
             )
+            .environment(\.conversationDeleteIsUndoable, true)
 
             Spacer(minLength: 0)
             if isSelectingSessions {
@@ -282,7 +294,7 @@ struct AgentView: View {
 
             if opMode {
                 HeaderPill(title: "OP Mode", systemImage: "bolt.shield.fill", tint: ORBTheme.warning)
-                    .help("OP Mode is on: risky tools run without asking, and the agent can inspect and manage ORB itself (sessions, usage, settings, MCP). Change it in Settings > Advanced.")
+                    .help("OP Mode is on: risky tools run without asking, and the agent can inspect and manage ORB itself (sessions, usage, settings, MCP). Change it in Settings → General → Security.")
             }
 
             ConversationMeterView(conversation: chatService.activeConversation)
@@ -516,7 +528,10 @@ struct AgentView: View {
                                         isReasoning: chatService.isReasoningMessage(message.id, conversationID: conversation.id),
                                         onDelete: conversationIsRunning
                                             ? nil
-                                            : { chatService.deleteMessage(message.id, from: conversation) },
+                                            : { messageUndo = chatService.deleteMessageUndoable(message.id, from: conversation.id).map { UndoToastItem($0) } },
+                                        onDeleteWithReply: conversationIsRunning || message.role != "user"
+                                            ? nil
+                                            : { messageUndo = chatService.deleteMessageUndoable(message.id, from: conversation.id, includingReply: true).map { UndoToastItem($0) } },
                                         onRegenerate: regenerateAction(for: message, in: conversation, running: conversationIsRunning),
                                         onEdit: conversationIsRunning || message.role != "user"
                                             ? nil
@@ -835,16 +850,12 @@ struct AgentView: View {
     // MARK: - Actions and derived values
 
     private var preferredModelId: String {
-        let fallback: String
-        if let favorite = viewModel.api.models.first(where: { viewModel.favoriteIds.contains($0.id) && $0.supportsTools })?.id {
-            fallback = favorite
-        } else if let selected = viewModel.selectedModel, selected.supportsTools {
-            fallback = selected.id
-        } else if let toolModel = viewModel.api.models.first(where: \.supportsTools)?.id {
-            fallback = toolModel
-        } else {
-            fallback = "openai/gpt-4o"
-        }
+        let fallback = PlaygroundModelDefaults.agentFallback(
+            models: viewModel.api.models,
+            favoriteIds: viewModel.favoriteIds,
+            selectedModelId: viewModel.selectedModel?.id,
+            recentIds: ModelRecentsStore().recentIds()
+        )
         return PlaygroundModelDefaults.resolve(
             storedModelId: defaultModelId,
             availableModelIds: viewModel.api.models.filter(\.supportsTools).map(\.id),
@@ -901,7 +912,7 @@ struct AgentView: View {
                   chatService.isRunning(conversationID: id) else {
                 return "Agent working in another session"
             }
-            return "Agent working"
+            return chatService.runState.phase.agentStatusText
         }
         return KeychainManager.hasAPIKey ? "Native agent ready" : "API key needed"
     }

@@ -1420,13 +1420,23 @@ struct TestSuiteView: View {
 
     // MARK: - Actions
 
+    /// A tool-capable favourite, then the browser selection when Test Suite
+    /// can run it (text models run as direct text probes), then the catalog's
+    /// preferred tool-capable model. Never a stale hard-coded id.
     private var preferredModelId: String {
-        if let favorite = viewModel.api.models.first(where: { viewModel.favoriteIds.contains($0.id) && $0.supportsTools })?.id {
-            return favorite
+        let models = viewModel.api.models
+        let toolFavorite = models.first { viewModel.favoriteIds.contains($0.id) && CatalogModelPreference.Candidate($0).satisfies(.toolCalling) }
+        if let toolFavorite { return toolFavorite.id }
+        if let selected = viewModel.selectedModel, CatalogModelPreference.Candidate(selected).satisfies(.textChat),
+           models.contains(where: { $0.id == selected.id }) {
+            return selected.id
         }
-        if let selected = viewModel.selectedModel?.id { return selected }
-        if let toolModel = viewModel.api.models.first(where: \.supportsTools)?.id { return toolModel }
-        return "openai/gpt-4o"
+        let tool = PlaygroundModelDefaults.agentFallback(
+            models: models, favoriteIds: viewModel.favoriteIds, selectedModelId: nil,
+            recentIds: ModelRecentsStore().recentIds()
+        )
+        if !tool.isEmpty { return tool }
+        return PlaygroundModelDefaults.chatFallback(models: models, favoriteIds: viewModel.favoriteIds, selectedModelId: nil)
     }
 
     private var currentModelId: String {
