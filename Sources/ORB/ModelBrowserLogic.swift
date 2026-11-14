@@ -324,6 +324,10 @@ final class CompareHandoff: @unchecked Sendable {
     func stage(_ ids: [String]) {
         lock.lock(); defer { lock.unlock() }
         staged = ids.isEmpty ? nil : ids
+        // A Test Suite already on screen will not re-run `.task`; tell it.
+        if !ids.isEmpty {
+            DispatchQueue.main.async { NotificationCenter.default.post(name: .testSuiteCompareHandoffStaged, object: nil) }
+        }
     }
 
     func take() -> [String]? {
