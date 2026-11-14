@@ -99,9 +99,35 @@ private actor HangingOpenRouterClient: OpenRouterClientProtocol {
     }
 }
 
+/// Ledger events recorded by one test's ChatService. Each test gets its own
+/// sink, so parallel tests never see each other's chat sends (the shared
+/// `UsageLedger.shared` is process-global).
+@MainActor
+private final class ChatServiceTestsLedgerSink {
+    var events: [UsageEvent] = []
+    lazy var ledger = UsageLedger(recordEvent: { [unowned self] in self.events.append($0) })
+}
+
+/// Publish-count bounds that follow the coalescer's contract instead of a
+/// fixed number: at most one publish per frame interval per channel, plus one
+/// per character-backstop's worth of text, plus a fixed allowance for the
+/// run's own start/finish mutations. A run slowed by a loaded machine gets a
+/// proportionally larger bound (still far below one publish per delta); a
+/// coalescer that publishes per delta exceeds it unless the stream lasts
+/// longer than deltas × frame interval.
+private enum ChatServiceTestsCadence {
+    static func bound(elapsed: Duration, channels: Int = 1, characters: Int, overhead: Int = 30) -> Int {
+        let frames = Int((elapsed / ChatService.streamFrameInterval).rounded(.up)) + 1
+        let backstops = characters / ChatService.streamFlushCharacters + 1
+        return channels * frames + backstops + overhead
+    }
+}
+
 @Suite("ChatService streaming lifecycle")
 @MainActor
 struct ChatServiceTests {
+    private let ledgerSink = ChatServiceTestsLedgerSink()
+
     private func service(
         scripts: [ScriptedOpenRouterClient.Script],
         store suppliedStore: MemoryConversationStore? = nil,
@@ -110,11 +136,15 @@ struct ChatServiceTests {
     ) -> (ChatService, ScriptedOpenRouterClient, MemoryConversationStore) {
         let store = suppliedStore ?? MemoryConversationStore()
         let client = ScriptedOpenRouterClient(scripts)
-        return (ChatService(client: client, store: store, apiKeyProvider: { apiKey }, agentMaximumTurns: agentMaximumTurns), client, store)
+        return (ChatService(client: client, store: store, apiKeyProvider: { apiKey }, agentMaximumTurns: agentMaximumTurns,
+                            usageLedger: ledgerSink.ledger), client, store)
     }
 
-    private func waitUntilIdle(_ service: ChatService) async throws {
-        for _ in 0..<500 where service.isStreaming { try await Task.sleep(for: .milliseconds(2)) }
+    /// Deadline-based: under a loaded parallel run, 500 × 2 ms sleeps can
+    /// end long before a slowed stream does.
+    private func waitUntilIdle(_ service: ChatService, timeout: Duration = .seconds(30)) async throws {
+        let deadline = ContinuousClock.now + timeout
+        while service.isStreaming, ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(2)) }
         #expect(!service.isStreaming)
     }
 
@@ -386,10 +416,14 @@ struct ChatServiceTests {
         let pieces = (0..<1_000).map { "segment-\($0)-body," }
         let events = pieces.map { OpenRouterStreamEvent.contentDelta(choiceIndex: 0, text: $0) } + [.done]
         let (service, _, _) = service(scripts: [.init(events: events)])
+        let started = ContinuousClock.now
         await service.sendMessage("hello", modelId: "test/model")
         try await waitUntilIdle(service)
+        let elapsed = started.duration(to: .now)
         #expect(service.activeConversation?.messages.last?.content == pieces.joined())
-        #expect(service.contentPublishCount < 60)
+        #expect(service.contentPublishCount <= ChatServiceTestsCadence.bound(
+            elapsed: elapsed, characters: pieces.joined().count, overhead: 2))
+        #expect(service.contentPublishCount < pieces.count / 2, "publishes must not track deltas")
     }
 
     @Test("visible partial content is checkpointed before completion")
@@ -424,6 +458,7 @@ struct ChatServiceTests {
         let subscription = service.$runState.sink { _ in phasePublishes += 1 }
         defer { subscription.cancel() }
 
+        let started = ContinuousClock.now
         await service.sendAgentMessage(
             "hello",
             modelId: "test/model",
@@ -431,9 +466,12 @@ struct ChatServiceTests {
             fullComputerAccess: false
         )
         try await waitUntilIdle(service)
+        let elapsed = started.duration(to: .now)
 
         #expect(service.activeConversation?.messages.last?.content == pieces.joined())
-        #expect(service.contentPublishCount < 60)
+        #expect(service.contentPublishCount <= ChatServiceTestsCadence.bound(
+            elapsed: elapsed, characters: pieces.joined().count, overhead: 2))
+        #expect(service.contentPublishCount < pieces.count / 2, "publishes must not track deltas")
         #expect(phasePublishes < 20, "An unchanged phase must not invalidate the view per token")
     }
 
@@ -491,11 +529,15 @@ struct ChatServiceTests {
         var conversationPublishes = 0
         let subscription = service.$activeConversation.sink { _ in conversationPublishes += 1 }
         defer { subscription.cancel() }
+        let started = ContinuousClock.now
         await service.sendAgentMessage("hello", modelId: "test/model", workspace: FileManager.default.temporaryDirectory.path, fullComputerAccess: false)
         try await waitUntilIdle(service)
+        let elapsed = started.duration(to: .now)
         let call = try #require(service.activeConversation?.messages.last?.toolCalls?.first)
         #expect(call.arguments == "{\"value\":\"\(String(repeating: "a", count: 1_000))\"}")
-        #expect(conversationPublishes < 80, "Tool previews should follow the frame cadence")
+        #expect(conversationPublishes <= ChatServiceTestsCadence.bound(elapsed: elapsed, characters: 1_020),
+                "Tool previews should follow the frame cadence")
+        #expect(conversationPublishes < 500, "previews must not publish per fragment")
     }
 
     @Test("Agent flushes the trailing reasoning delta before completion")
@@ -551,14 +593,18 @@ struct ChatServiceTests {
         var publishes = 0
         let subscription = service.$conversations.sink { _ in publishes += 1 }
         defer { subscription.cancel() }
+        let started = ContinuousClock.now
         if mode == .chat {
             await service.sendMessage("hello", modelId: "test/model")
         } else {
             await service.sendAgentMessage("hello", modelId: "test/model", workspace: FileManager.default.temporaryDirectory.path, fullComputerAccess: false)
         }
         try await waitUntilIdle(service)
+        let elapsed = started.duration(to: .now)
         #expect(service.activeConversation?.messages.last?.reasoning == String(repeating: "step,", count: 1_000))
-        #expect(publishes < 60, "reasoning should be coalesced before observable mutations")
+        #expect(publishes <= ChatServiceTestsCadence.bound(elapsed: elapsed, characters: 5_004),
+                "reasoning should be coalesced before observable mutations")
+        #expect(publishes < 500, "reasoning must not publish per token")
     }
 
     @Test("opaque reasoning details are lossless without per-token conversation publishes", arguments: [PlaygroundMode.chat, .agent])
@@ -572,6 +618,7 @@ struct ChatServiceTests {
         var publishes = 0
         let subscription = service.$conversations.sink { _ in publishes += 1 }
         defer { subscription.cancel() }
+        let started = ContinuousClock.now
         if mode == .chat {
             service.sendMessage("hello", modelId: "test/model")
         } else {
@@ -581,7 +628,11 @@ struct ChatServiceTests {
         let assistant = try #require(service.activeConversation?.messages.last)
         #expect(assistant.reasoning == String(repeating: "step,", count: 500))
         #expect(assistant.reasoningDetails == blocks)
-        #expect(publishes < 80, "opaque detail fragments must share the frame cadence")
+        let elapsed = started.duration(to: .now)
+        // Two live channels: visible reasoning and opaque details.
+        #expect(publishes <= ChatServiceTestsCadence.bound(elapsed: elapsed, channels: 2, characters: 2_506),
+                "opaque detail fragments must share the frame cadence")
+        #expect(publishes < 500, "details must not publish per fragment")
     }
 
     @Test("Agent marks a text answer cut off by the model as truncated")
@@ -965,19 +1016,44 @@ struct ChatServiceTests {
         #expect(service.activeConversation?.totalTokens == 12)
     }
 
+    /// Used to read `UsageLedger.shared` before and after its send. Swift
+    /// Testing runs the suite in parallel by default, so the other chat sends
+    /// landed in the same process-global ledger between the two reads and
+    /// the delta was rarely exactly +1 (green only with `--no-parallel`).
+    /// The production accounting path was correct; the test now injects its
+    /// own ledger over an isolated SQLite file.
     @Test("A run with no usage block still records one unpriced ledger row")
     func missingUsageStillRecordsLedgerRow() async throws {
-        func chatBucket() -> UsageBucket? {
-            UsageLedger.shared.buckets(.feature).first { $0.key == UsageFeature.chat.rawValue }
-        }
-        let before = chatBucket()
-        let (service, _, _) = service(scripts: [.init(events: [.contentDelta(choiceIndex: 0, text: "hi"), .done])])
-        await service.sendMessage("hello", modelId: "test/model")
+        let database = DatabaseManager()
+        defer { if let path = database.testDatabasePath { DatabaseManager.cleanupTestDatabaseForTesting(at: path) } }
+        let ledger = UsageLedger(database: { database })
+        let client = ScriptedOpenRouterClient([.init(events: [.contentDelta(choiceIndex: 0, text: "hi"), .done])])
+        let service = ChatService(client: client, store: MemoryConversationStore(),
+                                  apiKeyProvider: { "fixture-key" }, usageLedger: ledger)
+        service.sendMessage("hello", modelId: "test/model")
+        let runID = try #require(service.runState.context?.runID)
         try await waitUntilIdle(service)
-        let after = chatBucket()
-        // Exactly one row per run id, with unknown ("unpriced") spend — never
-        // zero and never missing.
-        #expect((after?.requests ?? 0) == (before?.requests ?? 0) + 1)
-        #expect((after?.unpricedRequests ?? 0) == (before?.unpricedRequests ?? 0) + 1)
+
+        // Exactly one row for this run, with unknown ("unpriced") spend —
+        // never zero-priced and never missing.
+        let chat = try #require(ledger.buckets(.feature).first { $0.key == UsageFeature.chat.rawValue })
+        #expect(chat.requests == 1)
+        #expect(chat.unpricedRequests == 1)
+        #expect(ledger.pendingEvents.isEmpty)
+
+        // Redelivering the same run id stays one row.
+        ledger.record(.chat, model: "test/model", usage: nil, eventID: runID.uuidString)
+        #expect(ledger.buckets(.feature).first { $0.key == UsageFeature.chat.rawValue }?.requests == 1)
+    }
+
+    @Test("each run records exactly one event in the service's own ledger")
+    func ledgerIsInjected() async throws {
+        let (service, _, _) = service(scripts: [.init(events: [.contentDelta(choiceIndex: 0, text: "hi"), .done])])
+        service.sendMessage("hello", modelId: "test/model")
+        let runID = try #require(service.runState.context?.runID)
+        try await waitUntilIdle(service)
+        #expect(ledgerSink.events.map(\.id) == ["\(UsageFeature.chat.rawValue):\(runID.uuidString)"])
+        #expect(ledgerSink.events.first?.cost == nil)
+        #expect(ledgerSink.events.first?.modelID == "test/model")
     }
 }
