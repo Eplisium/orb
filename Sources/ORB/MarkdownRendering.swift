@@ -573,6 +573,11 @@ struct MarkdownText: View {
 }
 
 /// Syntax-panel code block with a language chip and a copy button.
+///
+/// Closed blocks are syntax highlighted (`CodeHighlighter`, cached by content
+/// hash); the block still streaming stays plain so colours never flicker as
+/// tokens arrive. Long lines scroll horizontally behind a visible scroll bar
+/// and an edge fade, because trackpad Macs hide scroll bars until scrolling.
 struct CodeBlockView: View {
     let language: String?
     let source: String
@@ -581,6 +586,8 @@ struct CodeBlockView: View {
 
     @State private var copied = false
     @State private var isHovering = false
+    @State private var scroll = CodeScrollAffordance()
+    @State private var scrollSpace = UUID()
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -595,6 +602,13 @@ struct CodeBlockView: View {
                     ProgressView().controlSize(.mini).scaleEffect(0.6)
                 }
                 Spacer(minLength: 8)
+                if scroll.overflows {
+                    Image(systemName: "arrow.left.and.right")
+                        .orbFont(size: 11, weight: .semibold)
+                        .foregroundStyle(.tertiary)
+                        .help("Long lines: scroll sideways to see the rest")
+                        .accessibilityLabel("Scrolls horizontally")
+                }
                 if isHovering || copied {
                     Button(action: copyCode) {
                         Label(copied ? "Copied" : "Copy", systemImage: copied ? "checkmark" : "doc.on.doc")
@@ -610,14 +624,32 @@ struct CodeBlockView: View {
 
             Divider().opacity(0.4)
 
-            ScrollView(.horizontal, showsIndicators: false) {
-                Text(source)
+            ScrollView(.horizontal, showsIndicators: true) {
+                codeText
                     .orbFont(size: 11.5, design: .monospaced)
                     .textSelection(.enabled)
                     .padding(.horizontal, 12)
                     .padding(.vertical, 9)
                     .frame(maxWidth: .infinity, alignment: .leading)
+                    .background {
+                        GeometryReader { content in
+                            Color.clear.preference(key: CodeContentFrameKey.self,
+                                                   value: content.frame(in: .named(scrollSpace)))
+                        }
+                    }
             }
+            .coordinateSpace(name: scrollSpace)
+            .background {
+                GeometryReader { viewport in
+                    Color.clear.preference(key: CodeViewportWidthKey.self, value: viewport.size.width)
+                }
+            }
+            .onPreferenceChange(CodeContentFrameKey.self) { frame in
+                scroll.contentMinX = frame.minX
+                scroll.contentWidth = frame.width
+            }
+            .onPreferenceChange(CodeViewportWidthKey.self) { width in scroll.viewportWidth = width }
+            .mask(edgeFadeMask)
         }
         .background(.orbSurface(0.028))
         .clipShape(RoundedRectangle(cornerRadius: 8))
@@ -630,9 +662,45 @@ struct CodeBlockView: View {
         .accessibilityAction(named: Text("Copy code")) { copyCode() }
     }
 
+    private var codeText: Text {
+        if let highlighted = Self.highlighted(source: source, language: language, isStreaming: isStreaming) {
+            return Text(highlighted)
+        }
+        return Text(source)
+    }
+
+    /// Highlighted only once the fence has closed; nil means render plain.
+    static func highlighted(source: String, language: String?, isStreaming: Bool) -> AttributedString? {
+        isStreaming ? nil : CodeHighlighter.highlighted(source, language: language)
+    }
+
+    /// Fades whichever edge hides more code, so the clipped line reads as
+    /// "continues" rather than "cut off".
+    private var edgeFadeMask: some View {
+        HStack(spacing: 0) {
+            LinearGradient(colors: [.black.opacity(scroll.showsLeadingFade ? 0.15 : 1), .black],
+                           startPoint: .leading, endPoint: .trailing)
+                .frame(width: 24)
+            Color.black
+            LinearGradient(colors: [.black, .black.opacity(scroll.showsTrailingFade ? 0.15 : 1)],
+                           startPoint: .leading, endPoint: .trailing)
+                .frame(width: 32)
+        }
+    }
+
     private func copyCode() {
         AppToasts.copy(source, what: "Code")
         copied = true
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.4) { copied = false }
     }
+}
+
+private struct CodeContentFrameKey: PreferenceKey {
+    static let defaultValue: CGRect = .zero
+    static func reduce(value: inout CGRect, nextValue: () -> CGRect) { value = nextValue() }
+}
+
+private struct CodeViewportWidthKey: PreferenceKey {
+    static let defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = nextValue() }
 }
