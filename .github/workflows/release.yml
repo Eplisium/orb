@@ -1,0 +1,102 @@
+name: Release
+
+# Push a tag like v1.2.0 (matching VERSION) to publish a GitHub Release with an
+# ad-hoc signed, optimized ORB.app zip, its SHA-256 checksum, and the matching
+# CHANGELOG.md section as release notes. A tag with a suffix (v1.2.0-beta.1)
+# becomes a pre-release.
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write # gh release create
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Build and publish release
+    runs-on: macos-15
+    timeout-minutes: 60
+    env:
+      LOG_DIR: ${{ github.workspace }}/ci-logs
+      TAG: ${{ github.ref_name }}
+
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # build_app.sh derives CFBundleVersion from the commit count
+
+      - name: Select latest stable Xcode
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: latest-stable
+
+      - name: Check tag, VERSION, and release notes
+        run: |
+          mkdir -p "$LOG_DIR"
+          version="$(tr -d '[:space:]' < VERSION)"
+          base="${TAG#v}"
+          base="${base%%-*}"
+          if [ "$base" != "$version" ]; then
+            echo "::error::Tag $TAG does not match VERSION ($version)"
+            exit 1
+          fi
+          bash scripts/changelog_section.sh "$version" > "$RUNNER_TEMP/notes.md"
+          {
+            echo ""
+            echo "---"
+            echo "**Install:** download \`ORB-$version.zip\`, unzip, move \`ORB.app\` to Applications, then right-click it and choose **Open** the first time (the app is ad-hoc signed, not notarized). Verify the download with \`shasum -a 256 -c SHA256SUMS\`."
+          } >> "$RUNNER_TEMP/notes.md"
+          echo "VERSION_NUMBER=$version" >> "$GITHUB_ENV"
+          cat "$RUNNER_TEMP/notes.md"
+
+      - name: Test
+        timeout-minutes: 20
+        run: |
+          set -o pipefail
+          swift build --build-tests 2>&1 | tee "$LOG_DIR/build.log"
+          swift test --skip-build --no-parallel 2>&1 | tee "$LOG_DIR/test.log"
+
+      - name: Build release configuration
+        run: |
+          set -o pipefail
+          swift build -c release --product ORB 2>&1 | tee "$LOG_DIR/build-release.log"
+
+      - name: Package
+        run: |
+          set -o pipefail
+          out="$RUNNER_TEMP/package"
+          bash build_app.sh --release --adhoc --output "$out" 2>&1 | tee "$LOG_DIR/package.log"
+          grep -q 'configuration: release' "$LOG_DIR/package.log"
+          bash scripts/verify_bundle.sh "$out/ORB.app"
+          zip="ORB-$VERSION_NUMBER.zip"
+          (cd "$out" && ditto -c -k --keepParent ORB.app "$zip" && shasum -a 256 "$zip" > SHA256SUMS)
+          cat "$out/SHA256SUMS"
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          out="$RUNNER_TEMP/package"
+          prerelease=()
+          case "$TAG" in *-*) prerelease=(--prerelease) ;; esac
+          gh release create "$TAG" \
+            "$out/ORB-$VERSION_NUMBER.zip" "$out/SHA256SUMS" \
+            --verify-tag \
+            --title "ORB $VERSION_NUMBER" \
+            --notes-file "$RUNNER_TEMP/notes.md" \
+            "${prerelease[@]}"
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-logs-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ci-logs/
+          if-no-files-found: warn
+          retention-days: 30

@@ -30,3 +30,6 @@ codesign/
 *.sqlite3
 *.sqlite3-*
 *.sqlite-*
+
+# Backup copies of built bundles (e.g. ORB.app.bak-main/)
+*.app.bak*

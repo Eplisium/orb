@@ -5,8 +5,8 @@
 #   bash build_app.sh [options] [AppName]
 #
 # Options:
-#   --release        Package the release configuration (same as CONFIG=release).
-#   --debug          Package the debug configuration (default).
+#   --release        Package the optimized release configuration (default).
+#   --debug          Package the unoptimized debug configuration instead.
 #   --adhoc          Ad-hoc sign (`codesign -s -`) and never create or import a
 #                    signing identity. Automatic when $CI is set.
 #   --build          Run `swift build` for the chosen configuration first.
@@ -14,17 +14,19 @@
 #   -h, --help       Show this help.
 #
 # Environment:
-#   CONFIG=debug|release   Build configuration (overridden by --release/--debug).
+#   CONFIG=release|debug   Build configuration (default release; overridden by
+#                          --release/--debug).
 #   CI=...                 Any non-empty value implies --adhoc.
 #
-# Prerequisite: `swift build [-c release]` has succeeded, or pass --build.
+# Prerequisite: `swift build -c release` (or `swift build` with --debug) has
+# succeeded, or pass --build.
 set -euo pipefail
 
-usage() { sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//'; }
 
 # --- Configuration ---
 PROJECT_DIR="$(cd "$(dirname "$0")" && pwd)"
-CONFIG="${CONFIG:-debug}"
+CONFIG="${CONFIG:-release}"
 ADHOC=0
 RUN_BUILD=0
 OUTPUT_DIR="$PROJECT_DIR"
@@ -108,6 +110,13 @@ for resource_bundle in "$BIN_DIR"/*.bundle; do
 done
 
 # --- Create Info.plist ---
+# Usage strings: only Apple Events needs one. The Agent's run_applescript and
+# computer_action tools drive other apps through /usr/bin/osascript, and ORB is
+# the TCC-responsible process. Screen Recording (screencapture) and
+# Accessibility (System Events UI scripting) have no Info.plist key; macOS
+# shows its own prompt / Privacy & Security entry for those.
+# Keep in step with LICENSE.
+COPYRIGHT="Copyright © 2026 Zach Gladfelter (Eplisium). MIT License."
 cat > "$APP_BUNDLE/Contents/Info.plist" << PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -142,8 +151,16 @@ cat > "$APP_BUNDLE/Contents/Info.plist" << PLIST
             </array>
         </dict>
     </array>
+    <key>CFBundleDevelopmentRegion</key>
+    <string>en</string>
+    <key>LSApplicationCategoryType</key>
+    <string>public.app-category.developer-tools</string>
     <key>LSMinimumSystemVersion</key>
     <string>14.0</string>
+    <key>NSHumanReadableCopyright</key>
+    <string>$COPYRIGHT</string>
+    <key>NSAppleEventsUsageDescription</key>
+    <string>ORB's Agent uses Apple Events (AppleScript) to automate apps you ask it to control. It only does this when you turn on Computer Access for the Agent.</string>
     <key>NSHighResolutionCapable</key>
     <true/>
     <key>NSPrincipalClass</key>
@@ -151,8 +168,6 @@ cat > "$APP_BUNDLE/Contents/Info.plist" << PLIST
 </dict>
 </plist>
 PLIST
-plutil -lint "$APP_BUNDLE/Contents/Info.plist" >/dev/null
-
 plutil -lint "$APP_BUNDLE/Contents/Info.plist" >/dev/null
 
 # --- App icon ---

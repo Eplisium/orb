@@ -12,7 +12,9 @@ permissions:
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  # A newer push to a pull request supersedes the older run. Runs on main are
+  # never cancelled: every main SHA needs its own green result before release.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 # Integration and rendering tests stay skipped in CI: never set
 # RUN_OPENROUTER_INTEGRATION, ORB_STREAM_SNAPSHOT_DIR, or ORB_REASONING_SNAPSHOT.
@@ -50,6 +52,15 @@ jobs:
           restore-keys: |
             spm-${{ runner.os }}-
 
+      - name: Hygiene (no agent-tool paths in sources or tests)
+        run: |
+          # Tests must use FileManager.default.temporaryDirectory, never a
+          # contributor's home-directory tool caches.
+          if grep -rn '\.hermes' Sources Tests; then
+            echo "::error::Sources/Tests reference a .hermes path; use a temporary directory instead"
+            exit 1
+          fi
+
       - name: Build (app + tests)
         run: |
           set -o pipefail
@@ -70,6 +81,9 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
           bash scripts/count_warnings.sh "$LOG_DIR/build.log" --summary > "$LOG_DIR/warnings-summary.txt"
 
+      - name: Warning gate (must not exceed the committed baseline)
+        run: bash scripts/check_warnings.sh "$LOG_DIR/build.log" scripts/warnings-baseline.txt
+
       - name: Test
         timeout-minutes: 15 # fail fast if a test hangs instead of burning the job timeout
         run: |
@@ -80,10 +94,17 @@ jobs:
           # suite takes ~15 s serially on a laptop.
           swift test --skip-build --no-parallel 2>&1 | tee "$LOG_DIR/test.log"
 
-      - name: Package ad-hoc app
+      - name: Build release configuration
         run: |
           set -o pipefail
-          bash build_app.sh --adhoc --output "$RUNNER_TEMP/package" 2>&1 | tee "$LOG_DIR/package.log"
+          swift build -c release --product ORB 2>&1 | tee "$LOG_DIR/build-release.log"
+
+      - name: Package ad-hoc app (release)
+        run: |
+          set -o pipefail
+          bash build_app.sh --release --adhoc --output "$RUNNER_TEMP/package" 2>&1 | tee "$LOG_DIR/package.log"
+          grep -q 'configuration: release' "$LOG_DIR/package.log"
+          bash scripts/verify_bundle.sh "$RUNNER_TEMP/package/ORB.app"
           ditto -c -k --keepParent "$RUNNER_TEMP/package/ORB.app" "$RUNNER_TEMP/package/ORB.zip"
 
       - name: Upload app (ad-hoc signed)
