@@ -24,15 +24,14 @@
 
 ## Screenshots
 
-<!-- The images below are placeholders until real captures land in docs/images/. -->
 
 | Browse | Chat |
 |---|---|
-| ![Model browser: search, filters, and per-provider endpoint details](docs/images/browse.png) | ![Chat with streaming Markdown and inline reasoning](docs/images/chat.png) |
+| ![Model browser with the full OpenRouter catalog, per-image and per-token pricing](docs/images/browse.png) | ![Chat welcome screen with starter actions and the model picker](docs/images/chat.png) |
 | **Agent** | **Generate studio** |
-| ![Agent run with tool-call cards and an approval prompt](docs/images/agent.png) | ![Images studio with generated results](docs/images/studio.png) |
+| ![Agent playground with native tool capabilities](docs/images/agent.png) | ![Images studio with provider routing and a cost estimate](docs/images/studio.png) |
 | **Test Suite** | |
-| ![Test Suite results with deterministic verdicts](docs/images/testsuite.png) | |
+| ![Test Suite with project tasks and text probes](docs/images/testsuite.png) | |
 
 ## Features
 

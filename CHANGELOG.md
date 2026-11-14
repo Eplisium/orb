@@ -2,7 +2,7 @@
 
 All notable changes to ORB are listed here. The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses [Semantic Versioning](https://semver.org/). The marketing version lives in [`VERSION`](VERSION); the bundle build number is the git commit count. Each released version has one **Added**, **Changed**, and **Fixed** list. Pushing a `vX.Y.Z` tag publishes that version's section as the GitHub Release notes (`.github/workflows/release.yml`).
 
-## [1.2.0] — Unreleased
+## [1.2.0] — 2026-11-14
 
 ### Added
 - **Releases:** tagged builds (`v*`) publish an optimized, ad-hoc signed `ORB.app` zip with a `SHA256SUMS` file on the GitHub Releases page.
@@ -31,6 +31,7 @@ All notable changes to ORB are listed here. The format is based on [Keep a Chang
 - **Model menu:** reads "Remove from Compare" for a compared model and disables Chat with Model for models that cannot chat.
 
 ### Fixed
+- **Model browser:** image and audio models that charge per image, per image token or per request no longer show as "Free"; rows show that price instead, and a zero context length is hidden rather than shown as "0 ctx".
 - **Launch speed:** messages, conversations, and interrupted-stream recovery use indexes, so opening ORB with a long chat history no longer scans the whole messages table once per conversation.
 - **Database safety:** ORB refuses to open a database written by a newer version (it shows an error and runs with a temporary database instead) and never lowers the stored schema version.
 - **Database safety:** a write from one thread can no longer be rolled back by another thread's failed asset or Library transaction.
