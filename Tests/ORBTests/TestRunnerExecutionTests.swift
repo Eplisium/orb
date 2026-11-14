@@ -77,9 +77,11 @@ struct TestRunnerExecutionTests {
             throw CancellationError()
         }
         await subject.run(scenario: probe, modelId: tool.id, models: [tool])
-        #expect(subject.results.first?.errorMessage == TestRunner.unverifiedMessage)
+        // TESTS-7: the exact JSON check covers this probe's whole rubric.
+        #expect(subject.results.first?.success == true)
+        #expect(subject.results.first?.errorMessage == nil)
         #expect(subject.results.first?.outputPath == nil)
-        #expect(capture.records.first?.verdict == .unverified)
+        #expect(capture.records.first?.verdict == .passed)
         #expect(capture.records.first?.policy.capabilities == [])
         let request = try #require(await client.captured().first)
         #expect(request.tools == nil)

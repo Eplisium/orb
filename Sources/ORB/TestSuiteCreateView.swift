@@ -5,20 +5,84 @@ import SwiftUI
 
 // MARK: - Create Custom Test View
 
+/// Editable form state for a custom test. Pure so mode switching,
+/// expectation handling and validation are unit-testable (TESTS-10).
+struct CustomTestDraft: Equatable {
+    var title = ""
+    var subtitle = ""
+    var userPrompt = ""
+    var mode: TestEvaluationMode = .textResponse
+    var systemPrompt = CustomTest.defaultSystemPrompt(for: .textResponse)
+    var notes = ""
+    var category: TestCategory = .webDevelopment
+    var icon = "hammer"
+    var expectationKind: CustomTestExpectation.Kind = .contains
+    var expectationValue = ""
+
+    init() {}
+
+    init(_ test: CustomTest) {
+        title = test.title
+        subtitle = test.subtitle
+        userPrompt = test.userPrompt
+        mode = test.mode
+        systemPrompt = test.systemPrompt
+        notes = test.notes
+        category = test.category
+        icon = test.icon
+        expectationKind = test.expectation?.kind ?? .contains
+        expectationValue = test.expectation?.value ?? ""
+    }
+
+    /// Switching mode swaps the system prompt only while it is still the
+    /// previous mode's default, so a user's own prompt is never overwritten.
+    mutating func setMode(_ newMode: TestEvaluationMode) {
+        guard newMode != mode else { return }
+        if systemPrompt.trimmingCharacters(in: .whitespacesAndNewlines) == CustomTest.defaultSystemPrompt(for: mode)
+            || systemPrompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            systemPrompt = CustomTest.defaultSystemPrompt(for: newMode)
+        }
+        mode = newMode
+    }
+
+    var canSave: Bool {
+        !title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && !userPrompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    func makeTest(id: String = UUID().uuidString, createdAt: Date = Date()) -> CustomTest {
+        let system = systemPrompt.trimmingCharacters(in: .whitespacesAndNewlines)
+        return CustomTest(
+            id: id,
+            title: title.trimmingCharacters(in: .whitespacesAndNewlines),
+            subtitle: subtitle.trimmingCharacters(in: .whitespacesAndNewlines),
+            icon: icon,
+            category: category,
+            systemPrompt: system.isEmpty ? CustomTest.defaultSystemPrompt(for: mode) : system,
+            userPrompt: userPrompt.trimmingCharacters(in: .whitespacesAndNewlines),
+            notes: CustomTest.criteria(from: notes).joined(separator: "\n"),
+            createdAt: createdAt,
+            mode: mode,
+            expectation: CustomTestExpectation.make(kind: expectationKind, value: expectationValue)
+        )
+    }
+}
+
 struct CreateTestView: View {
     let accent: Color
+    /// Non-nil when editing: the saved test keeps its id and creation date.
+    var existing: CustomTest? = nil
     let onSave: (CustomTest) -> Void
 
-    @State private var title = ""
-    @State private var subtitle = ""
-    @State private var userPrompt = ""
-    @State private var systemPrompt = "You are an expert developer. Create a complete, working project with all necessary files. Write each file using the write_file function. After creating all files, verify the project works by listing the directory."
-    @State private var notes = ""
-    @State private var category: TestCategory = .webDevelopment
-    @State private var icon = "hammer"
+    @State private var draft = CustomTestDraft()
+    @State private var loadedExisting = false
     @Environment(\.dismiss) private var dismiss
 
     private let icons = ["hammer", "safari", "gamecontroller", "macwindow", "network", "cylinder", "building.2", "brain", "chart.bar", "cloud", "shield.lefthalf.filled", "wrench.and.screwdriver", "lightbulb", "star"]
+
+    private var modeBinding: Binding<TestEvaluationMode> {
+        Binding(get: { draft.mode }, set: { draft.setMode($0) })
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -34,9 +98,11 @@ struct CreateTestView: View {
                 .frame(width: 32, height: 32)
 
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("Create Custom Test")
+                    Text(existing == nil ? "Create Custom Test" : "Edit Custom Test")
                         .orbFont(size: 15, weight: .semibold)
-                    Text("The AI agent will build a real project in its own directory")
+                    Text(draft.mode == .textResponse
+                         ? "Each model gets one streamed answer — no tools, no approvals"
+                         : "Tool-capable models build a real project in their own folder; text-only models answer in text")
                         .orbFont(size: 11)
                         .foregroundStyle(.secondary)
                 }
@@ -49,11 +115,23 @@ struct CreateTestView: View {
             // Form
             ScrollView {
                 VStack(alignment: .leading, spacing: 16) {
+                    // Mode
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("Test Type")
+                            .orbFont(size: 11, weight: .semibold)
+                        Picker("Test Type", selection: modeBinding) {
+                            Text("Text response").tag(TestEvaluationMode.textResponse)
+                            Text("Project build").tag(TestEvaluationMode.projectBuild)
+                        }
+                        .pickerStyle(.segmented)
+                        .labelsHidden()
+                    }
+
                     // Title
                     VStack(alignment: .leading, spacing: 6) {
                         Text("Title")
                             .orbFont(size: 11, weight: .semibold)
-                        TextField("e.g. Build a REST API with Express", text: $title)
+                        TextField("e.g. Build a REST API with Express", text: $draft.title)
                             .textFieldStyle(.roundedBorder)
                     }
 
@@ -61,7 +139,7 @@ struct CreateTestView: View {
                     VStack(alignment: .leading, spacing: 6) {
                         Text("Subtitle")
                             .orbFont(size: 11, weight: .semibold)
-                        TextField("Short description shown on the card", text: $subtitle)
+                        TextField("Short description shown on the card", text: $draft.subtitle)
                             .textFieldStyle(.roundedBorder)
                     }
 
@@ -69,7 +147,7 @@ struct CreateTestView: View {
                     VStack(alignment: .leading, spacing: 6) {
                         Text("Category")
                             .orbFont(size: 11, weight: .semibold)
-                        Picker("Category", selection: $category) {
+                        Picker("Category", selection: $draft.category) {
                             ForEach(TestCategory.allCases) { cat in
                                 Label(cat.rawValue, systemImage: cat.icon).tag(cat)
                             }
@@ -85,20 +163,20 @@ struct CreateTestView: View {
                         LazyVGrid(columns: Array(repeating: GridItem(.fixed(36)), count: 7), spacing: 8) {
                             ForEach(icons, id: \.self) { iconName in
                                 Button {
-                                    icon = iconName
+                                    draft.icon = iconName
                                 } label: {
                                     ZStack {
                                         RoundedRectangle(cornerRadius: 8)
-                                            .fill(icon == iconName ? accent.opacity(0.18) : Color.primary.opacity(0.04))
+                                            .fill(draft.icon == iconName ? accent.opacity(0.18) : Color.primary.opacity(0.04))
                                         Image(systemName: iconName)
                                             .orbFont(size: 13)
-                                            .foregroundStyle(icon == iconName ? accent : .secondary)
+                                            .foregroundStyle(draft.icon == iconName ? accent : .secondary)
                                     }
                                     .frame(width: 36, height: 36)
                                 }
                                 .buttonStyle(.plain)
                                 .accessibilityLabel("Icon: \(iconName)")
-                                .accessibilityAddTraits(icon == iconName ? .isSelected : [])
+                                .accessibilityAddTraits(draft.icon == iconName ? .isSelected : [])
                             }
                         }
                     }
@@ -107,10 +185,12 @@ struct CreateTestView: View {
                     VStack(alignment: .leading, spacing: 6) {
                         Text("Task Prompt")
                             .orbFont(size: 11, weight: .semibold)
-                        Text("Describe what the AI should build. It will create files and run commands in its own project directory.")
+                        Text(draft.mode == .textResponse
+                             ? "Ask for exactly the answer you want to compare across models."
+                             : "Describe what the AI should build. It writes files in its own project folder; commands need your approval.")
                             .orbFont(size: 11)
                             .foregroundStyle(.secondary)
-                        TextEditor(text: $userPrompt)
+                        TextEditor(text: $draft.userPrompt)
                             .orbFont(size: 12)
                             .frame(minHeight: 80)
                             .padding(4)
@@ -120,7 +200,7 @@ struct CreateTestView: View {
 
                     // System prompt
                     DisclosureGroup("Custom System Prompt") {
-                        TextEditor(text: $systemPrompt)
+                        TextEditor(text: $draft.systemPrompt)
                             .orbFont(size: 11)
                             .frame(minHeight: 60)
                             .padding(4)
@@ -129,14 +209,34 @@ struct CreateTestView: View {
                     }
                     .orbFont(size: 11, weight: .medium)
 
+                    // Expected output
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("Expected Output")
+                            .orbFont(size: 11, weight: .semibold)
+                        Text("Optional — checked automatically against the response. Leave blank to review answers yourself.")
+                            .orbFont(size: 11)
+                            .foregroundStyle(.secondary)
+                        HStack {
+                            Picker("Check", selection: $draft.expectationKind) {
+                                ForEach(CustomTestExpectation.Kind.allCases) { Text($0.title).tag($0) }
+                            }
+                            .pickerStyle(.menu)
+                            .labelsHidden()
+                            .fixedSize()
+                            TextField(draft.expectationKind == .exactJSON ? #"{"answer": 42}"# : "Expected text or pattern",
+                                      text: $draft.expectationValue)
+                                .textFieldStyle(.roundedBorder)
+                        }
+                    }
+
                     // Notes / evaluation criteria
                     VStack(alignment: .leading, spacing: 6) {
                         Text("Evaluation Criteria (one per line)")
                             .orbFont(size: 11, weight: .semibold)
-                        Text("Optional — shown as checklist items in the test detail.")
+                        Text("Optional — shown as review items in the test detail; blank lines are ignored.")
                             .orbFont(size: 11)
                             .foregroundStyle(.secondary)
-                        TextEditor(text: $notes)
+                        TextEditor(text: $draft.notes)
                             .orbFont(size: 11)
                             .frame(minHeight: 50)
                             .padding(4)
@@ -154,26 +254,23 @@ struct CreateTestView: View {
                 Spacer()
                 Button("Cancel") { dismiss() }
                     .buttonStyle(.plain)
-                Button("Create Test") {
-                    let test = CustomTest(
-                        title: title.trimmingCharacters(in: .whitespacesAndNewlines),
-                        subtitle: subtitle.trimmingCharacters(in: .whitespacesAndNewlines),
-                        icon: icon,
-                        category: category,
-                        systemPrompt: systemPrompt,
-                        userPrompt: userPrompt.trimmingCharacters(in: .whitespacesAndNewlines),
-                        notes: notes
-                    )
+                Button(existing == nil ? "Create Test" : "Save Changes") {
+                    let test = existing.map { draft.makeTest(id: $0.id, createdAt: $0.createdAt) } ?? draft.makeTest()
                     onSave(test)
                     dismiss()
                 }
                 .buttonStyle(.borderedProminent)
                 .tint(accent)
-                .disabled(title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || userPrompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                .disabled(!draft.canSave)
             }
             .padding(12)
         }
         .frame(width: 540, height: 620)
+        .onAppear {
+            guard !loadedExisting else { return }
+            loadedExisting = true
+            if let existing { draft = CustomTestDraft(existing) }
+        }
     }
 }
 

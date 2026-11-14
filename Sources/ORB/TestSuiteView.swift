@@ -26,8 +26,31 @@ struct TestSuiteView: View {
     /// Pending rerun awaiting cost confirmation (single row or failed/unverified batch).
     @State private var pendingRerun: [TestRerunBatch] = []
     @State private var showRerunConfirmation = false
-    @State private var leaderboard: [ModelLeaderboardRow] = []
+    @State private var leaderboardRecords: [ExperimentRunRecord] = []
+    @State private var leaderboardMode: ModelLeaderboard.ModeFilter = .all
     @State private var resultsNotice: String?
+    /// Test the Compare picker will run; preselected when a hand-off arrives with no test open.
+    @State private var batchScenarioID: String?
+    @State private var batchOpenedFromHandoff = false
+    @State private var editingTest: CustomTest?
+    @State private var pendingDeleteTest: CustomTest?
+
+    private var leaderboard: [ModelLeaderboardRow] {
+        ModelLeaderboard.rows(ModelLeaderboard.summaries(leaderboardRecords, mode: leaderboardMode))
+    }
+
+    private var batchScenario: TestScenario? {
+        batchScenarioID.flatMap { scenario(id: $0) }
+    }
+
+    private var batchPlan: TestBatchLaunchPlan {
+        TestBatchLaunchPlan.resolve(scenario: batchScenario, modelIDs: batchSelectedIDs, ceilingText: batchCeiling)
+    }
+
+    private var ceilingCopy: String {
+        let amount = TestSpendCeilingParser.parse(batchCeiling).map { TestResultsTable.costText($0, zeroAsDash: false) } ?? "$\(batchCeiling)"
+        return "Inference may cost money. Known spend is checked after each model turn against the \(amount) ceiling; the turn in flight may exceed it. Unknown cost stops the run."
+    }
 
     private let accent = PlaygroundTheme.testAccent
 
@@ -54,18 +77,37 @@ struct TestSuiteView: View {
             viewModel.loadFavorites()
             customTests = DatabaseManager.shared.loadCustomTests()
             testRunner.loadSavedResults()
-            // Hand-off from the model browser's Compare panel.
-            if let ids = CompareHandoff.shared.take() {
-                batchSelectedIDs = Set(ids)
-                batchSearch = ""
-                showBatchPicker = true
-            }
+            reloadLeaderboard()
+            consumeCompareHandoff()
         }
+        // Also consume a hand-off staged while Test Suite is already visible.
+        .onReceive(NotificationCenter.default.publisher(for: .testSuiteCompareHandoffStaged)) { _ in
+            consumeCompareHandoff()
+        }
+        .onChange(of: testRunner.totalResultCount) { _, _ in reloadLeaderboard() }
         .onChange(of: selectedScenario?.id) { _, _ in
             // Input is scoped to the run the user is looking at.
             userInstructions = ""
         }
         .sheet(isPresented: $showBatchPicker) { batchPicker }
+        .sheet(item: $editingTest) { test in
+            CreateTestView(accent: accent, existing: test) { updated in
+                DatabaseManager.shared.saveCustomTest(updated)
+                customTests = DatabaseManager.shared.loadCustomTests()
+                if selectedScenario?.id == "custom-\(updated.id)" { selectedScenario = updated.toScenario() }
+            }
+        }
+        .confirmationDialog("Delete \u{201C}\(pendingDeleteTest?.title ?? "")\u{201D}?",
+                            isPresented: Binding(get: { pendingDeleteTest != nil }, set: { if !$0 { pendingDeleteTest = nil } }),
+                            titleVisibility: .visible) {
+            Button("Delete Test", role: .destructive) {
+                if let test = pendingDeleteTest { deleteCustomTest(test) }
+                pendingDeleteTest = nil
+            }
+            Button("Cancel", role: .cancel) { pendingDeleteTest = nil }
+        } message: {
+            Text("Its saved results stay in the Results table but can no longer be opened or rerun.")
+        }
         .confirmationDialog("Delete all \(testRunner.totalResultCount) saved test results?",
                             isPresented: $showClearConfirmation, titleVisibility: .visible) {
             Button("Delete \(testRunner.totalResultCount) Results", role: .destructive) {
@@ -81,16 +123,14 @@ struct TestSuiteView: View {
             }
             Button("Cancel", role: .cancel) { pendingRerun = [] }
         } message: {
-            Text("Inference may cost money. Known spend is checked before each model against the $\(batchCeiling) ceiling (set in Compare models); one request may exceed it. Unknown cost stops the run.")
+            Text(ceilingCopy + " The ceiling is set in Compare Models.")
         }
-        .confirmationDialog("Run selected models?", isPresented: $showBatchConfirmation) {
-            Button("Run \(batchSelectedIDs.count) models") {
-                guard let scenario = selectedScenario, let ceiling = Double(batchCeiling) else { return }
-                testRunner.start(scenario: scenario, modelIDs: batchSelectedIDs.sorted(),
-                                 models: viewModel.api.models, userInput: userInstructions, ceilingUSD: ceiling)
-            }
+        .confirmationDialog("Run \(batchScenario?.title ?? "test") on \(batchSelectedIDs.count) model\(batchSelectedIDs.count == 1 ? "" : "s")?",
+                            isPresented: $showBatchConfirmation, titleVisibility: .visible) {
+            Button("Run \(batchSelectedIDs.count) model\(batchSelectedIDs.count == 1 ? "" : "s")") { startBatch() }
+            Button("Cancel", role: .cancel) {}
         } message: {
-            Text("Inference may cost money. Known spend is checked before each model against the $\(batchCeiling) ceiling; one request may exceed it. Unknown cost stops the batch. Text responses do not verify a project.")
+            Text(ceilingCopy + " Text responses do not verify a project.")
         }
     }
 
@@ -107,56 +147,164 @@ struct TestSuiteView: View {
         .ignoresSafeArea()
     }
 
+    private var batchPickerModels: [ModelInfo] {
+        let favorites = viewModel.favoriteIds
+        return viewModel.api.models.filter {
+            TestModelRoute.resolve($0) != nil &&
+            (batchSearch.isEmpty || $0.id.localizedCaseInsensitiveContains(batchSearch) ||
+             $0.name.localizedCaseInsensitiveContains(batchSearch))
+        }
+        .enumerated()
+        .sorted { lhs, rhs in
+            let lf = favorites.contains(lhs.element.id), rf = favorites.contains(rhs.element.id)
+            return lf != rf ? lf : lhs.offset < rhs.offset
+        }
+        .map(\.element)
+    }
+
     private var batchPicker: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text("Compare models on this test").font(.headline)
-            Text("Select up to \(TestBatchSelection.maximumModels) text-output models. No requests start until confirmation.")
+        let cap = TestBatchSelection.maximumModels
+        let atCap = batchSelectedIDs.count >= cap
+        return VStack(alignment: .leading, spacing: 12) {
+            Text(batchOpenedFromHandoff && batchScenarioID == TestCatalog.defaultCompareScenario.id && selectedScenario == nil
+                 ? "Pick a test to run on these \(batchSelectedIDs.count) model\(batchSelectedIDs.count == 1 ? "" : "s")"
+                 : "Compare models on a test").font(.headline)
+            HStack(spacing: 8) {
+                Text("Test").font(ORBFont.footnote.weight(.semibold))
+                Picker("Test", selection: $batchScenarioID) {
+                    Text("Choose a test…").tag(String?.none)
+                    if !customTests.isEmpty {
+                        Section("Custom tests") {
+                            ForEach(customTests) { Text($0.title).tag(String?.some("custom-\($0.id)")) }
+                        }
+                    }
+                    Section("Text probes") {
+                        ForEach(TestCatalog.edgeCaseScenarios) { Text($0.title).tag(String?.some($0.id)) }
+                    }
+                    Section("Project builds") {
+                        ForEach(TestCatalog.allScenarios) { Text($0.title).tag(String?.some($0.id)) }
+                    }
+                }
+                .labelsHidden()
+                .frame(maxWidth: 320)
+            }
+            Text(batchScenario.map { $0.evaluationMode == .textResponse
+                    ? "Text probe: one streamed answer per model, no tools."
+                    : "Project build: tool models run the agent (commands ask for approval); text-only models answer in text." }
+                 ?? "Pick the test these models will run. Nothing starts until you confirm.")
                 .font(.caption).foregroundStyle(.secondary)
-            TextField("Search models", text: $batchSearch)
+            HStack {
+                TextField("Search models", text: $batchSearch)
+                Text("\(batchSelectedIDs.count) of \(cap) selected")
+                    .font(ORBFont.caption.monospacedDigit())
+                    .foregroundStyle(atCap ? ORBTheme.warning : .secondary)
+                    .fixedSize()
+            }
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 4) {
-                    ForEach(viewModel.api.models.filter {
-                        TestModelRoute.resolve($0) != nil &&
-                        (batchSearch.isEmpty || $0.id.localizedCaseInsensitiveContains(batchSearch) ||
-                         $0.name.localizedCaseInsensitiveContains(batchSearch))
-                    }, id: \.id) { model in
+                    ForEach(batchPickerModels, id: \.id) { model in
+                        let selected = batchSelectedIDs.contains(model.id)
                         Button {
-                            if batchSelectedIDs.contains(model.id) {
+                            if selected {
                                 batchSelectedIDs.remove(model.id)
-                            } else if batchSelectedIDs.count < TestBatchSelection.maximumModels {
+                            } else if !atCap {
                                 batchSelectedIDs.insert(model.id)
                             }
                         } label: {
                             HStack {
-                                Image(systemName: batchSelectedIDs.contains(model.id) ? "checkmark.square.fill" : "square")
+                                Image(systemName: selected ? "checkmark.square.fill" : "square")
+                                if viewModel.favoriteIds.contains(model.id) {
+                                    Image(systemName: "star.fill").foregroundStyle(.yellow).font(ORBFont.caption)
+                                        .accessibilityLabel("Favorite")
+                                }
                                 Text(model.name).lineLimit(1)
                                 Spacer()
-                                Text(selectedScenario?.evaluationMode == .textResponse ? "Text probe" :
-                                     TestModelRoute.resolve(model) == .project ? "Project" : "Text only")
+                                Text(ModelRowFacts.make(model).compactPrice)
+                                    .font(ORBFont.caption.monospacedDigit())
                                     .foregroundStyle(.secondary)
+                                    .help("Prompt / completion price per million tokens")
+                                Text(batchScenario?.evaluationMode == .textResponse ? "Text probe" :
+                                     TestModelRoute.resolve(model) == .project ? "Project" : "Text only")
+                                    .font(ORBFont.caption)
+                                    .foregroundStyle(.secondary)
+                                    .frame(width: 66, alignment: .trailing)
                             }
                             .contentShape(Rectangle())
                         }
                         .buttonStyle(.plain)
                         .padding(.vertical, 4)
+                        .disabled(!selected && atCap)
+                        .help(!selected && atCap ? "Up to \(cap) models per comparison. Deselect one to add another." : "")
                     }
                 }
             }
             HStack {
                 Text("Spend ceiling (USD)")
                 TextField("1.00", text: $batchCeiling).frame(width: 90)
+                if let reason = batchPlan.blockedReason {
+                    Text(reason).font(ORBFont.caption).foregroundStyle(ORBTheme.warning).lineLimit(2)
+                }
                 Spacer()
                 Button("Cancel") { showBatchPicker = false }
-                Button("Review \(batchSelectedIDs.count) models") {
+                Button("Review \(batchSelectedIDs.count) model\(batchSelectedIDs.count == 1 ? "" : "s")") {
                     showBatchPicker = false
                     showBatchConfirmation = true
                 }
-                .disabled(batchSelectedIDs.isEmpty ||
-                          (Double(batchCeiling).map { !$0.isFinite || $0 <= 0 } ?? true))
+                .keyboardShortcut(.defaultAction)
+                .disabled(batchPlan.blockedReason != nil)
             }
         }
         .padding(20)
-        .frame(width: 520, height: 480)
+        .frame(width: 600, height: 520)
+    }
+
+    /// Opens the picker for models staged by Browse → Compare. With no
+    /// test open, a cheap exactly-checked text probe is preselected and
+    /// the title asks the user to confirm or pick another test.
+    private func consumeCompareHandoff() {
+        guard let ids = CompareHandoff.shared.take() else { return }
+        batchSelectedIDs = Set(ids)
+        batchSearch = ""
+        batchScenarioID = selectedScenario?.id ?? TestCatalog.defaultCompareScenario.id
+        batchOpenedFromHandoff = true
+        showBatchPicker = true
+    }
+
+    private func openBatchPicker(preselecting ids: Set<String>, scenario: TestScenario) {
+        batchSelectedIDs = ids
+        batchSearch = ""
+        batchScenarioID = scenario.id
+        batchOpenedFromHandoff = false
+        showBatchPicker = true
+    }
+
+    private func startBatch() {
+        switch batchPlan {
+        case .run(let scenarioID, let ids, let ceiling):
+            guard let scenario = scenario(id: scenarioID) else {
+                testRunner.batchNotice = "This test no longer exists."
+                return
+            }
+            if selectedScenario?.id != scenario.id {
+                selectedScenario = scenario
+                selectedCategory = nil
+            }
+            testRunner.start(scenario: scenario, modelIDs: ids, models: viewModel.api.models,
+                             userInput: userInstructions, ceilingUSD: ceiling)
+        case let blocked:
+            testRunner.batchNotice = blocked.blockedReason
+        }
+    }
+
+    private func reloadLeaderboard() {
+        leaderboardRecords = DatabaseManager.shared.loadExperimentRunRecords()
+    }
+
+    private func deleteCustomTest(_ test: CustomTest) {
+        DatabaseManager.shared.deleteCustomTest(test.id)
+        customTests = DatabaseManager.shared.loadCustomTests()
+        if selectedScenario?.id == "custom-\(test.id)" { selectedScenario = nil }
+        resultsNotice = "Deleted \u{201C}\(test.title)\u{201D}."
     }
 
     // MARK: - Category Sidebar
@@ -314,14 +462,11 @@ struct TestSuiteView: View {
         }
         .clipShape(RoundedRectangle(cornerRadius: controlRadius))
         .contextMenu {
-            Button("Delete", role: .destructive) {
-                DatabaseManager.shared.deleteCustomTest(test.id)
-                customTests = DatabaseManager.shared.loadCustomTests()
-                if selectedScenario?.id == "custom-\(test.id)" {
-                    selectedScenario = nil
-                }
-            }
+            Button("Edit…") { editingTest = test }
+            Button("Delete…", role: .destructive) { pendingDeleteTest = test }
         }
+        .help(test.mode == .textResponse ? "Custom text test — right-click to edit or delete"
+              : "Custom project test — right-click to edit or delete")
         .onTapGesture {
             selectedScenario = test.toScenario()
             selectedCategory = nil
@@ -525,6 +670,14 @@ struct TestSuiteView: View {
                 // Saved results
                 if !testRunner.results.isEmpty {
                     savedResultsSection
+                } else if !leaderboardRecords.isEmpty {
+                    // Clear All deletes results but keeps experiment records;
+                    // the leaderboard built from them stays reachable.
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("MODEL LEADERBOARD").orbFont(size: 11, weight: .bold).foregroundStyle(.secondary)
+                        leaderboardSection
+                    }
+                    .frame(maxWidth: 880, alignment: .leading)
                 }
 
                 // Scenario cards
@@ -564,6 +717,7 @@ struct TestSuiteView: View {
                 }
                 Menu("Export") {
                     Button("Results as CSV…") { exportResultsCSV() }
+                    Button("Results with Responses as CSV…") { exportResultsCSV(includeResponses: true) }
                     Button("Experiment Records as JSON…") { exportExperimentJSON() }
                 }
                 .menuStyle(.borderlessButton).fixedSize()
@@ -596,19 +750,18 @@ struct TestSuiteView: View {
             .font(ORBFont.footnote)
 
             DisclosureGroup("Model leaderboard (all recorded runs)") {
-                ModelLeaderboardView(rows: leaderboard).padding(.top, 6)
+                leaderboardSection.padding(.top, 6)
             }
             .font(ORBFont.footnote)
-            .task(id: testRunner.totalResultCount) {
-                leaderboard = ModelLeaderboard.rows(DatabaseManager.shared.loadExperimentRunSummaries())
-            }
 
             TestResultsTableView(
                 results: testRunner.results,
                 onOpen: { result in
-                    if let scenario = TestCatalog.scenario(id: result.scenarioId) {
+                    if let scenario = scenario(id: result.scenarioId) {
                         selectedScenario = scenario
                         selectedModelId = result.modelId
+                    } else {
+                        resultsNotice = "This test no longer exists."
                     }
                 },
                 onDelete: { result in
@@ -623,63 +776,15 @@ struct TestSuiteView: View {
         .frame(maxWidth: 880, alignment: .leading)
     }
 
-    private func savedResultRow(_ result: TestRunResult) -> some View {
-        Button {
-            if let scenario = TestCatalog.scenario(id: result.scenarioId) {
-                selectedScenario = scenario
-                selectedModelId = result.modelId
+    private var leaderboardSection: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Picker("Runs", selection: $leaderboardMode) {
+                ForEach(ModelLeaderboard.ModeFilter.allCases) { Text($0.title).tag($0) }
             }
-        } label: {
-            HStack(spacing: 10) {
-                Image(systemName: result.errorMessage == TestRunner.unverifiedMessage ? "questionmark.circle.fill" :
-                      result.success ? "checkmark.circle.fill" : "xmark.circle.fill")
-                    .orbFont(size: 14)
-                    .foregroundStyle(result.errorMessage == TestRunner.unverifiedMessage ? .orange :
-                                     result.success ? .green : .red)
-
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(result.scenarioTitle)
-                        .orbFont(size: 12, weight: .semibold)
-                        .lineLimit(1)
-                    HStack(spacing: 6) {
-                        Text(shortModelName(result.modelId))
-                        Text("•")
-                        Text("\(result.totalTokens) tokens")
-                        Text("•")
-                        Text("\(result.latencyMs)ms")
-                        if result.outputPath != nil {
-                            Text("•")
-                            Label("Project", systemImage: "folder.fill")
-                        }
-                    }
-                    .orbFont(size: 11, weight: .medium, design: .monospaced)
-                    .foregroundStyle(.tertiary)
-                }
-                Spacer()
-                Text(testRunner.formattedCost(result.cost))
-                    .orbFont(size: 11, weight: .medium, design: .monospaced)
-                    .foregroundStyle(.secondary)
-            }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 9)
-            .background(.orbSurface(0.025))
-            .clipShape(RoundedRectangle(cornerRadius: controlRadius))
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .contextMenu {
-            if let path = result.outputPath {
-                Button("Open Project Folder") {
-                    NSWorkspace.shared.openFolder(atPath: path)
-                }
-                Button("Open in Finder") {
-                    NSWorkspace.shared.selectFile(nil, inDirectory: path)
-                }
-            }
-            Button("Delete Result", role: .destructive) {
-                DatabaseManager.shared.deleteTestResult(result.id)
-                testRunner.loadSavedResults()
-            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .frame(maxWidth: 320)
+            ModelLeaderboardView(rows: leaderboard)
         }
     }
 
@@ -736,7 +841,7 @@ struct TestSuiteView: View {
                     Label("\(scenario.estimatedSeconds)s", systemImage: "clock")
                         .orbFont(size: 11, weight: .medium)
                         .foregroundStyle(.tertiary)
-                    if result?.outputPath != nil {
+                    if ScenarioCardBadge.showsBuilt(result) {
                         Label("Built", systemImage: "folder.badge.checkmark")
                             .orbFont(size: 11, weight: .medium)
                             .foregroundStyle(.green)
@@ -755,7 +860,7 @@ struct TestSuiteView: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .disabled(testRunner.isRunning)
+        // Browsing other tests stays possible during a run; only Run is disabled.
     }
 
     private func resultBadge(_ result: TestRunResult) -> some View {
@@ -866,66 +971,75 @@ struct TestSuiteView: View {
 
                 Divider().frame(maxWidth: 820)
 
-                // Run button
-                HStack(spacing: 12) {
-                    Button {
-                        runScenario(scenario)
-                    } label: {
-                        HStack(spacing: 6) {
-                            if isThisRunning {
-                                ProgressView()
-                                    .controlSize(.small)
-                                    .tint(.white)
-                            } else {
-                                Image(systemName: "play.fill")
+                // Run controls: buttons on one row; progress and the ceiling
+                // bar on their own row so nothing wraps at 960 pt.
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack(spacing: 12) {
+                        Button {
+                            runScenario(scenario)
+                        } label: {
+                            HStack(spacing: 6) {
+                                if isThisRunning {
+                                    ProgressView()
+                                        .controlSize(.small)
+                                        .tint(.white)
+                                } else {
+                                    Image(systemName: "play.fill")
+                                }
+                                Text(isThisRunning ? (testRunner.activityLabel.isEmpty ? "Running…" : testRunner.activityLabel) : "Run Test")
+                                    .lineLimit(1)
+                                    .truncationMode(.tail)
                             }
-                            Text(isThisRunning ? (testRunner.activityLabel.isEmpty ? "Running…" : testRunner.activityLabel) : "Run Test")
+                            .orbFont(size: 13, weight: .semibold)
+                            .foregroundStyle(.white)
+                            .frame(maxWidth: 220)
+                            .fixedSize(horizontal: !isThisRunning, vertical: false)
+                            .padding(.horizontal, 16)
+                            .padding(.vertical, 9)
+                            .background(isThisRunning ? Color.gray : accent)
+                            .clipShape(RoundedRectangle(cornerRadius: controlRadius))
                         }
-                        .orbFont(size: 13, weight: .semibold)
-                        .foregroundStyle(.white)
-                        .padding(.horizontal, 16)
-                        .padding(.vertical, 9)
-                        .background(isThisRunning ? Color.gray : accent)
-                        .clipShape(RoundedRectangle(cornerRadius: controlRadius))
-                    }
-                    .buttonStyle(.plain)
-                    .disabled(testRunner.isRunning || !KeychainManager.hasAPIKey || !isEligible)
+                        .buttonStyle(.plain)
+                        .disabled(testRunner.isRunning || !KeychainManager.hasAPIKey || !isEligible)
+                        .help(isThisRunning ? testRunner.activityLabel : "Run this test on \(shortModelName(currentModelId))")
 
-                    Button("Compare Models…") {
-                        batchSelectedIDs = isEligible ? [currentModelId] : []
-                        batchSearch = ""
-                        showBatchPicker = true
+                        Button("Compare Models…") {
+                            openBatchPicker(preselecting: isEligible ? [currentModelId] : [], scenario: scenario)
+                        }
+                        .disabled(testRunner.isRunning || !KeychainManager.hasAPIKey)
+
+                        if testRunner.isRunning {
+                            Button("Cancel", role: .destructive) { testRunner.cancel() }
+                        }
+                        Spacer(minLength: 0)
                     }
-                    .disabled(testRunner.isRunning || !KeychainManager.hasAPIKey)
 
                     if testRunner.isRunning {
-                        Button("Cancel", role: .destructive) { testRunner.cancel() }
-                        Text("\(testRunner.batchCompleted)/\(testRunner.batchTotal) finished · \(testRunner.runningModelId ?? "")")
-                            .orbFont(size: 11).lineLimit(1)
-                        CostCeilingBar(progress: CostCeilingProgress(
-                            spent: testRunner.batchSpent, ceiling: testRunner.batchCeilingUSD,
-                            unreportedRuns: testRunner.batchUnreportedRuns))
-                            .frame(maxWidth: 260)
+                        HStack(spacing: 12) {
+                            Text("\(testRunner.batchCompleted)/\(testRunner.batchTotal) finished · \(testRunner.runningModelId ?? "")")
+                                .orbFont(size: 11).lineLimit(1).truncationMode(.middle)
+                            CostCeilingBar(progress: CostCeilingProgress(
+                                spent: testRunner.batchSpent, ceiling: testRunner.batchCeilingUSD,
+                                unreportedRuns: testRunner.batchUnreportedRuns))
+                                .frame(maxWidth: 300)
+                            Spacer(minLength: 0)
+                        }
                     }
 
                     if !KeychainManager.hasAPIKey {
                         Text("Add your OpenRouter API key in Settings → Accounts & Keys to run tests.")
                             .orbFont(size: 11)
                             .foregroundStyle(.orange)
-                    }
-
-                    if !isEligible {
+                    } else if !isEligible {
                         Text("Choose an available text-output model to run this test.")
                             .orbFont(size: 11)
                             .foregroundStyle(.orange)
                     }
-
-                    Spacer()
                 }
-                .frame(maxWidth: 820)
+                .frame(maxWidth: 820, alignment: .leading)
 
                 if isEligible && !testRunner.isRunning {
-                    Text("Single runs use credits without a ceiling; Compare Models offers a between-run spend limit.")
+                    Text("Single runs use credits without a ceiling. Compare Models stops at a spend ceiling, checked after each model turn.")
                         .orbFont(size: 11)
                         .foregroundStyle(.secondary)
                         .frame(maxWidth: 820, alignment: .leading)
@@ -935,31 +1049,41 @@ struct TestSuiteView: View {
                     Text(notice).orbFont(size: 11).foregroundStyle(.orange)
                 }
 
-                let modelResults = testRunner.results.filter { $0.scenarioId == scenario.id }
-                if !modelResults.isEmpty {
+                let latestPerModel = ScenarioComparison.latestPerModel(testRunner.results, scenarioID: scenario.id, limit: 10)
+                if !latestPerModel.isEmpty {
                     VStack(alignment: .leading, spacing: 6) {
-                        Text("RESULTS BY MODEL").orbFont(size: 11, weight: .bold)
-                        ForEach(modelResults.prefix(10)) { entry in
+                        Text("LATEST RESULT BY MODEL").orbFont(size: 11, weight: .bold)
+                        ForEach(latestPerModel) { entry in
                             Button {
                                 selectedModelId = entry.modelId
                             } label: {
                                 HStack {
                                     Text(entry.modelId).lineLimit(1)
                                     Spacer()
-                                    Text(entry.errorMessage == TestRunner.unverifiedMessage ? "Needs review" :
-                                         entry.success ? "Project checks passed" : "Failed")
-                                        .foregroundStyle(entry.errorMessage == TestRunner.unverifiedMessage ? .orange :
-                                                         entry.success ? .green : .red)
-                                    Text(testRunner.formattedCost(entry.cost))
+                                    TestVerdictPill(kind: .of(entry))
+                                    Text(testRunner.formattedCost(entry.cost)).monospacedDigit()
                                 }
                                 .orbFont(size: 11)
                                 .padding(5)
                                 .background(entry.modelId == currentModelId ? accent.opacity(0.10) : Color.clear)
+                                .contentShape(Rectangle())
                             }
                             .buttonStyle(.plain)
+                            .help(TestVerdictKind.headline(entry))
                         }
                     }
                     .frame(maxWidth: 820)
+
+                    if latestPerModel.count >= 2 {
+                        DisclosureGroup("Compare answers side by side") {
+                            ScenarioComparisonView(
+                                results: Array(latestPerModel.prefix(TestBatchSelection.maximumModels)),
+                                accent: accent)
+                                .padding(.top, 6)
+                        }
+                        .orbFont(size: 11, weight: .medium)
+                        .frame(maxWidth: 820, alignment: .leading)
+                    }
                 }
 
                 // Activity log during run
@@ -1104,8 +1228,7 @@ struct TestSuiteView: View {
                     .orbFont(size: 14)
                     .foregroundStyle(result.errorMessage == TestRunner.unverifiedMessage ? .orange :
                                      result.success ? .green : .red)
-                Text(result.errorMessage == TestRunner.unverifiedMessage ? "Text Response — Needs Review" :
-                     result.success ? "Project Checks Passed" : "Test Failed")
+                Text(TestVerdictKind.headline(result))
                     .orbFont(size: 13, weight: .semibold)
                 Spacer()
             }
@@ -1113,7 +1236,14 @@ struct TestSuiteView: View {
             // Metrics row
             HStack(spacing: 14) {
                 Label("\(result.promptTokens + result.completionTokens) tokens", systemImage: "text.word.spacing")
-                Label("\(result.latencyMs)ms", systemImage: "clock")
+                Label(TestResultsTable.latencyText(result.latencyMs), systemImage: "clock")
+                    .help(TestResultsTable.latencyHelp(result))
+                if let ttft = result.ttftMs {
+                    Label("TTFT " + TestResultsTable.ttftText(ttft), systemImage: "bolt")
+                }
+                if result.tokensPerSec != nil {
+                    Label(TestResultsTable.throughputText(result.tokensPerSec), systemImage: "speedometer")
+                }
                 Label(testRunner.formattedCost(result.cost), systemImage: "dollarsign.circle")
             }
             .orbFont(size: 11, weight: .medium, design: .monospaced)
@@ -1138,12 +1268,10 @@ struct TestSuiteView: View {
             // Agent summary
             if !result.response.isEmpty {
                 VStack(alignment: .leading, spacing: 8) {
-                    Text(result.outputPath == nil ? "TEXT RESPONSE (PROJECT NOT VERIFIED)" : "AGENT SUMMARY")
+                    Text(result.outputPath == nil ? "TEXT RESPONSE" : "AGENT SUMMARY")
                         .orbFont(size: 11, weight: .bold)
                         .foregroundStyle(.secondary)
-                    Text(result.response)
-                        .orbFont(size: 13)
-                        .lineSpacing(3)
+                    MarkdownText(content: result.response, accent: accent)
                         .textSelection(.enabled)
                         .padding(14)
                         .frame(maxWidth: .infinity, alignment: .leading)
@@ -1241,12 +1369,12 @@ struct TestSuiteView: View {
 
     /// Resolves scenarios (built-in or custom); missing ones are reported.
     private func scenario(id: String) -> TestScenario? {
-        TestCatalog.scenario(id: id) ?? customTests.map { $0.toScenario() }.first { $0.id == id }
+        TestScenarioResolver.resolve(id: id, custom: customTests)
     }
 
     private func confirmRerun(_ batches: [TestRerunBatch]) {
         guard !testRunner.isRunning else { return }
-        guard let ceiling = Double(batchCeiling), ceiling.isFinite, ceiling > 0 else {
+        guard TestSpendCeilingParser.parse(batchCeiling) != nil else {
             resultsNotice = "Set a positive spend ceiling in Compare models before rerunning."
             return
         }
@@ -1263,13 +1391,14 @@ struct TestSuiteView: View {
             if let s = scenario(id: batch.scenarioID) { plan.append((s, batch.modelIDs)) } else { missing += 1 }
         }
         if missing > 0 { resultsNotice = "\(missing) scenario\(missing == 1 ? " no longer exists" : "s no longer exist") and will be skipped." }
-        guard !plan.isEmpty, let ceiling = Double(batchCeiling) else { return }
+        guard !plan.isEmpty, let ceiling = TestSpendCeilingParser.parse(batchCeiling) else { return }
         testRunner.start(plan: plan, models: viewModel.api.models, ceilingUSD: ceiling)
     }
 
-    private func exportResultsCSV() {
+    private func exportResultsCSV(includeResponses: Bool = false) {
         let rows = testRunner.showsAllResults ? testRunner.results : DatabaseManager.shared.loadAllTestResults()
-        save(text: TestResultsCSV.encode(rows), name: "orb-test-results.csv")
+        save(text: TestResultsCSV.encode(rows, includeResponses: includeResponses),
+             name: includeResponses ? "orb-test-results-with-responses.csv" : "orb-test-results.csv")
     }
 
     private func exportExperimentJSON() {

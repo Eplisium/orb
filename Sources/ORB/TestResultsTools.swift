@@ -7,22 +7,28 @@ import Foundation
 enum TestResultsCSV {
     static let header = ["id", "timestamp", "scenario_id", "scenario_title", "category", "model_id",
                          "result", "cost_usd", "latency_ms", "prompt_tokens", "completion_tokens",
-                         "total_tokens", "error", "output_path"]
+                         "total_tokens", "error", "output_path", "ttft_ms", "tokens_per_sec"]
 
     /// RFC 4180: CRLF line endings; fields containing comma, quote, CR or LF
     /// are quoted with embedded quotes doubled. Unknown cost (stored as 0) is
-    /// left blank rather than claiming the run was free.
-    static func encode(_ rows: [TestRunResult]) -> String {
+    /// left blank rather than claiming the run was free. Free-text columns
+    /// (title, error, path, response) are neutralised against spreadsheet
+    /// formula injection. `includeResponses` appends the full model output.
+    static func encode(_ rows: [TestRunResult], includeResponses: Bool = false) -> String {
         let iso = ISO8601DateFormatter()
-        var lines = [header.map(field).joined(separator: ",")]
+        let columns = includeResponses ? header + ["response"] : header
+        var lines = [columns.map(field).joined(separator: ",")]
         for r in rows {
             let cost = r.cost > 0 ? String(format: "%.6f", r.cost) : ""
-            let values: [String] = [
-                r.id.uuidString, iso.string(from: r.timestamp), r.scenarioId, r.scenarioTitle,
-                r.category.rawValue, r.modelId, TestVerdictKind.of(r).rawValue, cost,
+            var values: [String] = [
+                r.id.uuidString, iso.string(from: r.timestamp), r.scenarioId, safeText(r.scenarioTitle),
+                r.category.rawValue, safeText(r.modelId), TestVerdictKind.of(r).rawValue, cost,
                 String(r.latencyMs), String(r.promptTokens), String(r.completionTokens),
-                String(r.totalTokens), r.errorMessage ?? "", r.outputPath ?? ""
+                String(r.totalTokens), safeText(r.errorMessage ?? ""), safeText(r.outputPath ?? ""),
+                r.ttftMs.map(String.init) ?? "",
+                r.tokensPerSec.map { String(format: "%.2f", $0) } ?? ""
             ]
+            if includeResponses { values.append(safeText(r.response)) }
             lines.append(values.map(field).joined(separator: ","))
         }
         return lines.joined(separator: "\r\n") + "\r\n"
@@ -31,6 +37,13 @@ enum TestResultsCSV {
     static func field(_ value: String) -> String {
         guard value.contains(where: { $0 == "," || $0 == "\"" || $0 == "\n" || $0 == "\r" }) else { return value }
         return "\"" + value.replacingOccurrences(of: "\"", with: "\"\"") + "\""
+    }
+
+    /// OWASP CSV-injection guard: a cell that a spreadsheet would evaluate
+    /// (leading =, +, -, @, tab or CR) is prefixed with a single quote.
+    static func safeText(_ value: String) -> String {
+        guard let first = value.unicodeScalars.first, "=+-@\t\r".unicodeScalars.contains(first) else { return value }
+        return "'" + value
     }
 }
 
@@ -102,8 +115,41 @@ struct ModelLeaderboardRow: Equatable, Identifiable {
 }
 
 enum ModelLeaderboard {
-    /// Per-model stats from experiment runs, best pass rate first, then more
-    /// runs, then lower median latency, then model ID (deterministic).
+    enum ModeFilter: String, CaseIterable, Identifiable {
+        case all, textProbes, projectBuilds
+        var id: String { rawValue }
+        var title: String {
+            switch self {
+            case .all: return "All runs"
+            case .textProbes: return "Text probes"
+            case .projectBuilds: return "Project builds"
+            }
+        }
+    }
+
+    /// Leaderboard input from full experiment records: user cancellations
+    /// are not model failures, so they are excluded (TESTS-7).
+    static func summaries(_ records: [ExperimentRunRecord], mode: ModeFilter = .all,
+                          scenarioID: String? = nil) -> [ExperimentRunSummary] {
+        records.filter { record in
+            guard record.completionStatus != .cancelled else { return false }
+            if let scenarioID, record.scenarioID != scenarioID { return false }
+            let isText = record.artifactChecks.contains { $0.name == "textResponseMode" }
+            switch mode {
+            case .all: return true
+            case .textProbes: return isText
+            case .projectBuilds: return !isText
+            }
+        }.map {
+            ExperimentRunSummary(modelID: $0.modelID, verdict: $0.verdict.rawValue,
+                                 latencySeconds: max(0, $0.finishedAt.timeIntervalSince($0.startedAt)),
+                                 knownCost: $0.spend.knownCostUSD)
+        }
+    }
+
+    /// Per-model stats, ranked by the Wilson 95% lower bound of the pass
+    /// rate (so 1/1 does not outrank 49/50), then more runs, then lower
+    /// median latency, then model ID (deterministic).
     static func rows(_ runs: [ExperimentRunSummary]) -> [ModelLeaderboardRow] {
         let grouped: [String: [ExperimentRunSummary]] = Dictionary(grouping: runs, by: \.modelID)
         var rows: [ModelLeaderboardRow] = []
@@ -120,8 +166,18 @@ enum ModelLeaderboard {
         return rows.sorted(by: ranksBefore)
     }
 
+    /// Wilson score interval lower bound (z = 1.96) for `passed` of `runs`.
+    static func wilsonLowerBound(passed: Int, runs: Int) -> Double {
+        guard runs > 0 else { return 0 }
+        let n = Double(runs), p = Double(passed) / n, z = 1.96, z2 = z * z
+        let centre = p + z2 / (2 * n)
+        let margin = z * ((p * (1 - p) + z2 / (4 * n)) / n).squareRoot()
+        return max(0, (centre - margin) / (1 + z2 / n))
+    }
+
     private static func ranksBefore(_ a: ModelLeaderboardRow, _ b: ModelLeaderboardRow) -> Bool {
-        if a.passRate != b.passRate { return a.passRate > b.passRate }
+        let wa = wilsonLowerBound(passed: a.passed, runs: a.runs), wb = wilsonLowerBound(passed: b.passed, runs: b.runs)
+        if wa != wb { return wa > wb }
         if a.runs != b.runs { return a.runs > b.runs }
         if a.medianLatency != b.medianLatency { return a.medianLatency < b.medianLatency }
         return a.modelID < b.modelID

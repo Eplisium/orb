@@ -36,7 +36,7 @@ enum TestVerdictKind: String, CaseIterable, Sendable {
 
     var explanation: String {
         switch self {
-        case .passed: return "Every automatic check for this scenario succeeded (for project builds: the files exist and the build checks pass)."
+        case .passed: return "Every automatic check for this run succeeded. For project builds that means the expected files exist; their contents and builds are not verified. Text probes pass only when exact checks cover the whole rubric."
         case .unverified: return "The model answered, but the scenario's rubric was not graded. Read the response yourself."
         case .failed: return "A check failed, the run errored, or it was cancelled or truncated."
         }
@@ -51,10 +51,67 @@ enum TestVerdictKind: String, CaseIterable, Sendable {
         }
     }
 
+    /// Short label for detail headers and per-model lists, scoped to what was checked.
+    static func headline(_ result: TestRunResult) -> String {
+        switch of(result) {
+        case .passed: return result.outputPath == nil ? "Exact Checks Passed" : "Expected Files Present"
+        case .unverified: return "Text Response — Needs Review"
+        case .failed: return TestResultsTable.isCancelled(result) ? "Cancelled" : "Test Failed"
+        }
+    }
+
     static let legendFootnote = "Unverified results are not graded and need your review: a response arrived, but nothing confirmed it is correct."
 }
 
+/// Scenario-card badges (TESTS-6): "Built" only for a passing project run.
+enum ScenarioCardBadge {
+    static func showsBuilt(_ result: TestRunResult?) -> Bool {
+        guard let result, result.outputPath != nil else { return false }
+        return TestVerdictKind.of(result) == .passed
+    }
+}
+
+/// Side-by-side output comparison for one scenario (TESTS-11).
+enum ScenarioComparison {
+    /// The newest result per model for `scenarioID`, newest first, capped.
+    static func latestPerModel(_ results: [TestRunResult], scenarioID: String,
+                               limit: Int = TestBatchSelection.maximumModels) -> [TestRunResult] {
+        var seen = Set<String>()
+        return Array(results.filter { $0.scenarioId == scenarioID }
+            .enumerated()
+            .sorted { $0.element.timestamp != $1.element.timestamp ? $0.element.timestamp > $1.element.timestamp : $0.offset < $1.offset }
+            .map(\.element)
+            .filter { seen.insert($0.modelId).inserted }
+            .prefix(limit))
+    }
+}
+
 enum TestResultsTable {
+    static let cancelledMessage = "Cancelled by user"
+
+    static func isCancelled(_ result: TestRunResult) -> Bool { result.errorMessage == cancelledMessage }
+
+    static func ttftText(_ ms: Int?) -> String {
+        guard let ms else { return "—" }
+        return ms < 1_000 ? "\(ms) ms" : String(format: "%.1f s", Double(ms) / 1_000)
+    }
+
+    static func throughputText(_ tokensPerSec: Double?) -> String {
+        guard let tokensPerSec, tokensPerSec.isFinite, tokensPerSec > 0 else { return "—" }
+        return tokensPerSec >= 100 ? "\(Int(tokensPerSec.rounded())) tok/s" : String(format: "%.1f tok/s", tokensPerSec)
+    }
+
+    /// Exact latency plus streaming speed. The table has no room for more
+    /// fixed columns at 960 pt, so TTFT and throughput live here, in the
+    /// detail metrics, the side-by-side view and the CSV.
+    static func latencyHelp(_ r: TestRunResult) -> String {
+        var text = "\(r.latencyMs.formatted()) ms, excluding time waiting on approvals"
+        if r.ttftMs != nil || r.tokensPerSec != nil {
+            text += " · first token \(ttftText(r.ttftMs)) · \(throughputText(r.tokensPerSec))"
+        }
+        return text
+    }
+
     enum Field: String, CaseIterable, Identifiable {
         case scenario, model, verdict, cost, latency, tokens, when
         var id: String { rawValue }
@@ -268,7 +325,7 @@ struct TestResultsTableView: View {
                 TestVerdictPill(kind: .of(r)).resultsColumn(.verdict)
                 Text(TestResultsTable.costText(r.cost)).monospacedDigit().lineLimit(1).resultsColumn(.cost)
                 Text(TestResultsTable.latencyText(r.latencyMs)).monospacedDigit().lineLimit(1).resultsColumn(.latency)
-                    .help("\(r.latencyMs.formatted()) ms")
+                    .help(TestResultsTable.latencyHelp(r))
                 Text(r.totalTokens.formatted(.number.notation(.compactName))).monospacedDigit().lineLimit(1)
                     .resultsColumn(.tokens)
                     .help("\(r.totalTokens.formatted()) tokens")
@@ -342,7 +399,7 @@ struct CostCeilingProgress: Equatable {
         guard let c = validCeiling else { return "No spend limit" }
         let floor = unreportedRuns > 0 ? "≥ " : ""
         var line = "\(floor)\(Self.money(spent)) of \(Self.money(c)) limit"
-        if spent > c { line += " (over: one request can exceed the limit)" }
+        if spent > c { line += " (over: the turn in flight can exceed the limit)" }
         return line
     }
 

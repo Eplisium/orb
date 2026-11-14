@@ -34,6 +34,9 @@ struct TestScenario: Identifiable, Hashable {
     /// For prompts explicitly asking for a calibrated refusal, do not treat
     /// refusal phrasing as an automatic failure (still requires human review).
     var allowsRefusal: Bool = false
+    /// Deterministic expected output declared by a custom test (nil for the
+    /// built-in catalog, which uses `ScenarioResponseChecks` by id).
+    var customExpectation: CustomTestExpectation? = nil
 
     static func == (lhs: TestScenario, rhs: TestScenario) -> Bool { lhs.id == rhs.id }
     func hash(into hasher: inout Hasher) { hasher.combine(id) }
@@ -144,6 +147,11 @@ struct TestRunResult: Identifiable {
     let errorMessage: String?
     var outputPath: String?
     let timestamp: Date
+    /// Time to first streamed token, text probes only (nil for project runs
+    /// and legacy rows). Measured from the request, not the run start.
+    var ttftMs: Int?
+    /// Completion tokens per second after the first token (text probes only).
+    var tokensPerSec: Double?
 
     init(
         id: UUID = UUID(),
@@ -160,7 +168,9 @@ struct TestRunResult: Identifiable {
         success: Bool,
         errorMessage: String?,
         outputPath: String? = nil,
-        timestamp: Date = Date()
+        timestamp: Date = Date(),
+        ttftMs: Int? = nil,
+        tokensPerSec: Double? = nil
     ) {
         self.id = id
         self.scenarioId = scenarioId
@@ -177,6 +187,8 @@ struct TestRunResult: Identifiable {
         self.errorMessage = errorMessage
         self.outputPath = outputPath
         self.timestamp = timestamp
+        self.ttftMs = ttftMs
+        self.tokensPerSec = tokensPerSec
     }
 }
 
@@ -192,6 +204,10 @@ struct CustomTest: Identifiable, Hashable {
     var userPrompt: String
     var notes: String
     var createdAt: Date
+    /// Text response (one streamed answer, no tools) or project build (agent run).
+    var mode: TestEvaluationMode
+    /// Optional deterministic expected output, checked against the response.
+    var expectation: CustomTestExpectation?
 
     init(
         id: String = UUID().uuidString,
@@ -202,8 +218,12 @@ struct CustomTest: Identifiable, Hashable {
         systemPrompt: String = "You are an expert developer. Provide complete, production-quality code.",
         userPrompt: String,
         notes: String = "",
-        createdAt: Date = Date()
+        createdAt: Date = Date(),
+        mode: TestEvaluationMode = .projectBuild,
+        expectation: CustomTestExpectation? = nil
     ) {
+        self.mode = mode
+        self.expectation = expectation
         self.id = id
         self.title = title
         self.subtitle = subtitle
@@ -230,8 +250,76 @@ struct CustomTest: Identifiable, Hashable {
             estimatedSeconds: 45,
             systemPrompt: systemPrompt,
             userPrompt: userPrompt,
-            evaluationCriteria: notes.split(separator: "\n").map { $0.trimmingCharacters(in: .whitespaces) }
+            evaluationCriteria: Self.criteria(from: notes),
+            evaluationMode: mode,
+            customExpectation: expectation
         )
+    }
+
+    /// One review criterion per nonblank line; blank lines never become empty checklist rows.
+    static func criteria(from notes: String) -> [String] {
+        notes.split(whereSeparator: \.isNewline)
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+    }
+
+    /// Mode-specific default system prompt. Text-only models never see a
+    /// tool instruction they cannot follow.
+    static func defaultSystemPrompt(for mode: TestEvaluationMode) -> String {
+        switch mode {
+        case .textResponse:
+            return "Answer the request directly and precisely. Return only what is asked for."
+        case .projectBuild:
+            return "You are an expert developer. Build a complete, working project. Write each file using the write_file function, then verify it with list_directory."
+        }
+    }
+
+    /// Persisted alongside the legacy columns as one additive JSON column
+    /// (`options_json`), so older rows load as project builds with no expectation.
+    var optionsJSON: String {
+        let data = (try? JSONEncoder().encode(CustomTestOptions(mode: mode, expectation: expectation))) ?? Data()
+        return String(decoding: data, as: UTF8.self)
+    }
+
+    mutating func applyOptionsJSON(_ json: String?) {
+        guard let json, let options = try? JSONDecoder().decode(CustomTestOptions.self, from: Data(json.utf8)) else { return }
+        mode = options.mode
+        expectation = options.expectation
+    }
+}
+
+struct CustomTestOptions: Codable, Equatable {
+    var mode: TestEvaluationMode
+    var expectation: CustomTestExpectation?
+}
+
+/// A custom test's deterministic expected output.
+struct CustomTestExpectation: Codable, Hashable, Sendable {
+    enum Kind: String, Codable, CaseIterable, Identifiable, Sendable {
+        case contains, regex, exactJSON
+        var id: String { rawValue }
+        var title: String {
+            switch self {
+            case .contains: return "Contains text"
+            case .regex: return "Matches regex"
+            case .exactJSON: return "Exact JSON"
+            }
+        }
+    }
+
+    var kind: Kind
+    var value: String
+
+    /// Nil when the value is blank, so an empty field never becomes a check.
+    static func make(kind: Kind, value: String) -> CustomTestExpectation? {
+        value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : .init(kind: kind, value: value)
+    }
+}
+
+/// Resolves a stored result's scenario ID to a built-in or custom test.
+enum TestScenarioResolver {
+    static func resolve(id: String, custom: [CustomTest]) -> TestScenario? {
+        TestCatalog.scenario(id: id) ?? custom.lazy.map { $0.toScenario() }.first { $0.id == id }
     }
 }
 
