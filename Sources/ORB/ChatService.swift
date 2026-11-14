@@ -1036,7 +1036,7 @@ final class ChatService: ObservableObject {
     private func approvalPromptOpened(_ request: ApprovalCoordinator.Request) {
         guard runState.isActive, runState.phase != .stopping, runState.context?.mode == .agent else { return }
         runState.phase = .awaitingApproval(request.toolName)
-        activityLabel = PlaygroundRunPhase.awaitingApprovalText
+        activityLabel = PlaygroundRunPhase.awaitingApprovalLabel(tool: request.toolName)
     }
 
     private func approvalPromptClosed(_ request: ApprovalCoordinator.Request, decision: ApprovalCoordinator.Decision) {
@@ -1296,6 +1296,9 @@ final class ChatService: ObservableObject {
             activityLabel = "Running \(call.name)…"
         case .toolResult(let call, let result):
             agentToolPreviewCoalescer?.flush()
+            // A call refused without a prompt (e.g. denied for the session)
+            // must not leave the strip saying it waits for approval.
+            if runState.phase.isAwaitingApproval { runState.phase = .executingTool(call.name) }
             _ = mutateMessage(context, mutation: { message in
                 guard var calls = message.toolCalls,
                       let index = calls.firstIndex(where: { $0.id == call.id }) else { return }
@@ -1328,6 +1331,28 @@ final class ChatService: ObservableObject {
             dropAbandonedToolCards(context)
             activityLabel = label
             if runState.phase != .connecting { runState.phase = .connecting }
+        case .awaitingApproval(let call):
+            // The card must exist before the sheet asks about it.
+            agentContentCoalescer?.flush()
+            agentReasoningCoalescer?.flush()
+            agentToolPreviewCoalescer?.flush()
+            freezeReasoningDuration(context, at: arrival)
+            guard runState.phase != .stopping else { return }
+            runState.phase = .awaitingApproval(call.name)
+            activityLabel = PlaygroundRunPhase.awaitingApprovalLabel(tool: call.name)
+        case .toolOutput(let call, let tail):
+            // Live tail of a running command. The runner throttles these to a
+            // few per second; `.toolResult` replaces it with the full result.
+            var changed = false
+            _ = mutateMessage(context, mutation: { message in
+                guard var calls = message.toolCalls,
+                      let index = calls.firstIndex(where: { $0.id == call.id }),
+                      calls[index].isExecuting, calls[index].result != tail else { return }
+                calls[index].result = tail
+                message.toolCalls = calls
+                changed = true
+            })
+            if changed { synchronizeActive(context.conversationID) }
         default: break
         }
     }

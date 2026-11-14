@@ -553,7 +553,7 @@ struct W1ChatCoreAgentCopyTests {
         try await W1ChatCoreFixture.waitFor { service.runState.phase.isAwaitingApproval }
         #expect(service.runState.phase == .awaitingApproval("run_command"))
         #expect(service.runState.phase.agentStatusText == "Waiting for your approval")
-        #expect(service.activityLabel == "Waiting for your approval")
+        #expect(service.activityLabel == "Waiting for your approval: run_command")
         #expect(service.runState.isActive)
 
         service.approvalPresenter.decide(request.id, .denied)
@@ -578,6 +578,30 @@ struct W1ChatCoreAgentCopyTests {
         try await W1ChatCoreFixture.waitUntilIdle(service)
         #expect(service.approvalPresenter.queue.current == nil)
         #expect(!service.runState.isActive)
+    }
+
+    @Test("a running command's card shows its live output, then the final result")
+    func liveToolOutput() async throws {
+        let call = OpenRouterStreamEvent.toolCallFragment(
+            choiceIndex: 0, toolIndex: 0, id: "t1", type: "function", name: "run_command",
+            arguments: #"{"command":"printf w1-integ-live; sleep 2; printf ' w1-integ-done'"}"#
+        )
+        let (service, _, _) = W1ChatCoreFixture.service([
+            .init(events: [call, .finishReason(choiceIndex: 0, reason: "tool_calls"), .done]),
+            .init(events: [.contentDelta(choiceIndex: 0, text: "Done."), .done]),
+        ])
+        await service.sendAgentMessage("go", modelId: "t/m", workspace: FileManager.default.temporaryDirectory.path,
+                                       fullComputerAccess: true)
+        try await W1ChatCoreFixture.waitFor { service.approvalPresenter.queue.current != nil }
+        #expect(service.activityLabel == PlaygroundRunPhase.awaitingApprovalLabel(tool: "run_command"))
+        let request = try #require(service.approvalPresenter.queue.current)
+        service.approvalPresenter.decide(request.id, .approved)
+        func card() -> ToolCallDisplay? { service.activeConversation?.messages.last?.toolCalls?.first }
+        try await W1ChatCoreFixture.waitFor({ card()?.result?.contains("w1-integ-live") == true }, timeout: .seconds(20))
+        #expect(card()?.isExecuting == true, "the tail arrives while the command still runs")
+        try await W1ChatCoreFixture.waitUntilIdle(service)
+        #expect(card()?.isExecuting == false)
+        #expect(card()?.result?.contains("w1-integ-done") == true)
     }
 
     @Test("error hints name only controls that exist in each mode")

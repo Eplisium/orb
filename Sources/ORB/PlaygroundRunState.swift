@@ -37,6 +37,9 @@ struct PlaygroundRunState: Equatable, Sendable {
 extension PlaygroundRunPhase {
     static let awaitingApprovalText = "Waiting for your approval"
 
+    /// Activity-row text while a tool waits on the approval sheet.
+    static func awaitingApprovalLabel(tool: String) -> String { "\(awaitingApprovalText): \(tool)" }
+
     /// Short status for the Agent run strip. A pending approval is not a
     /// running tool: nothing executes until the user decides.
     var agentStatusText: String {
