@@ -43,11 +43,11 @@ final class ChatService: ObservableObject {
     // The burst tests assert <60 publishes for 1,000 medium-sized deltas.
 
     /// Minimum wall-clock gap between UI publishes during streaming.
-    static let streamFrameInterval: Duration = .milliseconds(33)
+    nonisolated static let streamFrameInterval: Duration = .milliseconds(33)
     /// Safety valve for unusually large network chunks. This must stay well
     /// above a normal token; a 120-character valve painted 126 times for just
     /// 1,000 medium-sized deltas, bypassing the 33ms cadence.
-    static let streamFlushCharacters = 512
+    nonisolated static let streamFlushCharacters = 512
     /// Minimum gap between SQLite checkpoints while a run is in flight.
     static let streamCheckpointInterval: Duration = .milliseconds(750)
 
