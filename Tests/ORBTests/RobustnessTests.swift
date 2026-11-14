@@ -92,8 +92,11 @@ struct DatabaseRecoveryTests {
         let savedFailure = DatabaseManager.lastLaunchFailure
         defer { DatabaseManager.lastLaunchFailure = savedFailure }
 
-        _ = DatabaseManager(path: url.path)
-        #expect(DatabaseManager.lastLaunchFailure == nil)
+        // Check the instance, not the process-global lastLaunchFailure:
+        // other suites construct deliberately broken databases in parallel
+        // and set the global between our init and the read.
+        let manager = DatabaseManager(path: url.path)
+        #expect(manager.launchFailure == nil)
         #expect(FileManager.default.fileExists(atPath: url.path))
     }
 }

@@ -338,10 +338,11 @@ struct OpenRouterClientTests {
         let transport = FixtureHTTPTransport([
             .init(
                 response: response(status: 200),
-                // ~1s of keepalives: if they extended the grace, the stream
-                // would run the full second. A wide margin below that keeps
-                // the assertion meaningful under full-suite load.
-                chunks: [.success(finish)] + Array(repeating: .success(keepalive), count: 500),
+                // >= 5s of keepalives: if they extended the grace, the stream
+                // would run at least that long. The 2s bound leaves a wide
+                // margin for parallel full-suite load (a 500 ms bound on 1s of
+                // keepalives flaked there) while staying meaningful.
+                chunks: [.success(finish)] + Array(repeating: .success(keepalive), count: 2500),
                 chunkDelay: .milliseconds(2)
             )
         ])
@@ -355,7 +356,7 @@ struct OpenRouterClientTests {
         let stream = try await client.stream(request())
         for try await _ in stream {}
 
-        #expect(started.duration(to: .now) < .milliseconds(500))
+        #expect(started.duration(to: .now) < .seconds(2))
         for _ in 0..<500 where await !transport.cancellationObserved {
             try await Task.sleep(for: .milliseconds(2))
         }
