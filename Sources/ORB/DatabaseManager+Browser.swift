@@ -46,17 +46,21 @@ extension DatabaseManager {
         Self.bindText(stmt, index, text)
     }
 
+    /// Under `dbLock`, so it can never run inside another thread's open
+    /// transaction (and the error message read after a failed step is ours).
     private func runChecked(_ sql: String, bind: (OpaquePointer?) -> Void) throws {
-        guard let db else { throw DatabaseManagerError.notAvailable }
-        var stmt: OpaquePointer?
-        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else {
-            sqlite3_finalize(stmt)
-            throw DatabaseManagerError.operationFailed(String(cString: sqlite3_errmsg(db)))
-        }
-        defer { sqlite3_finalize(stmt) }
-        bind(stmt)
-        guard sqlite3_step(stmt) == SQLITE_DONE else {
-            throw DatabaseManagerError.operationFailed(String(cString: sqlite3_errmsg(db)))
+        try locked {
+            guard let db else { throw DatabaseManagerError.notAvailable }
+            var stmt: OpaquePointer?
+            guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else {
+                sqlite3_finalize(stmt)
+                throw DatabaseManagerError.operationFailed(String(cString: sqlite3_errmsg(db)))
+            }
+            defer { sqlite3_finalize(stmt) }
+            bind(stmt)
+            guard sqlite3_step(stmt) == SQLITE_DONE else {
+                throw DatabaseManagerError.operationFailed(String(cString: sqlite3_errmsg(db)))
+            }
         }
     }
 }

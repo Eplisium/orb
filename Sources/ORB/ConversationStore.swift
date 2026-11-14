@@ -46,11 +46,17 @@ final class DatabaseConversationStore: ConversationStore {
     func loadRecords(mode: PlaygroundMode?) throws -> [StoredConversation] {
         // Build the entire result locally. Any prepare/step failure throws
         // before ChatService can install an empty or partially loaded record.
-        try database.loadConversationsChecked(mode: mode).map { item in
-            var conversation = item.conversation
-            conversation.messages = try database.loadMessagesChecked(for: conversation.id)
-            let history = (try? JSONDecoder().decode([AgentAPIMessage].self, from: Data(item.agentHistoryJSON.utf8))) ?? []
-            return StoredConversation(conversation: conversation, agentHistory: history)
+        // Two queries in total (not one per conversation), under one lock so
+        // a concurrent writer cannot land between them.
+        try database.locked {
+            let items = try database.loadConversationsChecked(mode: mode)
+            let messages = try database.loadMessagesGroupedChecked(mode: mode)
+            return items.map { item in
+                var conversation = item.conversation
+                conversation.messages = messages[conversation.id] ?? []
+                let history = (try? JSONDecoder().decode([AgentAPIMessage].self, from: Data(item.agentHistoryJSON.utf8))) ?? []
+                return StoredConversation(conversation: conversation, agentHistory: history)
+            }
         }
     }
 
