@@ -71,8 +71,18 @@ struct DatabaseLaunchFailure: Equatable {
     let backupPath: String?
 }
 
-final class DatabaseManager {
+/// `@unchecked Sendable`: one SQLite connection opened with
+/// `SQLITE_OPEN_FULLMUTEX` is shared across threads. Invariant: every write and
+/// every transaction goes through `locked` / `withImmediateTransaction` (which
+/// take the recursive `dbLock`; transactions also hold SQLite's connection
+/// mutex), so no statement from another thread can run inside an open
+/// transaction and be rolled back with it.
+final class DatabaseManager: @unchecked Sendable {
     static let shared = DatabaseManager()
+    /// Highest `PRAGMA user_version` this build understands. Bump only for a
+    /// real schema migration; additive indexes and columns keep it unchanged.
+    /// A database stamped higher was written by a newer ORB and is refused.
+    static let schemaVersion: Int32 = 7
     private(set) var db: OpaquePointer?
     private let dbPath: String
     private let deletesDatabaseOnDeinit: Bool
@@ -94,23 +104,54 @@ final class DatabaseManager {
 
     /// No suspension is permitted while holding this reservation. The SQLite
     /// writer lock, not merely dbLock, excludes other connections/processes.
+    /// Like job recovery, it also holds SQLite's connection mutex, so a
+    /// single-statement writer on another thread that skips dbLock waits for
+    /// COMMIT/ROLLBACK instead of joining (and being rolled back with) it.
     func withAssetReservation<T>(_ work: () throws -> T) throws -> T {
+        try locked {
+            guard let db, launchFailure == nil else { throw DatabaseManagerError.notAvailable }
+            guard !assetReservationActive, sqlite3_get_autocommit(db) != 0 else {
+                throw DatabaseManagerError.operationFailed("Asset operations cannot join an outer transaction")
+            }
+            assetReservationActive = true
+            defer { assetReservationActive = false }
+            return try withImmediateTransaction(work)
+        }
+    }
+
+    /// Runs one statement (or a short read-modify-write) under `dbLock`.
+    /// Every single-statement writer goes through this so it can never execute
+    /// inside another thread's open transaction.
+    func locked<T>(_ body: () throws -> T) rethrows -> T {
         dbLock.lock()
         defer { dbLock.unlock() }
-        guard let db, launchFailure == nil else { throw DatabaseManagerError.notAvailable }
-        guard !assetReservationActive, sqlite3_get_autocommit(db) != 0 else {
-            throw DatabaseManagerError.operationFailed("Asset operations cannot join an outer transaction")
-        }
-        try execChecked("BEGIN IMMEDIATE;")
-        assetReservationActive = true
-        defer { assetReservationActive = false }
-        do {
-            let result = try work()
-            try execChecked("COMMIT;")
-            return result
-        } catch {
-            try? execChecked("ROLLBACK;")
-            throw error
+        return try body()
+    }
+
+    /// `BEGIN IMMEDIATE` … `COMMIT`, rolled back if `work` throws. Holds
+    /// `dbLock` and SQLite's recursive connection mutex for the whole
+    /// transaction, so statements from other threads — including legacy
+    /// writers outside this file that do not take `dbLock` — wait rather than
+    /// interleave. `work` must not suspend or wait on another thread that uses
+    /// this database.
+    func withImmediateTransaction<T>(_ work: () throws -> T) throws -> T {
+        try locked {
+            guard let db else { throw DatabaseManagerError.notAvailable }
+            let connectionMutex = sqlite3_db_mutex(db)
+            if let connectionMutex { sqlite3_mutex_enter(connectionMutex) }
+            defer { if let connectionMutex { sqlite3_mutex_leave(connectionMutex) } }
+            guard sqlite3_get_autocommit(db) != 0 else {
+                throw DatabaseManagerError.operationFailed("A transaction is already open on this connection")
+            }
+            try execChecked("BEGIN IMMEDIATE;")
+            do {
+                let result = try work()
+                try execChecked("COMMIT;")
+                return result
+            } catch {
+                try? execChecked("ROLLBACK;")
+                throw error
+            }
         }
     }
     /// Set when the on-disk database could not be opened or migrated; ORB then
@@ -271,8 +312,76 @@ final class DatabaseManager {
             return
         }
         applyBusyTimeout()
+        // Read the stamp before anything (journal mode, migrations, the
+        // version write) can modify the file. A newer ORB's database is left
+        // byte-for-byte untouched: this build must not run old code over
+        // tables it does not understand or stamp the version back down.
+        if let stored = Self.storedSchemaVersion(db), stored > Self.schemaVersion {
+            sqlite3_close(db)
+            db = nil
+            let opened = sqlite3_open_v2(":memory:", &db, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX, nil) == SQLITE_OK
+            if !opened {
+                sqlite3_close(db)
+                db = nil
+            }
+            launchFailure = DatabaseLaunchFailure(
+                title: "Database From a Newer ORB",
+                detail: "Your ORB database was last used by a newer version of ORB (schema \(stored); this version supports up to \(Self.schemaVersion)). ORB left it untouched. \(opened ? "This session uses a temporary in-memory database, so nothing you do now will be saved." : "Data features are disabled for this session.") Quit and open the newer ORB to keep using your data.",
+                backupPath: nil
+            )
+            if opened { exec("PRAGMA foreign_keys=ON;") }
+            return
+        }
         exec("PRAGMA journal_mode=WAL;")
         exec("PRAGMA foreign_keys=ON;")
+    }
+
+    /// `PRAGMA user_version`, or nil when it cannot be read (an unreadable or
+    /// non-SQLite file then fails later through the ordinary recovery path).
+    static func storedSchemaVersion(_ db: OpaquePointer?) -> Int32? {
+        guard let db else { return nil }
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, "PRAGMA user_version;", -1, &stmt, nil) == SQLITE_OK else {
+            sqlite3_finalize(stmt)
+            return nil
+        }
+        defer { sqlite3_finalize(stmt) }
+        guard sqlite3_step(stmt) == SQLITE_ROW else { return nil }
+        return sqlite3_column_int(stmt, 0)
+    }
+
+    /// Current `PRAGMA user_version` of the open connection.
+    var schemaVersionOnDisk: Int32? {
+        locked { Self.storedSchemaVersion(db) }
+    }
+
+    /// Bytes used by the database file and its WAL/SHM sidecars (0 for the
+    /// in-memory fallback). For the Storage UI's before/after display.
+    var storageByteCount: Int64 {
+        storageFileURLs.prefix(3).reduce(Int64(0)) { total, url in
+            let size = (try? FileManager.default.attributesOfItem(atPath: url.path)[.size] as? NSNumber)?.int64Value ?? 0
+            return total + size
+        }
+    }
+
+    /// Reclaims space left by deleted rows (inline images make this large):
+    /// checkpoints the WAL into the main file, rebuilds it with VACUUM, then
+    /// truncates the WAL. Blocking; call it off the main thread. Holds `dbLock`
+    /// and the connection mutex throughout, so other threads wait instead of
+    /// failing, and refuses to run inside an open transaction.
+    func compact() throws {
+        try locked {
+            guard let db, launchFailure == nil else { throw DatabaseManagerError.notAvailable }
+            let connectionMutex = sqlite3_db_mutex(db)
+            if let connectionMutex { sqlite3_mutex_enter(connectionMutex) }
+            defer { if let connectionMutex { sqlite3_mutex_leave(connectionMutex) } }
+            guard sqlite3_get_autocommit(db) != 0 else {
+                throw DatabaseManagerError.operationFailed("Compaction cannot run inside a transaction")
+            }
+            try execChecked("PRAGMA wal_checkpoint(TRUNCATE);")
+            try execChecked("VACUUM;")
+            try execChecked("PRAGMA wal_checkpoint(TRUNCATE);")
+        }
     }
 
 
@@ -497,9 +606,23 @@ final class DatabaseManager {
             );
             """)
             try execChecked("CREATE INDEX IF NOT EXISTS idx_usage_events_ts ON usage_events(timestamp);")
+            // Hot-path indexes (additive, so no version bump). Launch loads each
+            // conversation's messages in order and cascades deletes by
+            // conversation; without this both scan the whole messages table
+            // (plus a temp B-tree sort) once per conversation.
+            try execChecked("CREATE INDEX IF NOT EXISTS idx_messages_conversation ON messages(conversation_id, sort_order);")
+            // Each playground loads only its own mode's sessions, newest first.
+            try execChecked("CREATE INDEX IF NOT EXISTS idx_conversations_mode_created ON conversations(mode, created_at);")
+            // Launch recovery marks rows still 'streaming' as interrupted. Only
+            // a handful ever match, so a partial index avoids reading every
+            // (often image-sized) message row on each launch.
+            try execChecked("CREATE INDEX IF NOT EXISTS idx_messages_streaming ON messages(status) WHERE status = 'streaming';")
             // Media columns (jobs.prompt / jobs.saved_creation_id); additive, no version bump.
             try migrateMediaColumns()
-            try execChecked("PRAGMA user_version=7;")
+            // Never lower the stamp (openDatabase already refused newer files).
+            if (Self.storedSchemaVersion(db) ?? 0) < Self.schemaVersion {
+                try execChecked("PRAGMA user_version=\(Self.schemaVersion);")
+            }
         } catch {
             // A failed migration must never take the app down. Swap in a
             // fresh in-memory database and surface the problem to the user
@@ -650,6 +773,7 @@ final class DatabaseManager {
     }
 
     func addFavorite(_ modelId: String) {
+        dbLock.lock(); defer { dbLock.unlock() } // see `locked`
         let sql = "INSERT OR IGNORE INTO favorites (model_id, added_at) VALUES (?, ?);"
         guard let stmt = prepare(sql) else { return }
         defer { sqlite3_finalize(stmt) }
@@ -659,6 +783,7 @@ final class DatabaseManager {
     }
 
     func removeFavorite(_ modelId: String) {
+        dbLock.lock(); defer { dbLock.unlock() } // see `locked`
         let sql = "DELETE FROM favorites WHERE model_id = ?;"
         guard let stmt = prepare(sql) else { return }
         defer { sqlite3_finalize(stmt) }
@@ -667,6 +792,7 @@ final class DatabaseManager {
     }
 
     func toggleFavorite(_ modelId: String) {
+        dbLock.lock(); defer { dbLock.unlock() } // see `locked`
         if isFavorite(modelId) {
             removeFavorite(modelId)
         } else {
@@ -698,6 +824,7 @@ final class DatabaseManager {
     }
 
     func setNotes(_ modelId: String, notes: String) {
+        dbLock.lock(); defer { dbLock.unlock() } // see `locked`
         let sql = """
         INSERT INTO model_notes (model_id, notes) VALUES (?, ?)
         ON CONFLICT(model_id) DO UPDATE SET notes=excluded.notes;
@@ -748,6 +875,7 @@ final class DatabaseManager {
     }
 
     func deleteMemory(id: String) throws {
+        dbLock.lock(); defer { dbLock.unlock() } // see `locked`
         let sql = "DELETE FROM agent_memories WHERE id = ?;"
         guard let stmt = prepare(sql) else { throw DatabaseManagerError.operationFailed(currentError()) }
         defer { sqlite3_finalize(stmt) }
@@ -762,6 +890,7 @@ final class DatabaseManager {
     }
 
     func saveConversationChecked(_ conv: ChatConversation, agentHistoryJSON: String = "[]") throws {
+        dbLock.lock(); defer { dbLock.unlock() } // see `locked`
         let sql = """
         INSERT INTO conversations
         (id, mode, model_id, title, system_prompt, total_cost, total_tokens, agent_history_json, created_at)
@@ -786,19 +915,12 @@ final class DatabaseManager {
     }
 
     func saveConversationRecordChecked(_ conv: ChatConversation, agentHistoryJSON: String) throws {
-        dbLock.lock()
-        defer { dbLock.unlock() }
-        try execChecked("BEGIN IMMEDIATE;")
-        do {
+        try withImmediateTransaction {
             try saveConversationChecked(conv, agentHistoryJSON: agentHistoryJSON)
             try deleteMessagesChecked(for: conv.id)
             for (index, message) in conv.messages.enumerated() {
                 try saveMessageChecked(message, conversationId: conv.id, sortOrder: index)
             }
-            try execChecked("COMMIT;")
-        } catch {
-            try? execChecked("ROLLBACK;")
-            throw error
         }
     }
 
@@ -808,18 +930,11 @@ final class DatabaseManager {
         _ conv: ChatConversation, agentHistoryJSON: String,
         messages: [(message: ChatMessage, sortOrder: Int)]
     ) throws {
-        dbLock.lock()
-        defer { dbLock.unlock() }
-        try execChecked("BEGIN IMMEDIATE;")
-        do {
+        try withImmediateTransaction {
             try saveConversationChecked(conv, agentHistoryJSON: agentHistoryJSON)
             for row in messages {
                 try saveMessageChecked(row.message, conversationId: conv.id, sortOrder: row.sortOrder)
             }
-            try execChecked("COMMIT;")
-        } catch {
-            try? execChecked("ROLLBACK;")
-            throw error
         }
     }
 
@@ -870,6 +985,7 @@ final class DatabaseManager {
     }
 
     func deleteConversationChecked(_ id: UUID) throws {
+        dbLock.lock(); defer { dbLock.unlock() } // see `locked`
         let sql = "DELETE FROM conversations WHERE id = ?;"
         guard let stmt = prepare(sql) else { throw DatabaseManagerError.operationFailed(currentError()) }
         defer { sqlite3_finalize(stmt) }
@@ -884,6 +1000,7 @@ final class DatabaseManager {
     }
 
     func saveMessageChecked(_ message: ChatMessage, conversationId: UUID, sortOrder: Int) throws {
+        dbLock.lock(); defer { dbLock.unlock() } // see `locked`
         let sql = """
         INSERT OR REPLACE INTO messages
         (id, conversation_id, role, content, tool_calls_json, tool_call_id, tool_name, sort_order, created_at, status, finish_reason, error_message, parts_json, images_json, reasoning_details_json, reasoning, reasoning_started_at, reasoning_duration_seconds, transcript_json, usage_json)
@@ -981,66 +1098,95 @@ final class DatabaseManager {
     func loadMessagesChecked(for conversationId: UUID) throws -> [ChatMessage] {
         dbLock.lock()
         defer { dbLock.unlock() }
+        // Served by idx_messages_conversation: an index range already in
+        // sort_order, with no table scan or temporary sort.
         let sql = "SELECT * FROM messages WHERE conversation_id = ? ORDER BY sort_order ASC;"
         guard let stmt = prepare(sql) else { throw DatabaseManagerError.operationFailed(currentError()) }
         defer { sqlite3_finalize(stmt) }
         Self.bindText(stmt, 1, conversationId.uuidString)
         var messages: [ChatMessage] = []
         while try stepRowChecked(stmt) {
-            let idStr = (columnTextOrNil(stmt, 0) ?? "")
-            let role = (columnTextOrNil(stmt, 2) ?? "")
-            let content = columnTextOrNil(stmt, 3) ?? ""
-            let toolCallsJSON = columnTextOrNil(stmt, 4)
-            let toolCallId = columnTextOrNil(stmt, 5)
-            let toolName = columnTextOrNil(stmt, 6)
-            let status = columnTextOrNil(stmt, 9).flatMap(ChatMessageStatus.init(rawValue:)) ?? .complete
-            let finishReason = columnTextOrNil(stmt, 10)
-            let errorMessage = columnTextOrNil(stmt, 11)
-            let partsJSON = columnTextOrNil(stmt, 12)
-            let imagesJSON = columnTextOrNil(stmt, 13)
-            // Resolved by name: legacy databases gain the column via ALTER
-            // TABLE, so its position depends on the schema vintage.
-            let reasoningDetailsJSON = columnTextOrNil(stmt, columnIndex(stmt, "reasoning_details_json"))
-            let reasoning = columnTextOrNil(stmt, columnIndex(stmt, "reasoning"))
-            let startedAtValue = columnDoubleOrNil(stmt, columnIndex(stmt, "reasoning_started_at"))
-            let reasoningDuration = columnDoubleOrNil(stmt, columnIndex(stmt, "reasoning_duration_seconds"))
-
-            var toolCalls: [ToolCallDisplay]? = nil
-            if let json = toolCallsJSON, let data = json.data(using: .utf8) {
-                toolCalls = try? JSONDecoder().decode([ToolCallDisplay].self, from: data)
-            }
-            var parts: [MessageContentPart]? = nil
-            if let json = partsJSON, let data = json.data(using: .utf8) {
-                parts = try? JSONDecoder().decode([MessageContentPart].self, from: data)
-            }
-            var images: [ChatImageAttachment]? = nil
-            if let json = imagesJSON, let data = json.data(using: .utf8) {
-                images = try? JSONDecoder().decode([ChatImageAttachment].self, from: data)
-            }
-            var reasoningDetails: [ReasoningDetail]? = nil
-            if let json = reasoningDetailsJSON, let data = json.data(using: .utf8) {
-                reasoningDetails = try? JSONDecoder().decode([ReasoningDetail].self, from: data)
-            }
-
-            guard let id = UUID(uuidString: idStr) else { continue }
-            let msg = ChatMessage(
-                id: id, role: role, content: content, parts: parts, images: images,
-                toolCalls: toolCalls,
-                toolCallId: toolCallId, toolName: toolName, status: status,
-                finishReason: finishReason, errorMessage: errorMessage,
-                reasoning: reasoning,
-                reasoningStartedAt: startedAtValue.map(Date.init(timeIntervalSince1970:)),
-                reasoningDuration: reasoningDuration,
-                reasoningDetails: reasoningDetails,
-                transcript: columnTextOrNil(stmt, columnIndex(stmt, "transcript_json"))
-                    .flatMap { try? JSONDecoder().decode([MessageTranscriptSegment].self, from: Data($0.utf8)) },
-                createdAt: Date(timeIntervalSince1970: sqlite3_column_double(stmt, 8)),
-                usage: columnTextOrNil(stmt, columnIndex(stmt, "usage_json"))
-                    .flatMap { try? JSONDecoder().decode(MessageUsage.self, from: Data($0.utf8)) }
-            )
-            messages.append(msg)
+            if let message = messageFromRow(stmt) { messages.append(message) }
         }
         return messages
+    }
+
+    /// Every message of every conversation (optionally one mode's), grouped by
+    /// conversation and in transcript order, in ONE query. Replaces the N+1
+    /// per-conversation loads at launch. Conversations without messages are
+    /// absent from the result. Throws rather than returning a partial map.
+    func loadMessagesGroupedChecked(mode: PlaygroundMode? = nil) throws -> [UUID: [ChatMessage]] {
+        dbLock.lock()
+        defer { dbLock.unlock() }
+        let sql = mode == nil
+            ? "SELECT * FROM messages ORDER BY conversation_id, sort_order;"
+            : "SELECT m.* FROM messages m JOIN conversations c ON c.id = m.conversation_id WHERE c.mode = ? ORDER BY m.conversation_id, m.sort_order;"
+        guard let stmt = prepare(sql) else { throw DatabaseManagerError.operationFailed(currentError()) }
+        defer { sqlite3_finalize(stmt) }
+        if let mode { Self.bindText(stmt, 1, mode.rawValue) }
+        var grouped: [UUID: [ChatMessage]] = [:]
+        while try stepRowChecked(stmt) {
+            guard let conversationID = columnTextOrNil(stmt, 1).flatMap(UUID.init(uuidString:)),
+                  let message = messageFromRow(stmt) else { continue }
+            grouped[conversationID, default: []].append(message)
+        }
+        return grouped
+    }
+
+    /// Decodes one `SELECT *` messages row; nil for a row without a valid id
+    /// (skipped, as before).
+    private func messageFromRow(_ stmt: OpaquePointer) -> ChatMessage? {
+        let idStr = (columnTextOrNil(stmt, 0) ?? "")
+        let role = (columnTextOrNil(stmt, 2) ?? "")
+        let content = columnTextOrNil(stmt, 3) ?? ""
+        let toolCallsJSON = columnTextOrNil(stmt, 4)
+        let toolCallId = columnTextOrNil(stmt, 5)
+        let toolName = columnTextOrNil(stmt, 6)
+        let status = columnTextOrNil(stmt, 9).flatMap(ChatMessageStatus.init(rawValue:)) ?? .complete
+        let finishReason = columnTextOrNil(stmt, 10)
+        let errorMessage = columnTextOrNil(stmt, 11)
+        let partsJSON = columnTextOrNil(stmt, 12)
+        let imagesJSON = columnTextOrNil(stmt, 13)
+        // Resolved by name: legacy databases gain the column via ALTER
+        // TABLE, so its position depends on the schema vintage.
+        let reasoningDetailsJSON = columnTextOrNil(stmt, columnIndex(stmt, "reasoning_details_json"))
+        let reasoning = columnTextOrNil(stmt, columnIndex(stmt, "reasoning"))
+        let startedAtValue = columnDoubleOrNil(stmt, columnIndex(stmt, "reasoning_started_at"))
+        let reasoningDuration = columnDoubleOrNil(stmt, columnIndex(stmt, "reasoning_duration_seconds"))
+
+        var toolCalls: [ToolCallDisplay]? = nil
+        if let json = toolCallsJSON, let data = json.data(using: .utf8) {
+            toolCalls = try? JSONDecoder().decode([ToolCallDisplay].self, from: data)
+        }
+        var parts: [MessageContentPart]? = nil
+        if let json = partsJSON, let data = json.data(using: .utf8) {
+            parts = try? JSONDecoder().decode([MessageContentPart].self, from: data)
+        }
+        var images: [ChatImageAttachment]? = nil
+        if let json = imagesJSON, let data = json.data(using: .utf8) {
+            images = try? JSONDecoder().decode([ChatImageAttachment].self, from: data)
+        }
+        var reasoningDetails: [ReasoningDetail]? = nil
+        if let json = reasoningDetailsJSON, let data = json.data(using: .utf8) {
+            reasoningDetails = try? JSONDecoder().decode([ReasoningDetail].self, from: data)
+        }
+
+        guard let id = UUID(uuidString: idStr) else { return nil }
+        return ChatMessage(
+            id: id, role: role, content: content, parts: parts, images: images,
+            toolCalls: toolCalls,
+            toolCallId: toolCallId, toolName: toolName, status: status,
+            finishReason: finishReason, errorMessage: errorMessage,
+            reasoning: reasoning,
+            reasoningStartedAt: startedAtValue.map(Date.init(timeIntervalSince1970:)),
+            reasoningDuration: reasoningDuration,
+            reasoningDetails: reasoningDetails,
+            transcript: columnTextOrNil(stmt, columnIndex(stmt, "transcript_json"))
+                .flatMap { try? JSONDecoder().decode([MessageTranscriptSegment].self, from: Data($0.utf8)) },
+            createdAt: Date(timeIntervalSince1970: sqlite3_column_double(stmt, 8)),
+            usage: columnTextOrNil(stmt, columnIndex(stmt, "usage_json"))
+                .flatMap { try? JSONDecoder().decode(MessageUsage.self, from: Data($0.utf8)) }
+        )
     }
 
     func deleteMessages(for conversationId: UUID) {
@@ -1048,6 +1194,7 @@ final class DatabaseManager {
     }
 
     func deleteMessagesChecked(for conversationId: UUID) throws {
+        dbLock.lock(); defer { dbLock.unlock() } // see `locked`
         let sql = "DELETE FROM messages WHERE conversation_id = ?;"
         guard let stmt = prepare(sql) else { throw DatabaseManagerError.operationFailed(currentError()) }
         defer { sqlite3_finalize(stmt) }
@@ -1060,6 +1207,7 @@ final class DatabaseManager {
     }
 
     func deleteMessageChecked(_ messageId: UUID) throws {
+        dbLock.lock(); defer { dbLock.unlock() } // see `locked`
         let sql = "DELETE FROM messages WHERE id = ?;"
         guard let stmt = prepare(sql) else { throw DatabaseManagerError.operationFailed(currentError()) }
         defer { sqlite3_finalize(stmt) }
@@ -1072,6 +1220,7 @@ final class DatabaseManager {
     }
 
     func markStreamingMessagesInterruptedChecked() throws {
+        dbLock.lock(); defer { dbLock.unlock() } // see `locked`
         try execChecked("UPDATE messages SET status='interrupted', finish_reason='app_terminated', error_message=COALESCE(error_message, 'Interrupted when ORB closed.') WHERE status='streaming';")
     }
 
@@ -1080,6 +1229,7 @@ final class DatabaseManager {
     /// Commit core state and recovery metadata as one SQLite statement. A
     /// failed media field write must not leave an irreversible terminal row.
     func saveJobRecordChecked(_ record: JobRecord) throws {
+        dbLock.lock(); defer { dbLock.unlock() } // see `locked`
         let sql = """
         INSERT INTO jobs
         (id, remote_id, kind, submission_state, polling_state, remote_status,
@@ -1378,6 +1528,7 @@ final class DatabaseManager {
     // MARK: - Test Results
 
     func saveTestResult(_ result: TestRunResult) {
+        dbLock.lock(); defer { dbLock.unlock() } // see `locked`
         let sql = """
         INSERT OR REPLACE INTO test_results
         (id, scenario_id, scenario_title, category, model_id, response,
@@ -1460,10 +1611,12 @@ final class DatabaseManager {
     }
 
     func clearTestResults() {
+        dbLock.lock(); defer { dbLock.unlock() } // see `locked`
         exec("DELETE FROM test_results;")
     }
 
     func deleteTestResult(_ id: UUID) {
+        dbLock.lock(); defer { dbLock.unlock() } // see `locked`
         let sql = "DELETE FROM test_results WHERE id = ?;"
         guard let stmt = prepare(sql) else { return }
         defer { sqlite3_finalize(stmt) }
@@ -1483,6 +1636,7 @@ final class DatabaseManager {
     }
 
     func saveExperimentRunRecordChecked(_ record: ExperimentRunRecord) throws {
+        dbLock.lock(); defer { dbLock.unlock() } // see `locked`
         let json: String
         do {
             let data = try JSONEncoder().encode(record)
@@ -1537,6 +1691,7 @@ final class DatabaseManager {
     // MARK: - Custom Tests
 
     func saveCustomTest(_ test: CustomTest) {
+        dbLock.lock(); defer { dbLock.unlock() } // see `locked`
         let sql = """
         INSERT OR REPLACE INTO custom_tests
         (id, title, subtitle, icon, category, system_prompt, user_prompt, notes, created_at)
@@ -1589,6 +1744,7 @@ final class DatabaseManager {
     }
 
     func deleteCustomTest(_ id: String) {
+        dbLock.lock(); defer { dbLock.unlock() } // see `locked`
         let sql = "DELETE FROM custom_tests WHERE id = ?;"
         guard let stmt = prepare(sql) else { return }
         defer { sqlite3_finalize(stmt) }
