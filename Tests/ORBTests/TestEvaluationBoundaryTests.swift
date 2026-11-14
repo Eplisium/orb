@@ -95,7 +95,8 @@ struct TestEvaluationBoundaryTests {
         let json = try #require(TestCatalog.scenario(id: "llm-structured-output"))
         let unicode = try #require(TestCatalog.scenario(id: "llm-unicode-fidelity"))
         let validJSON = record(json, dir: nil, response: "{\"name\":\"A\\\"B\",\"count\":2}", mode: .textResponse)
-        #expect(validJSON.verdict == .unverified)
+        // TESTS-7: the exact check covers this probe's whole rubric, so it passes.
+        #expect(validJSON.verdict == .passed)
         #expect(validJSON.assertions.first(where: { $0.name == "exactStructuredJSON" })?.passed == true)
         for response in ["```json\n{\"name\":\"A\\\"B\",\"count\":2}\n```",
                          "{\"name\":\"A\\\"B\",\"count\":\"2\"}",
@@ -106,7 +107,7 @@ struct TestEvaluationBoundaryTests {
             #expect(result.assertions.first(where: { $0.name == "exactStructuredJSON" })?.passed == false)
         }
         let exact = "[\"café\",\"東京\",\"👩🏽‍💻\"]"
-        #expect(record(unicode, dir: nil, response: exact, mode: .textResponse).verdict == .unverified)
+        #expect(record(unicode, dir: nil, response: exact, mode: .textResponse).verdict == .passed)
         #expect(record(unicode, dir: nil, response: "[\"cafe\",\"東京\",\"👩🏽‍💻\"]", mode: .textResponse).verdict == .failed)
         #expect(record(unicode, dir: nil, response: "[\"東京\",\"café\",\"👩🏽‍💻\"]", mode: .textResponse).verdict == .failed)
     }
