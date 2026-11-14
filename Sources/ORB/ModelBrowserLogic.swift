@@ -389,7 +389,7 @@ struct ComparisonColumn: Identifiable, Equatable {
                 (p.tierLines(unit: unit) + p.extraLines(unit: unit).filter { $0.title != "Cache read" })
                     .map { "\($0.title): \($0.value)" }.joined(separator: "\n")
             }.flatMap(\.nonEmpty) ?? missing,
-            context: model.contextLength.map(BrowserFormat.context) ?? "N/A",
+            context: model.contextLength.flatMap { $0 > 0 ? BrowserFormat.context($0) : nil } ?? "N/A",
             maxOutput: maxOut.map(BrowserFormat.context) ?? missing,
             inputModalities: model.inputModalities.joined(separator: ", "),
             outputModalities: model.outputModalities.joined(separator: ", "),
@@ -614,6 +614,17 @@ struct ModelRowFacts: Equatable {
             let inputText = PriceDisplay.amount(perToken: input, unit: unit)
             price = "\(inputText) in · \(output) out\(suffix)"
             compactPrice = "\(inputText)/\(output)"
+        } else if let perImage = PriceDisplay.perToken(model.pricing?.image), perImage > 0,
+                  model.outputModalities.contains("image") {
+            let amount = PriceDisplay.flat(model.pricing?.image) ?? "—"
+            price = "\(amount) per image"; compactPrice = "\(amount)/img"
+        } else if let imageToken = PriceDisplay.perToken(model.pricing?.imageOutput), imageToken > 0 {
+            let suffix = unit == .perMillion ? "" : " /1K"
+            let amount = PriceDisplay.amount(perToken: imageToken, unit: unit)
+            price = "\(amount) image out\(suffix)"; compactPrice = "\(amount) img"
+        } else if let perRequest = PriceDisplay.perToken(model.pricing?.request), perRequest > 0 {
+            let amount = PriceDisplay.flat(model.pricing?.request) ?? "—"
+            price = "\(amount) per request"; compactPrice = "\(amount)/req"
         } else {
             price = "Variable price"; compactPrice = "Varies"
         }
@@ -628,7 +639,7 @@ struct ModelRowFacts: Equatable {
             slug: model.modelSlug.isEmpty ? model.id : model.modelSlug,
             author: model.authorName,
             oneLiner: line,
-            context: model.contextLength.map(BrowserFormat.context) ?? "N/A",
+            context: model.contextLength.flatMap { $0 > 0 ? BrowserFormat.context($0) : nil } ?? "N/A",
             price: price,
             compactPrice: compactPrice,
             capabilities: badges

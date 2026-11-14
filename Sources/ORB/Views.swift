@@ -51,7 +51,7 @@ struct ModelRowView: View, Equatable {
 
     private func factsLine(_ facts: ModelRowFacts, price: String, elo: Bool, icons: Bool) -> some View {
         HStack(spacing: 10) {
-            Text(facts.context + " ctx").monospacedDigit()
+            if facts.context != "N/A" { Text(facts.context + " ctx").monospacedDigit() }
             Text(price)
                 .monospacedDigit()
                 .foregroundStyle(model.isFree ? ORBTheme.success : Color.secondary)

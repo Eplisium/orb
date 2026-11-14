@@ -102,9 +102,14 @@ struct ModelInfo: Codable, Identifiable, Hashable {
     }
 
     var isFree: Bool {
+        if id.hasSuffix(":free") { return true }
         let p = Double(pricing?.prompt ?? "-1") ?? -1
         let c = Double(pricing?.completion ?? "-1") ?? -1
-        return (p == 0 && c == 0) || id.hasSuffix(":free")
+        guard p == 0 && c == 0 else { return false }
+        // Image/audio models often price tokens at zero and charge per image,
+        // per image token, per audio unit or per request instead.
+        return !Pricing.hasPositive(pricing?.image, pricing?.imageOutput, pricing?.audio,
+                                    pricing?.audioOutput, pricing?.request)
     }
 
     var modalityLabel: String {
@@ -270,6 +275,11 @@ struct Architecture: Codable, Hashable {
 /// them (per token unless noted). Decoding is tolerant: a field of an
 /// unexpected type is dropped instead of failing the whole catalog.
 struct Pricing: Codable, Hashable {
+    /// True when any of the given USD strings parses to a positive amount.
+    static func hasPositive(_ values: String?...) -> Bool {
+        values.contains { ($0.flatMap(Double.init) ?? 0) > 0 }
+    }
+
     var prompt: String?
     var completion: String?
     var inputCacheRead: String?
