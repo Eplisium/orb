@@ -90,6 +90,21 @@ private final class W1ChatCoreIncrementalStore: ConversationStore {
     func stored(_ id: UUID) -> [ChatMessage] { records[id]?.conversation.messages ?? [] }
 }
 
+/// Holds an injected tool open until the test releases it.
+private actor W1ChatCoreGate {
+    private var isOpen = false
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+    func wait() async {
+        if isOpen { return }
+        await withCheckedContinuation { waiters.append($0) }
+    }
+    func open() {
+        isOpen = true
+        waiters.forEach { $0.resume() }
+        waiters = []
+    }
+}
+
 @MainActor
 private enum W1ChatCoreFixture {
     static func service(
@@ -580,16 +595,24 @@ struct W1ChatCoreAgentCopyTests {
         #expect(!service.runState.isActive)
     }
 
-    @Test("a running command's card shows its live output, then the final result")
+    @Test("a running tool's card shows its live output, then the final result")
     func liveToolOutput() async throws {
+        // An injected executor, not a real process: other suites call the
+        // process-global NativeAgentTools.terminateAllRunningProcesses().
         let call = OpenRouterStreamEvent.toolCallFragment(
             choiceIndex: 0, toolIndex: 0, id: "t1", type: "function", name: "run_command",
-            arguments: #"{"command":"printf w1-integ-live; sleep 2; printf ' w1-integ-done'"}"#
+            arguments: #"{"command":"make"}"#
         )
         let (service, _, _) = W1ChatCoreFixture.service([
             .init(events: [call, .finishReason(choiceIndex: 0, reason: "tool_calls"), .done]),
             .init(events: [.contentDelta(choiceIndex: 0, text: "Done."), .done]),
         ])
+        let release = W1ChatCoreGate()
+        service.agentToolExecutor = { _ in
+            ToolOutputRelay.current?("w1-integ-live")
+            await release.wait()
+            return .init(content: "w1-integ-live w1-integ-done", isError: false)
+        }
         await service.sendAgentMessage("go", modelId: "t/m", workspace: FileManager.default.temporaryDirectory.path,
                                        fullComputerAccess: true)
         try await W1ChatCoreFixture.waitFor { service.approvalPresenter.queue.current != nil }
@@ -597,11 +620,12 @@ struct W1ChatCoreAgentCopyTests {
         let request = try #require(service.approvalPresenter.queue.current)
         service.approvalPresenter.decide(request.id, .approved)
         func card() -> ToolCallDisplay? { service.activeConversation?.messages.last?.toolCalls?.first }
-        try await W1ChatCoreFixture.waitFor({ card()?.result?.contains("w1-integ-live") == true }, timeout: .seconds(20))
-        #expect(card()?.isExecuting == true, "the tail arrives while the command still runs")
+        try await W1ChatCoreFixture.waitFor { card()?.result == "w1-integ-live" }
+        #expect(card()?.isExecuting == true, "the tail arrives while the tool still runs")
+        await release.open()
         try await W1ChatCoreFixture.waitUntilIdle(service)
         #expect(card()?.isExecuting == false)
-        #expect(card()?.result?.contains("w1-integ-done") == true)
+        #expect(card()?.result == "w1-integ-live w1-integ-done")
     }
 
     @Test("error hints name only controls that exist in each mode")

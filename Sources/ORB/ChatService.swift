@@ -68,6 +68,9 @@ final class ChatService: ObservableObject {
     private let store: any ConversationStore
     private let apiKeyProvider: () -> String?
     private let agentMaximumTurns: Int
+    /// Test seam: replaces the native tool executor for Agent runs. Nil (the
+    /// default) runs the real tools.
+    var agentToolExecutor: NativeAgentRunner.ToolExecutor?
     /// Nil uses the app ledger; tests can inject an in-memory event sink.
     private let usageLedger: UsageLedger?
     /// Source of MCP server configs for the Agent tool policy. Injected so
@@ -1177,6 +1180,7 @@ final class ChatService: ObservableObject {
                     systemPromptOverride: customPrompt.isEmpty ? nil : customPrompt,
                     client: self.client,
                     maximumTurns: self.agentMaximumTurns,
+                    toolExecutor: self.agentToolExecutor,
                     policy: policy,
                     approvals: OPMode.approvals(self.approvals),
                     missingApproval: OPMode.isEnabled() ? .autoApprove : .deny,
