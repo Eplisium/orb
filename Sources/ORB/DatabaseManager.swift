@@ -509,6 +509,10 @@ final class DatabaseManager: @unchecked Sendable {
             );
             """)
             try addColumnIfMissing(table: "messages", column: "status", definition: "TEXT NOT NULL DEFAULT 'complete'")
+            // Test Suite W1 (TESTS-10/12): additive, nullable; old rows read as nil.
+            try addColumnIfMissing(table: "test_results", column: "ttft_ms", definition: "INTEGER")
+            try addColumnIfMissing(table: "test_results", column: "tokens_per_sec", definition: "REAL")
+            try addColumnIfMissing(table: "custom_tests", column: "options_json", definition: "TEXT")
             try addColumnIfMissing(table: "messages", column: "finish_reason", definition: "TEXT")
             try addColumnIfMissing(table: "messages", column: "error_message", definition: "TEXT")
             // A1: multimodal persistence — attachment wire parts + generated images.
@@ -1533,8 +1537,8 @@ final class DatabaseManager: @unchecked Sendable {
         INSERT OR REPLACE INTO test_results
         (id, scenario_id, scenario_title, category, model_id, response,
          prompt_tokens, completion_tokens, total_tokens, cost, latency_ms,
-         success, error_message, output_path, timestamp)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+         success, error_message, output_path, timestamp, ttft_ms, tokens_per_sec)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
         """
         guard let stmt = prepare(sql) else { return }
         defer { sqlite3_finalize(stmt) }
@@ -1561,11 +1565,18 @@ final class DatabaseManager: @unchecked Sendable {
             sqlite3_bind_null(stmt, 14)
         }
         sqlite3_bind_double(stmt, 15, result.timestamp.timeIntervalSince1970)
+        if let ttft = result.ttftMs { sqlite3_bind_int64(stmt, 16, Int64(ttft)) } else { sqlite3_bind_null(stmt, 16) }
+        if let tps = result.tokensPerSec, tps.isFinite { sqlite3_bind_double(stmt, 17, tps) } else { sqlite3_bind_null(stmt, 17) }
         sqlite3_step(stmt)
     }
 
     func loadTestResults() -> [TestRunResult] {
-        let sql = "SELECT * FROM test_results ORDER BY timestamp DESC LIMIT 200;"
+        let sql = """
+        SELECT id, scenario_id, scenario_title, category, model_id, response,
+               prompt_tokens, completion_tokens, total_tokens, cost, latency_ms,
+               success, error_message, output_path, timestamp, ttft_ms, tokens_per_sec
+        FROM test_results ORDER BY timestamp DESC LIMIT 200;
+        """
         guard let stmt = prepare(sql) else { return [] }
         defer { sqlite3_finalize(stmt) }
         var results: [TestRunResult] = []
@@ -1604,7 +1615,9 @@ final class DatabaseManager: @unchecked Sendable {
                 success: success,
                 errorMessage: errorMessage,
                 outputPath: outputPath,
-                timestamp: timestamp
+                timestamp: timestamp,
+                ttftMs: sqlite3_column_type(stmt, 15) == SQLITE_NULL ? nil : Int(sqlite3_column_int64(stmt, 15)),
+                tokensPerSec: sqlite3_column_type(stmt, 16) == SQLITE_NULL ? nil : sqlite3_column_double(stmt, 16)
             ))
         }
         return results
@@ -1694,8 +1707,8 @@ final class DatabaseManager: @unchecked Sendable {
         dbLock.lock(); defer { dbLock.unlock() } // see `locked`
         let sql = """
         INSERT OR REPLACE INTO custom_tests
-        (id, title, subtitle, icon, category, system_prompt, user_prompt, notes, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);
+        (id, title, subtitle, icon, category, system_prompt, user_prompt, notes, created_at, options_json)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
         """
         guard let stmt = prepare(sql) else { return }
         defer { sqlite3_finalize(stmt) }
@@ -1708,11 +1721,15 @@ final class DatabaseManager: @unchecked Sendable {
         Self.bindText(stmt, 7, test.userPrompt)
         Self.bindText(stmt, 8, test.notes)
         sqlite3_bind_double(stmt, 9, test.createdAt.timeIntervalSince1970)
+        Self.bindText(stmt, 10, test.optionsJSON)
         sqlite3_step(stmt)
     }
 
     func loadCustomTests() -> [CustomTest] {
-        let sql = "SELECT * FROM custom_tests ORDER BY created_at DESC;"
+        let sql = """
+        SELECT id, title, subtitle, icon, category, system_prompt, user_prompt, notes, created_at, options_json
+        FROM custom_tests ORDER BY created_at DESC;
+        """
         guard let stmt = prepare(sql) else { return [] }
         defer { sqlite3_finalize(stmt) }
         var tests: [CustomTest] = []
@@ -1728,7 +1745,7 @@ final class DatabaseManager: @unchecked Sendable {
             let createdAt = Date(timeIntervalSince1970: sqlite3_column_double(stmt, 8))
             let category = TestCategory(rawValue: categoryStr) ?? .webDevelopment
 
-            tests.append(CustomTest(
+            var test = CustomTest(
                 id: id,
                 title: title,
                 subtitle: subtitle,
@@ -1738,7 +1755,9 @@ final class DatabaseManager: @unchecked Sendable {
                 userPrompt: userPrompt,
                 notes: notes,
                 createdAt: createdAt
-            ))
+            )
+            test.applyOptionsJSON(columnTextOrNil(stmt, 9))
+            tests.append(test)
         }
         return tests
     }

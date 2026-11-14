@@ -215,7 +215,7 @@ extension DatabaseManager {
         let sql = """
         SELECT id, scenario_id, scenario_title, category, model_id, response,
                prompt_tokens, completion_tokens, total_tokens, cost, latency_ms,
-               success, error_message, output_path, timestamp
+               success, error_message, output_path, timestamp, ttft_ms, tokens_per_sec
         FROM test_results ORDER BY timestamp DESC;
         """
         guard let stmt = prepare(sql) else { return [] }
@@ -238,7 +238,9 @@ extension DatabaseManager {
                 success: sqlite3_column_int(stmt, 11) == 1,
                 errorMessage: columnTextOrNil(stmt, 12),
                 outputPath: columnTextOrNil(stmt, 13),
-                timestamp: Date(timeIntervalSince1970: sqlite3_column_double(stmt, 14))
+                timestamp: Date(timeIntervalSince1970: sqlite3_column_double(stmt, 14)),
+                ttftMs: sqlite3_column_type(stmt, 15) == SQLITE_NULL ? nil : Int(sqlite3_column_int64(stmt, 15)),
+                tokensPerSec: sqlite3_column_type(stmt, 16) == SQLITE_NULL ? nil : sqlite3_column_double(stmt, 16)
             ))
         }
         return results
