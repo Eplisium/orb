@@ -127,6 +127,7 @@ struct ImagesView: View {
     @StudioState("ImagesView.totalCost") private var totalCost = 0.0
     @FocusState private var inputFocused: Bool
     @AppStorage(PlaygroundModelDefaults.agentKey) private var pinnedAgentModelId = ""
+    @AppStorage(PlaygroundModelDefaults.chatKey) private var chatDefaultModelId = ""
     @StudioState("ImagesView.isEnhancing") private var isEnhancing = false
     @StudioState("ImagesView.promptBeforeEnhance") private var promptBeforeEnhance: String? = nil
     @StudioState("ImagesView.pendingImages") private var pendingImages = 0
@@ -476,6 +477,16 @@ struct ImagesView: View {
         .background(Color(nsColor: .windowBackgroundColor))
     }
 
+    /// Agent pin, else the Chat default, else a fast text model: never empty,
+    /// so Enhance does not depend on an Agent pin (V-5).
+    private var enhanceModel: String {
+        PromptEnhancer.resolveModel(pinnedAgent: pinnedAgentModelId, chatDefault: chatDefaultModelId, catalog: [])
+    }
+
+    private var enhanceModelLabel: String {
+        PromptEnhancer.modelLabel(pinnedAgent: pinnedAgentModelId, chatDefault: chatDefaultModelId, resolved: enhanceModel)
+    }
+
     private var enhanceRow: some View {
         HStack(spacing: 8) {
             Button { Task { await enhancePrompt() } } label: {
@@ -485,15 +496,13 @@ struct ImagesView: View {
                     Label("Enhance with AI", systemImage: "wand.and.stars")
                 }
             }
-            .disabled(isEnhancing || pinnedAgentModelId.isEmpty || !canEnhance)
-            .help(pinnedAgentModelId.isEmpty
-                  ? "Pin a model in Agent to use it for prompt enhancement."
-                  : "Rewrite the prompt with \(shortModelName(pinnedAgentModelId))")
+            .disabled(isEnhancing || !canEnhance)
+            .help("Rewrite the prompt with \(enhanceModelLabel)")
             if let original = promptBeforeEnhance, !isEnhancing {
                 Button("Undo") { prompt = original; promptBeforeEnhance = nil }
             }
             Spacer()
-            Text(pinnedAgentModelId.isEmpty ? "No model pinned in Agent" : shortModelName(pinnedAgentModelId))
+            Text(enhanceModelLabel)
                 .font(.caption2).foregroundStyle(.tertiary).lineLimit(1)
         }
         .font(.caption)
@@ -509,7 +518,7 @@ struct ImagesView: View {
         errorMessage = nil
         defer { isEnhancing = false }
         do {
-            let improved = try await PromptEnhancer.enhance(original, modelId: pinnedAgentModelId)
+            let improved = try await PromptEnhancer.enhance(original, modelId: enhanceModel)
             promptBeforeEnhance = original
             prompt = improved
         } catch {
