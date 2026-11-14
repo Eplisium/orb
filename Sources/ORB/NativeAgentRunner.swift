@@ -605,16 +605,28 @@ enum NativeAgentRunner {
             guard !present.isEmpty else { return nil }
             return "- \(label): \(present.joined(separator: ", "))." + suffix
         }
-        let toolbox = [
-            line("Files & shell", ["read_file", "list_directory", "search_files", "write_file", "run_command"]),
-            line("Mac automation", ["run_applescript", "open_application", "open_url", "capture_screen", "computer_action"]),
-            has("view_image") ? "- Vision: after capture_screen, call view_image on the PNG to actually see the screen before clicking coordinates. Never guess coordinates blind." : nil,
-            has("recall") || has("remember") ? "- Memory: recall a topic before starting (past sessions may have learned it); remember durable facts worth keeping." : nil,
-            has("plan_tasks") ? "- Planning: for multi-step tasks, set up plan_tasks first and update it as you finish each step." : nil,
-            has("web_search") || has("fetch_url") ? "- Web: " + [has("web_search") ? "web_search for current information (docs, prices, news) instead of guessing" : nil,
-                                                             has("fetch_url") ? "fetch_url to read a specific page" : nil].compactMap { $0 }.joined(separator: "; ") + "." : nil,
-            has("generate_image") || has("speak_text") ? "- Media (spend credits, ask only for large work): generate_image saves AI pictures to disk; speak_text saves narration audio to disk." : nil,
-        ].compactMap { $0 }.joined(separator: "\n")
+        // Built step by step: one large array literal of optional ternaries
+        // exceeds the type checker's time limit on some Xcode releases.
+        var webParts: [String] = []
+        if has("web_search") { webParts.append("web_search for current information (docs, prices, news) instead of guessing") }
+        if has("fetch_url") { webParts.append("fetch_url to read a specific page") }
+        var lines: [String] = []
+        if let files = line("Files & shell", ["read_file", "list_directory", "search_files", "write_file", "run_command"]) { lines.append(files) }
+        if let mac = line("Mac automation", ["run_applescript", "open_application", "open_url", "capture_screen", "computer_action"]) { lines.append(mac) }
+        if has("view_image") {
+            lines.append("- Vision: after capture_screen, call view_image on the PNG to actually see the screen before clicking coordinates. Never guess coordinates blind.")
+        }
+        if has("recall") || has("remember") {
+            lines.append("- Memory: recall a topic before starting (past sessions may have learned it); remember durable facts worth keeping.")
+        }
+        if has("plan_tasks") {
+            lines.append("- Planning: for multi-step tasks, set up plan_tasks first and update it as you finish each step.")
+        }
+        if !webParts.isEmpty { lines.append("- Web: " + webParts.joined(separator: "; ") + ".") }
+        if has("generate_image") || has("speak_text") {
+            lines.append("- Media (spend credits, ask only for large work): generate_image saves AI pictures to disk; speak_text saves narration audio to disk.")
+        }
+        let toolbox = lines.joined(separator: "\n")
         let unavailable = availableTools.map { names in
             ["write_file", "run_command", "computer_action"].contains { !names.contains($0) }
                 ? "\nTools not listed here are unavailable in this session; never claim to run them. If the task needs local files or the terminal, say that Computer Access must be turned on."
