@@ -9,6 +9,10 @@ struct ConversationActions {
     var copyLastReply: (() -> Void)?
     var export: (() -> Void)?
     var searchSessions: (() -> Void)?
+    /// Opens the playground's model picker.
+    var chooseModel: (() -> Void)? = nil
+    /// Opens the find bar over the transcript.
+    var findInConversation: (() -> Void)? = nil
 }
 
 private struct ConversationActionsKey: FocusedValueKey {
@@ -25,15 +29,18 @@ extension FocusedValues {
 /// Shortcuts for the Conversation menu. Chosen to avoid the existing shell
 /// shortcuts (⌘N, ⇧⌘N, ⌘F, ⌘K, ⌘R, ⌘/, ⌘0…9, ⇧⌘E) and the Model menu
 /// (⌘D, ⇧⌘C, ⌃⌘C, ⌘↩). `ShellShortcuts.allBoundCombos` checks both tables.
+/// ⌘F stays the shell's; transcript search uses ⇧⌘F.
 enum ConversationShortcuts {
     static let stop = KeyboardShortcut(".", modifiers: .command)
     static let regenerate = KeyboardShortcut("r", modifiers: [.command, .shift])
     static let copyLastReply = KeyboardShortcut("c", modifiers: [.command, .option])
     static let export = KeyboardShortcut("e", modifiers: .command)
     static let searchSessions = KeyboardShortcut("f", modifiers: [.command, .option])
+    static let chooseModel = KeyboardShortcut("l", modifiers: .command)
+    static let findInConversation = KeyboardShortcut("f", modifiers: [.command, .shift])
 
     /// Every shortcut above, for the duplicate check.
-    static let all = [stop, regenerate, copyLastReply, export, searchSessions]
+    static let all = [stop, regenerate, copyLastReply, export, searchSessions, chooseModel, findInConversation]
 }
 
 struct ConversationCommands: Commands {
@@ -47,6 +54,9 @@ struct ConversationCommands: Commands {
             item("Copy Last Reply", actions?.copyLastReply, ConversationShortcuts.copyLastReply)
             item("Export Conversation…", actions?.export, ConversationShortcuts.export)
             Divider()
+            item("Choose Model…", actions?.chooseModel, ConversationShortcuts.chooseModel)
+            Divider()
+            item("Find in Conversation…", actions?.findInConversation, ConversationShortcuts.findInConversation)
             item("Search Sessions", actions?.searchSessions, ConversationShortcuts.searchSessions)
         }
     }

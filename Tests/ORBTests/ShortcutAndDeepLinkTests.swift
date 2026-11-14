@@ -17,7 +17,7 @@ struct ShortcutTableTests {
     @Test("The duplicate check covers every Conversation shortcut")
     func conversationTableIsCovered() {
         let bound = Set(ShellShortcuts.allBoundCombos)
-        #expect(ConversationShortcuts.all.count == 5)
+        #expect(ConversationShortcuts.all.count == 7)
         for shortcut in ConversationShortcuts.all {
             #expect(bound.contains(KeyCombo(shortcut)))
         }

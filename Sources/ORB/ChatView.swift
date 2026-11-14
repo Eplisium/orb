@@ -51,6 +51,12 @@ struct ChatView: View {
     @State private var lastScrollRequest: ContinuousClock.Instant?
     @FocusState private var inputFocused: Bool
     @State private var searchFocusRequest = 0
+    /// Memoised context gauge: the body re-renders every streamed frame.
+    @State private var gaugeMemo = ContextGaugeMemo()
+    @State private var showFind = false
+    @State private var findQuery = ""
+    @State private var findIndex = 0
+    @FocusState private var findFocused: Bool
     @State private var pasteMonitor = ComposerPasteMonitor()
 
     private let accent = PlaygroundTheme.chatAccent
@@ -110,6 +116,7 @@ struct ChatView: View {
         }
         .onChange(of: chatService.activeConversation?.id) { _, _ in
             resetFollowState()
+            closeFind(refocusComposer: false)
             // An edit belongs to one conversation; leaving it ends the edit
             // (nothing was removed, so nothing needs restoring).
             if activeEdit == nil { endEdit() }
@@ -119,6 +126,7 @@ struct ChatView: View {
             // the newly active conversation's model with it.
             if let modelId = chatService.activeConversation?.modelId { selectedModelId = modelId }
         }
+        .onChange(of: findQuery) { _, _ in findIndex = 0 }
         .onChange(of: sessionQuery) { _, _ in
             // Selection only ever covers what the filter shows: a hidden
             // session must not ride along into Select All or bulk delete.
@@ -362,6 +370,7 @@ struct ChatView: View {
         }
         .buttonStyle(.plain)
         .fixedSize()
+        .help("Choose a model (⌘L)")
         .disabled(chatService.isStreaming)
         .popover(isPresented: $showModelPicker, arrowEdge: .bottom) {
             PlaygroundModelPicker(
@@ -486,6 +495,8 @@ struct ChatView: View {
         if let conversation = chatService.activeConversation,
            !conversation.messages.isEmpty {
             let conversationIsRunning = chatService.isRunning(conversationID: conversation.id)
+            let findMatches = showFind ? ChatFindModel.matches(in: conversation.messages, query: findQuery) : []
+            let findTarget = ChatFindModel.target(in: findMatches, index: findIndex)
             GeometryReader { viewport in
                 ScrollViewReader { proxy in
                     ZStack(alignment: .bottomTrailing) {
@@ -510,6 +521,14 @@ struct ChatView: View {
                                             : { if let branch = chatService.branchConversation(from: message.id, in: conversation.id) { selectedModelId = branch.modelId } }
                                     )
                                     .equatable()
+                                    .overlay {
+                                        if message.id == findTarget {
+                                            RoundedRectangle(cornerRadius: 12)
+                                                .stroke(accent.opacity(0.7), lineWidth: 1.5)
+                                                .padding(-8)
+                                                .allowsHitTesting(false)
+                                        }
+                                    }
                                     .id(message.id)
                                 }
 
@@ -572,7 +591,7 @@ struct ChatView: View {
 
                         // Offered whenever the latest message is out of view,
                         // not only while a reply streams or arrives.
-                        if !followsLatest {
+                        if !followsLatest && !showFind {
                             Button {
                                 scrollIntent.reset()
                                 followsLatest = true
@@ -604,6 +623,17 @@ struct ChatView: View {
                     // only reacts to changes, so without this a reopened
                     // conversation showed its first message.
                     .task(id: conversation.id) { await openAtLatest(proxy) }
+                    .onChange(of: findTarget) { _, target in
+                        guard let target else { return }
+                        // Reading a match must not be yanked back by follow.
+                        followsLatest = false
+                        pendingFollowScroll?.cancel()
+                        pendingFollowScroll = nil
+                        withAnimation(.easeOut(duration: 0.2)) { proxy.scrollTo(target, anchor: .center) }
+                    }
+                    .overlay(alignment: .topTrailing) {
+                        if showFind { findBar(matchCount: findMatches.count) }
+                    }
                     .onDisappear { pendingFollowScroll?.cancel(); pendingFollowScroll = nil }
                 }
             }
@@ -617,18 +647,88 @@ struct ChatView: View {
             icon: "bubble.left.and.bubble.right.fill",
             title: "Explore any model",
             message: "Chat directly with any model in the OpenRouter catalog. Responses stream live with usage and cost tracking.",
-            pills: [
-                .init(title: "Streaming", icon: "bolt.horizontal"),
-                .init(title: "Temperature", icon: "thermometer"),
-                .init(title: "Cost Tracking", icon: "dollarsign.circle"),
-                .init(title: "Markdown", icon: "text.alignleft"),
-            ],
-            suggestions: suggestions,
+            pills: [],
+            suggestions: ChatWelcomeStarter.allCases.map(\.suggestion),
             accent: accent
         ) { suggestion in
-            messageText = suggestion.prompt
-            inputFocused = true
+            startWelcome(ChatWelcomeStarter(title: suggestion.title))
         }
+    }
+
+    private func startWelcome(_ starter: ChatWelcomeStarter?) {
+        guard let starter else { return }
+        switch starter.action {
+        case .openModelPicker:
+            openModelPicker()
+        case .prompt(let prompt, let attach):
+            messageText = prompt
+            inputFocused = true
+            if attach { chooseAttachments() }
+        }
+    }
+
+    private func openModelPicker() {
+        guard !chatService.isStreaming else { return }
+        modelSearchText = ""
+        showModelPicker = true
+    }
+
+    // MARK: - Find in conversation
+
+    private func findBar(matchCount: Int) -> some View {
+        HStack(spacing: 6) {
+            Image(systemName: "magnifyingglass")
+                .foregroundStyle(.secondary)
+            TextField("Find in conversation", text: $findQuery)
+                .textFieldStyle(.plain)
+                .frame(width: 170)
+                .focused($findFocused)
+                .onSubmit { stepFind(1, count: matchCount) }
+                .onKeyPress(.escape) { closeFind(refocusComposer: true); return .handled }
+            Text(ChatFindModel.status(query: findQuery, index: findIndex, count: matchCount))
+                .orbFont(size: 11, weight: .medium)
+                .monospacedDigit()
+                .foregroundStyle(.secondary)
+                .fixedSize()
+            Button { stepFind(-1, count: matchCount) } label: { Image(systemName: "chevron.up") }
+                .buttonStyle(.plain)
+                .disabled(matchCount == 0)
+                .help("Previous match")
+                .accessibilityLabel("Previous match")
+            Button { stepFind(1, count: matchCount) } label: { Image(systemName: "chevron.down") }
+                .buttonStyle(.plain)
+                .disabled(matchCount == 0)
+                .help("Next match (Return)")
+                .accessibilityLabel("Next match")
+            Button { closeFind(refocusComposer: true) } label: { Image(systemName: "xmark.circle.fill") }
+                .buttonStyle(.plain)
+                .foregroundStyle(.secondary)
+                .help("Close (Esc)")
+                .accessibilityLabel("Close find")
+        }
+        .orbFont(size: 12)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 7)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 9))
+        .overlay { RoundedRectangle(cornerRadius: 9).stroke(.orbSurface(0.10), lineWidth: 0.5) }
+        .padding(12)
+    }
+
+    private func openFind() {
+        showFind = true
+        findFocused = true
+    }
+
+    private func stepFind(_ delta: Int, count: Int) {
+        findIndex = ChatFindModel.stepped(findIndex, by: delta, count: count)
+    }
+
+    private func closeFind(refocusComposer: Bool) {
+        guard showFind else { return }
+        showFind = false
+        findQuery = ""
+        findIndex = 0
+        if refocusComposer { inputFocused = true }
     }
 
     private func activityRow(isActive: Bool) -> some View {
@@ -677,9 +777,15 @@ struct ChatView: View {
                 }
             }
 
-            if !attachmentWarnings.isEmpty {
+            if showsContinueBanner {
+                ContinueReplyBanner(maxTokens: maxTokens > 0 ? Int(maxTokens) : nil, accent: accent,
+                                    onContinue: continueTruncatedReply)
+            }
+
+            let warnings = composerWarnings
+            if !warnings.isEmpty {
                 VStack(alignment: .leading, spacing: 3) {
-                    ForEach(attachmentWarnings, id: \.self) { warning in
+                    ForEach(warnings, id: \.self) { warning in
                         Label(warning, systemImage: "exclamationmark.triangle")
                     }
                 }
@@ -706,6 +812,8 @@ struct ChatView: View {
                     .padding(.horizontal, 14)
                     .padding(.top, 12)
                     .padding(.bottom, 9)
+                    // ↑ in an empty composer edits the last message you sent.
+                    .onKeyPress(.upArrow, phases: .down) { press in editLastOnArrow(press) }
                     .composerReturnKey(requireCommand: requireCommandToSend, send: sendMessage)
 
                 HStack(spacing: 9) {
@@ -717,7 +825,7 @@ struct ChatView: View {
                             .clipShape(Circle())
                     }
                     .buttonStyle(.plain)
-                    .help("Attach images, audio, video, or documents")
+                    .help("Attach images, PDFs, text or code files, audio, or video")
                     .disabled(chatService.isStreaming)
 
                     Spacer()
@@ -827,15 +935,6 @@ struct ChatView: View {
         return KeychainManager.hasAPIKey ? "OpenRouter ready" : "API key needed"
     }
 
-    private var suggestions: [PlaygroundSuggestion] {
-        [
-            .init(title: "Compare ideas", subtitle: "Reason through trade-offs", icon: "arrow.triangle.branch", prompt: "Help me compare two approaches and recommend the better one."),
-            .init(title: "Write", subtitle: "Draft clear, polished content", icon: "pencil.line", prompt: "Help me draft a polished piece of writing."),
-            .init(title: "Explain", subtitle: "Make a complex topic clear", icon: "lightbulb", prompt: "Explain a complex topic clearly with examples."),
-            .init(title: "Brainstorm", subtitle: "Generate strong creative options", icon: "sparkles", prompt: "Brainstorm several creative options for me."),
-        ]
-    }
-
     private func newConversation() {
         selectedModelId = preferredModelId
         _ = chatService.newConversation(modelId: selectedModelId, mode: .chat)
@@ -852,12 +951,50 @@ struct ChatView: View {
     private var contextGauge: ContextGauge? {
         let length = viewModel.api.models.first { $0.id == currentModelId }?.contextLength
         let conversation = chatService.activeConversation
-        return ContextGauge.make(
-            system: conversation?.systemPrompt ?? "",
-            messages: (conversation?.messages ?? []).map(\.content),
-            draft: messageText,
-            contextLength: length
-        )
+        let messages = conversation?.messages ?? []
+        let draftAllowance = attachmentDrafts.reduce(0) { $0 + $1.estimatedTokens }
+            + (carriedParts ?? []).reduce(0) { $0 + ContextGauge.allowance(for: $1) }
+        let key = ContextGaugeMemo.Key(conversationID: conversation?.id, messages: messages,
+                                       system: conversation?.systemPrompt ?? "", draft: messageText,
+                                       draftAllowance: draftAllowance, contextLength: length)
+        return gaugeMemo.gauge(for: key) {
+            ContextGauge.make(system: conversation?.systemPrompt ?? "", history: messages, draft: messageText,
+                              draftAllowance: draftAllowance, contextLength: length)
+        }
+    }
+
+    private var currentModel: ModelInfo? {
+        viewModel.api.models.first { $0.id == currentModelId }
+    }
+
+    /// Attach-time notes plus capability notes for the model selected now.
+    private var composerWarnings: [String] {
+        ComposerWarnings.make(classify: attachmentWarnings, model: currentModel, drafts: attachmentDrafts,
+                              settings: requestSettings)
+    }
+
+    private var showsContinueBanner: Bool {
+        guard let conversation = chatService.activeConversation, activeEdit == nil else { return false }
+        return ChatContinuation.canContinue(conversation.messages, running: chatService.isStreaming)
+    }
+
+    /// Continue for a reply cut off at the output limit: a follow-up turn
+    /// asking the model to pick up where it stopped.
+    private func continueTruncatedReply() {
+        guard KeychainManager.hasAPIKey, !chatService.isStreaming else { return }
+        chatService.sendMessage(ChatContinuation.prompt, modelId: currentModelId, settings: requestSettings,
+                                parts: nil, replacing: nil)
+    }
+
+    private func editLastOnArrow(_ press: KeyPress) -> KeyPress.Result {
+        let composing = ((NSApp.keyWindow ?? NSApp.mainWindow)?.firstResponder as? NSTextView)?.hasMarkedText() == true
+        guard ChatComposerArrowPolicy.editsLastMessage(
+            text: messageText, modifiers: press.modifiers, composing: composing,
+            hasDrafts: !attachmentDrafts.isEmpty, isEditing: activeEdit != nil, isRunning: currentSessionRunning
+        ), let conversation = chatService.activeConversation,
+           let last = ChatComposerArrowPolicy.lastUserMessageID(in: conversation.messages) else { return .ignored }
+        beginEdit(last, in: conversation.id)
+        return .handled
     }
 
     /// Handles `/model`, `/system`, `/clear`. Returns true when the text was a command.
@@ -980,11 +1117,10 @@ struct ChatView: View {
         }
     }
 
+    /// Keeps only attach-time notes; capability notes are recomputed from
+    /// the current model in `composerWarnings`.
     private func refreshAttachmentWarnings(extra: [String] = []) {
-        var warnings = extra
-        let model = viewModel.api.models.first { $0.id == currentModelId }
-        warnings += AttachmentCapability.warnings(model: model, drafts: attachmentDrafts)
-        attachmentWarnings = warnings
+        attachmentWarnings = extra
     }
 
     private func regenerateAction(for message: ChatMessage, in conversation: ChatConversation, running: Bool) -> (() -> Void)? {
@@ -1008,7 +1144,9 @@ struct ChatView: View {
                 { ConversationActionLogic.copyToPasteboard(text) }
             },
             export: conversation.map { conv in { exportConversation(conv) } },
-            searchSessions: { searchFocusRequest += 1 }
+            searchSessions: { searchFocusRequest += 1 },
+            chooseModel: chatService.isStreaming ? nil : { openModelPicker() },
+            findInConversation: (conversation?.messages.isEmpty ?? true) ? nil : { openFind() }
         )
     }
 
@@ -1106,4 +1244,179 @@ struct ChatView: View {
         lastScrollRequest = now
         proxy.scrollTo("chat-message-bottom", anchor: .bottom)
     }
+}
+
+// MARK: - Chat helpers (pure, unit-tested in W1ChatUI* suites)
+
+/// Memoises the context gauge. `ChatView.body` re-renders on every streamed
+/// frame (~33 ms); the key is O(1) to build, so an unchanged conversation
+/// never re-estimates.
+@MainActor
+final class ContextGaugeMemo {
+    struct Key: Hashable {
+        var conversationID: UUID?
+        var messageCount: Int
+        var lastMessageID: UUID?
+        var lastContentBytes: Int
+        var lastPromptTokens: Int?
+        var lastPartCount: Int
+        var systemBytes: Int
+        var draft: String
+        var draftAllowance: Int
+        var contextLength: Int?
+    }
+
+    private var key: Key?
+    private var value: ContextGauge?
+    private(set) var computeCount = 0
+
+    func gauge(for key: Key, compute: () -> ContextGauge?) -> ContextGauge? {
+        if key == self.key { return value }
+        computeCount += 1
+        value = compute()
+        self.key = key
+        return value
+    }
+}
+
+extension ContextGaugeMemo.Key {
+    init(conversationID: UUID?, messages: [ChatMessage], system: String, draft: String,
+         draftAllowance: Int, contextLength: Int?) {
+        let last = messages.last
+        self.init(conversationID: conversationID, messageCount: messages.count, lastMessageID: last?.id,
+                  lastContentBytes: last?.content.utf8.count ?? 0, lastPromptTokens: last?.usage?.promptTokens,
+                  lastPartCount: last?.parts?.count ?? 0, systemBytes: system.utf8.count, draft: draft,
+                  draftAllowance: draftAllowance, contextLength: contextLength)
+    }
+}
+
+/// Find in conversation: which messages match, and the "2 of 5" label.
+enum ChatFindModel {
+    static func matches(in messages: [ChatMessage], query: String) -> [UUID] {
+        let needle = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !needle.isEmpty else { return [] }
+        return messages.filter { message in
+            (message.role == "user" || message.role == "assistant")
+                && message.content.range(of: needle, options: [.caseInsensitive, .diacriticInsensitive]) != nil
+        }.map(\.id)
+    }
+
+    static func target(in matches: [UUID], index: Int) -> UUID? {
+        matches.isEmpty ? nil : matches[min(max(index, 0), matches.count - 1)]
+    }
+
+    /// Next/previous match, wrapping at either end.
+    static func stepped(_ index: Int, by delta: Int, count: Int) -> Int {
+        guard count > 0 else { return 0 }
+        return ((index + delta) % count + count) % count
+    }
+
+    static func status(query: String, index: Int, count: Int) -> String {
+        if query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return "" }
+        if count == 0 { return "No matches" }
+        return "\(min(max(index, 0), count - 1) + 1) of \(count)"
+    }
+}
+
+/// ↑ in an empty composer starts editing your last message, as in Slack,
+/// ChatGPT and Claude. Only a plain arrow with nothing typed, no IME
+/// composition, no pending attachments and no edit already open qualifies,
+/// so it never steals the caret from text you are writing.
+enum ChatComposerArrowPolicy {
+    static func editsLastMessage(text: String, modifiers: EventModifiers, composing: Bool,
+                                 hasDrafts: Bool, isEditing: Bool, isRunning: Bool) -> Bool {
+        let chord: EventModifiers = [.command, .option, .control, .shift]
+        return text.isEmpty && modifiers.intersection(chord).isEmpty && !composing
+            && !hasDrafts && !isEditing && !isRunning
+    }
+
+    static func lastUserMessageID(in messages: [ChatMessage]) -> UUID? {
+        messages.last { $0.role == "user" }?.id
+    }
+}
+
+/// Continue for a reply that stopped at the model's output limit
+/// (`finish_reason: "length"` → `.truncated`).
+enum ChatContinuation {
+    static let prompt = "Continue exactly where your last reply stopped. Don't repeat what you already wrote."
+
+    static func canContinue(_ messages: [ChatMessage], running: Bool) -> Bool {
+        guard !running, let last = messages.last, last.role == "assistant" else { return false }
+        return last.status == .truncated || last.finishReason == "length"
+    }
+}
+
+struct ContinueReplyBanner: View {
+    let maxTokens: Int?
+    let accent: Color
+    let onContinue: () -> Void
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "text.append")
+                .foregroundStyle(accent)
+            VStack(alignment: .leading, spacing: 1) {
+                Text("The reply stopped at the output limit.")
+                    .orbFont(size: 11, weight: .medium)
+                if let maxTokens {
+                    Text("Max tokens is \(maxTokens.formatted()) in Chat Settings.")
+                        .orbFont(size: 11)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            Spacer(minLength: 8)
+            Button("Continue", action: onContinue)
+                .controlSize(.small)
+                .help("Ask the model to pick up where it stopped")
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
+        .background(accent.opacity(0.07), in: RoundedRectangle(cornerRadius: 9))
+    }
+}
+
+/// Starters on the empty Chat screen. Each one does something: opens the
+/// model picker, or fills the composer with a complete prompt (and, for a
+/// file summary, opens the attachment picker).
+enum ChatWelcomeStarter: CaseIterable {
+    case chooseModel, summarizeFile, reviewCode, explain
+
+    enum Action: Equatable {
+        case openModelPicker
+        case prompt(String, attach: Bool)
+    }
+
+    init?(title: String) {
+        guard let match = Self.allCases.first(where: { $0.suggestion.title == title }) else { return nil }
+        self = match
+    }
+
+    var suggestion: PlaygroundSuggestion {
+        switch self {
+        case .chooseModel:
+            return .init(title: "Pick a model", subtitle: "Search the whole catalog · ⌘L", icon: "cpu", prompt: "")
+        case .summarizeFile:
+            return .init(title: "Summarize a file", subtitle: "Attach a PDF, text, or code file",
+                         icon: "doc.text.magnifyingglass", prompt: Self.summarizePrompt)
+        case .reviewCode:
+            return .init(title: "Review code", subtitle: "Paste a snippet for bugs and fixes",
+                         icon: "chevron.left.forwardslash.chevron.right", prompt: Self.reviewPrompt)
+        case .explain:
+            return .init(title: "Explain a concept", subtitle: "Plain language, one concrete example",
+                         icon: "lightbulb", prompt: Self.explainPrompt)
+        }
+    }
+
+    var action: Action {
+        switch self {
+        case .chooseModel: return .openModelPicker
+        case .summarizeFile: return .prompt(Self.summarizePrompt, attach: true)
+        case .reviewCode: return .prompt(Self.reviewPrompt, attach: false)
+        case .explain: return .prompt(Self.explainPrompt, attach: false)
+        }
+    }
+
+    static let summarizePrompt = "Summarize the attached file in five bullet points, then list any open questions it raises."
+    static let reviewPrompt = "Review this code for bugs, edge cases, and readability, and suggest concrete fixes:\n\n"
+    static let explainPrompt = "Explain this in plain language, with one concrete example: "
 }

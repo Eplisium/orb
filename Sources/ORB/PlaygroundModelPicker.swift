@@ -21,6 +21,8 @@ struct PlaygroundModelPicker: View {
     @State private var sortField: SortField = .name
     @State private var sortOrder: SortOrder = .ascending
     @State private var recentIds: [String] = []
+    /// Keyboard highlight, an index into `ModelPickerKeyboard.flattened`.
+    @State private var highlighted = 0
     @FocusState private var searchFocused: Bool
 
     private var toolFilter: Bool { toolCapableOnly?.wrappedValue ?? false }
@@ -38,6 +40,13 @@ struct PlaygroundModelPicker: View {
     }
 
     private var resultCount: Int { sections.reduce(0) { $0 + $1.models.count } }
+
+    private func move(_ delta: Int, in sections: [AgentModelSection]) -> KeyPress.Result {
+        let count = ModelPickerKeyboard.flattened(sections).count
+        guard count > 0 else { return .ignored }
+        highlighted = ModelPickerKeyboard.moved(highlighted, by: delta, count: count)
+        return .handled
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -66,11 +75,18 @@ struct PlaygroundModelPicker: View {
                     TextField("Search models, providers, or IDs", text: $searchText)
                         .textFieldStyle(.plain)
                         .focused($searchFocused)
-                        // Return picks the first result, so the picker works
-                        // without the mouse: type, then press Return.
+                        // Keyboard-only flow: type, ↑/↓ to move the
+                        // highlight, Return to pick it, Esc to clear or close.
                         .onSubmit {
-                            if let first = AgentModelCatalog.firstResult(in: sections) { select(first) }
+                            if let model = ModelPickerKeyboard.selection(in: sections, highlighted: highlighted) { select(model) }
                         }
+                        .onKeyPress(.downArrow) { move(1, in: sections) }
+                        .onKeyPress(.upArrow) { move(-1, in: sections) }
+                        .onKeyPress(.escape) {
+                            if searchText.isEmpty { dismiss() } else { searchText = "" }
+                            return .handled
+                        }
+                        .accessibilityHint("Use the up and down arrows to move through results and Return to choose")
                     if !searchText.isEmpty {
                         Button {
                             searchText = ""
@@ -115,12 +131,17 @@ struct PlaygroundModelPicker: View {
                 )
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
+                let rows = ModelPickerKeyboard.flattened(sections)
+                let highlightedRow = rows.indices.contains(highlighted) ? rows[highlighted].rowID : nil
+                ScrollViewReader { proxy in
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 7, pinnedViews: [.sectionHeaders]) {
                         ForEach(sections) { section in
                             Section {
                                 ForEach(section.models) { model in
-                                    modelRow(model)
+                                    let rowID = ModelPickerKeyboard.rowID(section: section, model: model)
+                                    modelRow(model, isHighlighted: rowID == highlightedRow)
+                                        .id(rowID)
                                 }
                             } header: {
                                 HStack {
@@ -145,6 +166,11 @@ struct PlaygroundModelPicker: View {
                     }
                     .padding(10)
                 }
+                .onChange(of: highlighted) { _, index in
+                    let rows = ModelPickerKeyboard.flattened(sections)
+                    if rows.indices.contains(index) { proxy.scrollTo(rows[index].rowID) }
+                }
+                }
             }
         }
         .frame(width: 440, height: 540)
@@ -152,6 +178,9 @@ struct PlaygroundModelPicker: View {
             recentIds = ModelRecentsStore().recentIds()
             searchFocused = true
         }
+        .onChange(of: searchText) { _, _ in highlighted = 0 }
+        .onChange(of: sortField) { _, _ in highlighted = 0 }
+        .onChange(of: sortOrder) { _, _ in highlighted = 0 }
     }
 
     private func select(_ model: ModelInfo) {
@@ -204,7 +233,7 @@ struct PlaygroundModelPicker: View {
         .help(sortOrder == .ascending ? "Ascending (click for descending)" : "Descending (click for ascending)")
     }
 
-    private func modelRow(_ model: ModelInfo) -> some View {
+    private func modelRow(_ model: ModelInfo, isHighlighted: Bool = false) -> some View {
         let selected = selectedModelId == model.id
         let favorite = favoriteIds.contains(model.id)
         let isDefault = defaultModelId?.wrappedValue == model.id
@@ -285,12 +314,45 @@ struct PlaygroundModelPicker: View {
         }
         .padding(.horizontal, 9)
         .padding(.vertical, 7)
-        .background(selected ? accent.opacity(0.10) : Color.primary.opacity(0.025))
+        .background(selected ? accent.opacity(0.10) : isHighlighted ? accent.opacity(0.06) : Color.primary.opacity(0.025))
         .overlay {
             RoundedRectangle(cornerRadius: 9)
-                .stroke(selected ? accent.opacity(0.28) : Color.primary.opacity(0.045), lineWidth: 1)
+                .stroke(isHighlighted ? accent.opacity(0.65) : selected ? accent.opacity(0.28) : Color.primary.opacity(0.045),
+                        lineWidth: isHighlighted ? 1.5 : 1)
         }
         .clipShape(RoundedRectangle(cornerRadius: 9))
+        .accessibilityAddTraits(isHighlighted ? .isSelected : [])
+    }
+}
+
+/// Keyboard navigation over the picker's sectioned results. A model can
+/// appear in more than one section (a favorite that is also recent), so rows
+/// are identified by section and model.
+enum ModelPickerKeyboard {
+    struct Row: Equatable {
+        let rowID: String
+        let model: ModelInfo
+
+        static func == (lhs: Row, rhs: Row) -> Bool { lhs.rowID == rhs.rowID }
+    }
+
+    static func rowID(section: AgentModelSection, model: ModelInfo) -> String { "\(section.id)|\(model.id)" }
+
+    static func flattened(_ sections: [AgentModelSection]) -> [Row] {
+        sections.flatMap { section in section.models.map { Row(rowID: rowID(section: section, model: $0), model: $0) } }
+    }
+
+    /// Moves the highlight, stopping at the first and last rows.
+    static func moved(_ index: Int, by delta: Int, count: Int) -> Int {
+        guard count > 0 else { return 0 }
+        return min(max(min(index, count - 1) + delta, 0), count - 1)
+    }
+
+    /// What Return picks: the highlighted row, else the first result.
+    static func selection(in sections: [AgentModelSection], highlighted: Int) -> ModelInfo? {
+        let rows = flattened(sections)
+        guard !rows.isEmpty else { return nil }
+        return rows[min(max(highlighted, 0), rows.count - 1)].model
     }
 }
 

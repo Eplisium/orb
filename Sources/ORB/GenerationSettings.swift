@@ -149,6 +149,43 @@ enum ServiceTier: String, Codable, CaseIterable, Sendable, Hashable, Identifiabl
     }
 }
 
+/// OpenRouter `file-parser` PDF engines (docs: features/multimodal/pdfs).
+enum PDFEngine: String, CaseIterable, Sendable {
+    case mistralOCR = "mistral-ocr"
+    case cloudflareAI = "cloudflare-ai"
+    case native
+    /// Deprecated; OpenRouter redirects it to `cloudflare-ai`.
+    case pdfText = "pdf-text"
+
+    /// Used when no engine is set and the model has no native file input.
+    static let openRouterDefault: PDFEngine = .mistralOCR
+
+    var displayName: String {
+        switch self {
+        case .mistralOCR: return "Mistral OCR"
+        case .cloudflareAI, .pdfText: return "Cloudflare AI"
+        case .native: return "native file input"
+        }
+    }
+
+    /// Pricing as documented; OCR is billed even with BYOK.
+    var costNote: String {
+        switch self {
+        case .mistralOCR: return "billed per page (about $2 per 1,000 pages)"
+        case .cloudflareAI, .pdfText: return "which is free"
+        case .native: return "charged as input tokens"
+        }
+    }
+}
+
+extension GenerationSettings {
+    /// The PDF engine requested through the file-parser plugin, or nil when
+    /// none is set (OpenRouter then picks: native, else Mistral OCR).
+    var pdfEngine: String? {
+        extraPlugins.first { $0.kind == .fileParser }?.pdfEngine.flatMap { $0.isEmpty ? nil : $0 }
+    }
+}
+
 /// Extra OpenRouter plugins beyond web search: file-parser, moderation,
 /// response-healing. Each encodes as `{id, …options}`.
 struct ExtraPlugin: Codable, Equatable, Sendable, Hashable, Identifiable {

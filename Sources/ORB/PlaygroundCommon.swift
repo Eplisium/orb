@@ -916,7 +916,7 @@ extension PlaygroundMessageView {
                     .lineSpacing(5)
                     .textSelection(.enabled)
                 if let parts = message.parts, !parts.isEmpty {
-                    SentAttachmentsLabel(count: parts.count)
+                    MessageAttachmentStrip(messageID: message.id, parts: parts)
                 }
             } else {
                 transcriptBody

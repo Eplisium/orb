@@ -213,11 +213,49 @@ struct ContextGauge: Equatable {
     let usedTokens: Int
     let contextLength: Int
 
-    static func estimateTokens(_ text: String) -> Int { (text.count + 3) / 4 }
+    /// About four bytes per token. UTF-8 length is O(1) for native strings,
+    /// unlike `count`, which walks every grapheme.
+    static func estimateTokens(_ text: String) -> Int { (text.utf8.count + 3) / 4 }
 
     static func make(system: String, messages: [String], draft: String, contextLength: Int?) -> ContextGauge? {
         guard let contextLength, contextLength > 0 else { return nil }
         let used = estimateTokens(system) + messages.reduce(0) { $0 + estimateTokens($1) } + estimateTokens(draft)
+        return ContextGauge(usedTokens: used, contextLength: contextLength)
+    }
+
+    /// Flat allowances for attachments the text estimate cannot measure.
+    static let imageAllowance = 1_500
+    static let fileAllowance = 3_000
+    static let mediaAllowance = 3_000
+
+    static func allowance(for part: MessageContentPart) -> Int {
+        switch part {
+        case .text(let text, _): return estimateTokens(text)
+        case .image: return imageAllowance
+        case .file: return fileAllowance
+        case .audio, .video: return mediaAllowance
+        }
+    }
+
+    /// Measured where possible: the newest reply's reported prompt plus
+    /// completion tokens cover everything up to and including it, so only
+    /// later messages, the draft, and attachment allowances are estimated.
+    /// Without a reported usage block it falls back to estimating it all.
+    static func make(system: String, history messages: [ChatMessage], draft: String, draftAllowance: Int = 0,
+                     contextLength: Int?) -> ContextGauge? {
+        guard let contextLength, contextLength > 0 else { return nil }
+        var used = estimateTokens(draft) + draftAllowance
+        var newer = messages[...]
+        if let index = messages.lastIndex(where: { $0.role == "assistant" && ($0.usage?.promptTokens ?? 0) > 0 }),
+           let usage = messages[index].usage {
+            used += (usage.promptTokens ?? 0) + (usage.completionTokens ?? 0)
+            newer = messages[messages.index(after: index)...]
+        } else {
+            used += estimateTokens(system)
+        }
+        for message in newer {
+            used += estimateTokens(message.content) + (message.parts ?? []).reduce(0) { $0 + allowance(for: $1) }
+        }
         return ContextGauge(usedTokens: used, contextLength: contextLength)
     }
 
