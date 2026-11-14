@@ -38,7 +38,10 @@ enum JSONValue: Codable, Sendable, Equatable, Hashable {
         switch self {
         case .null: try container.encodeNil()
         case .bool(let value): try container.encode(value)
-        case .number(let value): try container.encode(value)
+        // JSON has no NaN/Infinity; JSONEncoder would throw for the whole
+        // payload. Encode them as null, matching `jsonText`.
+        case .number(let value):
+            if value.isFinite { try container.encode(value) } else { try container.encodeNil() }
         case .string(let value): try container.encode(value)
         case .array(let value): try container.encode(value)
         case .object(let value): try container.encode(value)
@@ -110,21 +113,25 @@ enum JSONValue: Codable, Sendable, Equatable, Hashable {
         return nil
     }
 
-    /// Compact JSON text for this value.
+    /// Compact JSON text for this value, always valid JSON: top-level
+    /// strings are escaped like any other string, and NaN/±Infinity (which
+    /// JSON cannot represent) become `null` wherever they appear.
     var jsonText: String {
-        guard JSONSerialization.isValidJSONObject(anyValue),
-              let data = try? JSONSerialization.data(
-                withJSONObject: anyValue, options: [.sortedKeys, .withoutEscapingSlashes]
-              ) else {
-            // Fall back for fragments, which isValidJSONObject rejects.
-            switch self {
-            case .string(let value): return "\"\(value)\""
-            case .number(let value): return String(value)
-            case .bool(let value): return String(value)
-            case .null: return "null"
-            default: return "{}"
-            }
-        }
+        guard let data = try? JSONSerialization.data(
+            withJSONObject: Self.jsonSafe(self).anyValue,
+            options: [.fragmentsAllowed, .sortedKeys, .withoutEscapingSlashes]
+        ) else { return "null" }
         return String(decoding: data, as: UTF8.self)
+    }
+
+    /// Replaces non-finite numbers with `.null`; JSONSerialization raises an
+    /// Objective-C exception (a crash) when asked to write them.
+    private static func jsonSafe(_ value: JSONValue) -> JSONValue {
+        switch value {
+        case .number(let number): return number.isFinite ? value : .null
+        case .array(let items): return .array(items.map(jsonSafe))
+        case .object(let fields): return .object(fields.mapValues(jsonSafe))
+        case .null, .bool, .string: return value
+        }
     }
 }
