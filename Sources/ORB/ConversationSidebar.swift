@@ -6,6 +6,24 @@ import SwiftUI
 
 // MARK: - Conversation sidebar helpers
 
+private struct ConversationDeleteIsUndoableKey: EnvironmentKey {
+    static let defaultValue = false
+}
+
+extension EnvironmentValues {
+    /// True when sidebar row deletes go through an undoable path.
+    var conversationDeleteIsUndoable: Bool {
+        get { self[ConversationDeleteIsUndoableKey.self] }
+        set { self[ConversationDeleteIsUndoableKey.self] = newValue }
+    }
+}
+
+/// Which delete a sidebar row performs: one shared rule so Chat and Agent
+/// cannot drift apart again (CHAT-10).
+enum ConversationRowDeletePolicy {
+    static func needsConfirmation(undoable: Bool) -> Bool { !undoable }
+}
+
 struct ConversationSidebarHeader: View {
     let title: String
     let subtitle: String
@@ -36,16 +54,22 @@ struct ConversationSidebarHeader: View {
             }
             .frame(width: 30, height: 30)
 
+            // One line each at every width: the 224pt sidebar leaves the
+            // text column ~90pt beside Select and New, and a wrapped
+            // subtitle made the header two rows tall at 960 (V-7). The full
+            // subtitle stays in the tooltip.
             VStack(alignment: .leading, spacing: 1) {
                 Text(title)
                     .orbFont(size: 14, weight: .semibold)
+                    .lineLimit(1)
                 Text(subtitle)
                     .orbFont(size: 11, weight: .medium)
                     .foregroundStyle(.secondary)
-                    .lineLimit(2)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .help(subtitle)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
             }
+            .help("\(title) — \(subtitle)")
+            .accessibilityElement(children: .combine)
             Spacer(minLength: 4)
             if let onToggleSelecting {
                 Button(isSelecting ? "Done" : "Select") {
@@ -93,6 +117,10 @@ struct ConversationRow: View {
     var isPinned: Bool = false
     var onTogglePin: (() -> Void)?
     @State private var showDeleteConfirmation = false
+    /// Set by a host whose `onDelete` offers Undo (the toast path the header
+    /// and bulk delete use). Then Delete acts at once, with no modal; hosts
+    /// still deleting permanently keep the confirmation.
+    @Environment(\.conversationDeleteIsUndoable) private var deleteIsUndoable
 
     var body: some View {
         Button {
@@ -156,7 +184,7 @@ struct ConversationRow: View {
                 }
             }
             Button("Delete", role: .destructive) {
-                showDeleteConfirmation = true
+                if ConversationRowDeletePolicy.needsConfirmation(undoable: deleteIsUndoable) { showDeleteConfirmation = true } else { onDelete() }
             }
         }
         .accessibilityLabel("Session, \(conversation.title)\(isPinned ? ", pinned" : "")")
