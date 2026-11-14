@@ -164,7 +164,7 @@ final class TestRunner: ObservableObject {
     /// True once the user asked for every stored result.
     @Published var showsAllResults = false
 
-    typealias AgentRun = (String, String, String, URL, String, @escaping @MainActor (String) -> Void) async throws -> NativeAgentRunResult
+    typealias AgentRun = (String, String, String, URL, String, @escaping @MainActor @Sendable (String) -> Void) async throws -> NativeAgentRunResult
     private let client: any OpenRouterClientProtocol
     private let agentRun: AgentRun?
     private let agentToolExecutor: NativeAgentRunner.ToolExecutor?
@@ -199,7 +199,7 @@ final class TestRunner: ObservableObject {
     static let projectMaximumTurns = 30
 
     private func runProject(prompt: String, modelID: String, key: String, directory: URL,
-                            systemPrompt: String, activity: @escaping @MainActor (String) -> Void) async throws -> NativeAgentRunResult {
+                            systemPrompt: String, activity: @escaping @MainActor @Sendable (String) -> Void) async throws -> NativeAgentRunResult {
         // Each model run gets a fresh approval scope. OP Mode is deliberately
         // not honored here: a model-comparison batch is not an unattended Agent run.
         let approvals = ApprovalCoordinator()

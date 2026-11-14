@@ -1022,14 +1022,13 @@ final class ChatService: ObservableObject {
     private func installApprovalHandler() {
         let presenter = approvalPresenter
         let approvals = approvals
-        Task {
-            await approvals.setHandler { [weak self] request in
-                await self?.approvalPromptOpened(request)
-                let decision = await presenter.present(request)
-                await self?.approvalPromptClosed(request, decision: decision)
-                return decision
-            }
+        let handler: @Sendable (ApprovalCoordinator.Request) async -> ApprovalCoordinator.Decision = { [weak self] request in
+            await self?.approvalPromptOpened(request)
+            let decision = await presenter.present(request)
+            await self?.approvalPromptClosed(request, decision: decision)
+            return decision
         }
+        Task { await approvals.setHandler(handler) }
     }
 
     /// The run is blocked on the user, not executing anything: say so in the
