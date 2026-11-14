@@ -19,9 +19,12 @@ struct MCPServerConfig: Codable, Sendable, Identifiable, Equatable {
     /// config without migrated secrets re-encodes without the key. The values
     /// are REFERENCES — never secret bytes.
     var secretEnv: [String: String]? = nil
+    /// Optional folder the server starts in (`cwd` in imported configs).
+    var workingDirectory: String? = nil
 
     enum CodingKeys: String, CodingKey {
         case id, name, command, args, env, isEnabled, secretEnv
+        case workingDirectory = "cwd"
     }
 
     /// Prefix of every reference minted by the current scheme.
@@ -224,6 +227,44 @@ enum MCPToolNaming {
 
 /// Cancellation is signalled synchronously from any executor, while all pipe
 /// ownership and continuation bookkeeping remain isolated to MCPConnection.
+/// The last few KB a server wrote to stderr. Setup failures ("npm ERR! 404",
+/// "TOKEN is required", Python tracebacks) are only ever reported there.
+final class MCPStderrTail: @unchecked Sendable {
+    private let lock = NSLock()
+    private let limit: Int
+    private var data = Data()
+
+    init(limit: Int = 4_096) { self.limit = limit }
+
+    func append(_ chunk: Data) {
+        guard !chunk.isEmpty else { return }
+        lock.lock()
+        data.append(chunk)
+        if data.count > limit { data = Data(data.suffix(limit)) }
+        lock.unlock()
+    }
+
+    func reset() { lock.lock(); data.removeAll(); lock.unlock() }
+
+    /// The last `lines` non-empty lines, each trimmed; empty when silent.
+    func lastLines(_ lines: Int = 5) -> String {
+        lock.lock()
+        let text = String(decoding: data, as: UTF8.self)
+        lock.unlock()
+        return text.split(whereSeparator: \.isNewline)
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+            .suffix(lines)
+            .joined(separator: "\n")
+    }
+
+    /// `message`, followed by the stderr tail when there is one.
+    func annotate(_ message: String) -> String {
+        let tail = lastLines()
+        return tail.isEmpty ? message : message + "\nServer output:\n" + tail
+    }
+}
+
 private final class MCPWriteCancellation: @unchecked Sendable {
     private let lock = NSLock()
     private var cancelled = false
@@ -300,16 +341,27 @@ actor MCPConnection {
     /// Per-request ceiling. MCP tools can be slow (network, browsers), but an
     /// unbounded wait would hang the whole agent run.
     private let requestTimeout: Duration
+    /// `initialize` answers in well under a second from a healthy server; a
+    /// server that never answers it should fail fast, not after two minutes.
+    private let initializeTimeout: Duration
+    private let stderrTail = MCPStderrTail()
+    /// Most pages followed for one `*/list` call (`nextCursor`).
+    static let maximumListPages = 20
 
     init(
         config: MCPServerConfig,
         secretStore: CredentialSecretStore = KeychainCredentialStore(),
-        requestTimeout: Duration = .seconds(120)
+        requestTimeout: Duration = .seconds(120),
+        initializeTimeout: Duration = .seconds(30)
     ) {
         self.config = config
         self.secretStore = secretStore
         self.requestTimeout = requestTimeout
+        self.initializeTimeout = min(initializeTimeout, requestTimeout)
     }
+
+    /// The server's recent stderr, for diagnostics.
+    var recentStderr: String { stderrTail.lastLines(10) }
 
     var name: String { config.name }
     var isRunning: Bool { process?.isRunning ?? false }
@@ -363,13 +415,20 @@ actor MCPConnection {
                 // Shutdown may already have resolved this exact attempt while
                 // its owner was suspended. Do not replace that terminal result
                 // or close a newer transport started on the same actor.
-                let failure: Error
+                var failure: Error
                 if case .failure(let resolved)? = attempt.result {
                     failure = resolved
                 } else {
                     failure = cancellation.isCancelled ? CancellationError() : error
                 }
+                if !(failure is CancellationError) {
+                    // Give the user the server's own explanation. A brief
+                    // pause lets a dying server's last stderr line arrive.
+                    if stderrTail.lastLines().isEmpty { try? await Task.sleep(for: .milliseconds(150)) }
+                    failure = Self.withServerOutput(failure, tail: stderrTail)
+                }
                 if startup === attempt { closeTransport(with: failure) }
+                if !(failure is CancellationError) { lastError = failure.localizedDescription }
                 throw failure
             }
         } onCancel: {
@@ -422,6 +481,7 @@ actor MCPConnection {
         try Task.checkCancellation()
         isShuttingDown = false
         lastError = nil
+        stderrTail.reset()
 
         let task = attempt.process
         // Resolve via a login shell so `npx`, `uvx`, and friends are found even
@@ -443,6 +503,9 @@ actor MCPConnection {
             throw MCPError.launchFailed(error.localizedDescription)
         }
         task.environment = environment
+        if let directory = config.workingDirectory?.trimmingCharacters(in: .whitespacesAndNewlines), !directory.isEmpty {
+            task.currentDirectoryURL = URL(fileURLWithPath: NSString(string: directory).expandingTildeInPath, isDirectory: true)
+        }
 
         let stdinPipe = Pipe()
         let stdoutPipe = Pipe()
@@ -466,9 +529,11 @@ actor MCPConnection {
             }
         }
         stdoutSink = chunkSink
-        // Drain stderr so a chatty server cannot fill the pipe buffer and block.
+        // Drain stderr so a chatty server cannot fill the pipe buffer and
+        // block, keeping only a short tail to explain failures.
+        let tail = stderrTail
         stderrPipe.fileHandleForReading.readabilityHandler = { handle in
-            _ = handle.availableData
+            tail.append(handle.availableData)
         }
         task.terminationHandler = { [weak self] terminated in
             Task { await self?.handleTermination(terminated) }
@@ -492,6 +557,7 @@ actor MCPConnection {
 
         let initResult = try await send(
             method: "initialize",
+            timeout: initializeTimeout,
             params: .object([
                 "protocolVersion": .string("2024-11-05"),
                 // Advertise every capability ORB can consume so servers expose
@@ -581,15 +647,49 @@ actor MCPConnection {
         // A late callback from a closed transport must not tear down a newly
         // connected process on this same actor.
         guard process === terminated, !isShuttingDown else { return }
-        closeTransport(with: MCPError.transport("server exited unexpectedly"))
-        lastError = "MCP server \"\(config.name)\" exited unexpectedly."
+        let status = terminated.terminationStatus
+        let error = MCPError.transport(stderrTail.annotate("server exited unexpectedly (exit code \(status))"))
+        closeTransport(with: error)
+        lastError = stderrTail.annotate("MCP server \"\(config.name)\" exited unexpectedly (exit code \(status)).")
+    }
+
+    /// Appends the server's stderr tail to a startup failure.
+    static func withServerOutput(_ error: Error, tail: MCPStderrTail) -> Error {
+        guard !tail.lastLines().isEmpty else { return error }
+        switch error {
+        case MCPError.launchFailed(let detail): return MCPError.launchFailed(tail.annotate(detail))
+        case MCPError.transport(let detail):
+            return detail.contains("Server output:") ? error : MCPError.transport(tail.annotate(detail))
+        case MCPError.timedOut(let method): return MCPError.transport(tail.annotate("request timed out: \(method)"))
+        case MCPError.notConnected: return MCPError.transport(tail.annotate("server stopped during startup"))
+        case MCPError.protocolError(let detail): return MCPError.protocolError(tail.annotate(detail))
+        case MCPError.server(let code, let message): return MCPError.server(code: code, message: tail.annotate(message))
+        default: return error
+        }
+    }
+
+    /// Follows `nextCursor` across pages of one list method.
+    private func listAllPages(method: String, key: String) async throws -> [JSONValue]? {
+        var entries: [JSONValue] = []
+        var cursor: String?
+        var sawArray = false
+        for _ in 0..<Self.maximumListPages {
+            let params: JSONValue = cursor.map { .object(["cursor": .string($0)]) } ?? .object([:])
+            let result = try await send(method: method, params: params)
+            if let page = result.objectValue?[key]?.arrayValue {
+                sawArray = true
+                entries += page
+            }
+            guard let next = result.objectValue?["nextCursor"]?.stringValue, !next.isEmpty, next != cursor else { break }
+            cursor = next
+        }
+        return sawArray ? entries : nil
     }
 
     // MARK: Requests
 
     func listResources() async throws -> [MCPResourceDescriptor] {
-        let result = try await send(method: "resources/list", params: .object([:]))
-        guard let entries = result.objectValue?["resources"]?.arrayValue else { return [] }
+        guard let entries = try await listAllPages(method: "resources/list", key: "resources") else { return [] }
         return entries.compactMap { entry in
             guard let object = entry.objectValue,
                   let uri = object["uri"]?.stringValue else { return nil }
@@ -624,8 +724,7 @@ actor MCPConnection {
     }
 
     func listPrompts() async throws -> [MCPPromptDescriptor] {
-        let result = try await send(method: "prompts/list", params: .object([:]))
-        guard let entries = result.objectValue?["prompts"]?.arrayValue else { return [] }
+        guard let entries = try await listAllPages(method: "prompts/list", key: "prompts") else { return [] }
         return entries.compactMap { entry in
             guard let object = entry.objectValue,
                   let name = object["name"]?.stringValue else { return nil }
@@ -665,8 +764,7 @@ actor MCPConnection {
     }
 
     func listTools() async throws -> [MCPToolDescriptor] {
-        let result = try await send(method: "tools/list", params: .object([:]))
-        guard let entries = result.objectValue?["tools"]?.arrayValue else {
+        guard let entries = try await listAllPages(method: "tools/list", key: "tools") else {
             throw MCPError.protocolError("tools/list did not return a tools array")
         }
         return entries.compactMap { entry in
@@ -720,7 +818,7 @@ actor MCPConnection {
 
     // MARK: JSON-RPC plumbing
 
-    private func send(method: String, params: JSONValue) async throws -> JSONValue {
+    private func send(method: String, timeout: Duration? = nil, params: JSONValue) async throws -> JSONValue {
         let id = nextID
         nextID += 1
         let envelope = JSONValue.object([
@@ -729,16 +827,18 @@ actor MCPConnection {
             "method": .string(method),
             "params": params
         ])
-        return try await exchange(id: id, method: method, envelope: envelope, expectsReply: true)
+        return try await exchange(id: id, method: method, envelope: envelope, expectsReply: true, timeout: timeout)
     }
 
     /// One absolute deadline covers encoding, waiting for the ordered writer,
     /// the write itself, and the response. Notifications/replies use this same
     /// path, but finish when their complete frame has reached the pipe.
-    private func exchange(id: Int, method: String, envelope: JSONValue, expectsReply: Bool) async throws -> JSONValue {
+    private func exchange(
+        id: Int, method: String, envelope: JSONValue, expectsReply: Bool, timeout: Duration? = nil
+    ) async throws -> JSONValue {
         try Task.checkCancellation()
         guard process?.isRunning == true else { throw MCPError.notConnected }
-        let deadline = ContinuousClock.now + requestTimeout
+        let deadline = ContinuousClock.now + (timeout ?? requestTimeout)
         let cancellation = MCPWriteCancellation()
         let timer = Task { [weak self] in
             try? await Task.sleep(until: deadline, clock: .continuous)
@@ -948,7 +1048,10 @@ actor MCPConnection {
     /// other method with "method not found"); notifications (no id) are
     /// informational only.
     private func handleServerMessage(method: String, message: [String: JSONValue]) {
-        guard let id = message["id"], let expected = process, expected.isRunning else { return }
+        guard let id = message["id"], let expected = process, expected.isRunning else {
+            if message["id"] == nil { handleNotification(method) }
+            return
+        }
         let reply: JSONValue
         if method == "ping" {
             reply = .object(["jsonrpc": .string("2.0"), "id": id, "result": .object([:])])
@@ -965,5 +1068,42 @@ actor MCPConnection {
         Task { [weak self] in
             try? await self?.replyIfCurrent(expected, reply: reply, method: "reply/" + method)
         }
+    }
+
+    /// Servers that change their surface at runtime announce it; re-list so
+    /// new tools appear without Reconnect All.
+    private func handleNotification(_ method: String) {
+        guard isReady, startup == nil, let expected = process, expected.isRunning else { return }
+        switch method {
+        case "notifications/tools/list_changed":
+            Task { [weak self] in await self?.refreshList(.tools, expected: expected) }
+        case "notifications/resources/list_changed" where supportsResources:
+            Task { [weak self] in await self?.refreshList(.resources, expected: expected) }
+        case "notifications/prompts/list_changed" where supportsPrompts:
+            Task { [weak self] in await self?.refreshList(.prompts, expected: expected) }
+        default:
+            break
+        }
+    }
+
+    private enum ListKind { case tools, resources, prompts }
+
+    /// Count of completed list refreshes triggered by notifications (tests).
+    private(set) var listRefreshCount = 0
+
+    private func refreshList(_ kind: ListKind, expected: Process) async {
+        guard process === expected, isReady else { return }
+        switch kind {
+        case .tools:
+            guard let fresh = try? await listTools(), process === expected else { return }
+            tools = fresh
+        case .resources:
+            guard let fresh = try? await listResources(), process === expected else { return }
+            resources = fresh
+        case .prompts:
+            guard let fresh = try? await listPrompts(), process === expected else { return }
+            prompts = fresh
+        }
+        listRefreshCount += 1
     }
 }

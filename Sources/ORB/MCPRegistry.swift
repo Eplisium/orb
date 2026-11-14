@@ -89,11 +89,32 @@ actor MCPRegistry {
     nonisolated static func saveConfigs(_ configs: [MCPServerConfig]) {
         guard let data = try? JSONEncoder().encode(configs) else { return }
         UserDefaults.standard.set(data, forKey: defaultsKey)
+        NotificationCenter.default.post(name: configsDidChange, object: nil)
     }
+
+    /// Posted after `saveConfigs`, so an open settings view picks up a change
+    /// made elsewhere (e.g. OP Mode disabling a server) instead of later
+    /// overwriting it with its stale copy.
+    nonisolated static let configsDidChange = Notification.Name("ORBMCPConfigsDidChange")
 
     /// Imports a standard `mcpServers` JSON blob (Claude Desktop format) so
     /// users can paste an existing configuration.
     static func parseStandardConfig(_ text: String) throws -> [MCPServerConfig] {
+        try parseStandardConfigReport(text).configs
+    }
+
+    /// Import result: the local (stdio) servers ORB can run, plus one plain
+    /// note per entry it skipped.
+    struct ImportReport: Equatable {
+        var configs: [MCPServerConfig]
+        var warnings: [String]
+    }
+
+    /// Like `parseStandardConfig`, but a remote (URL / HTTP / SSE) entry is
+    /// skipped with a note instead of failing the whole paste, `disabled`
+    /// imports as off, and `cwd` is kept. An entry with neither a command nor
+    /// a URL is still an error, as is a paste with nothing ORB can run.
+    static func parseStandardConfigReport(_ text: String) throws -> ImportReport {
         guard let root = JSONValue.parse(text)?.objectValue else {
             throw MCPError.protocolError("Configuration is not valid JSON.")
         }
@@ -102,22 +123,106 @@ actor MCPRegistry {
         guard !servers.isEmpty else {
             throw MCPError.protocolError("No servers found. Expected an \"mcpServers\" object.")
         }
-        return try servers.keys.sorted().map { name in
-            guard let entry = servers[name]?.objectValue,
-                  let command = entry["command"]?.stringValue, !command.isEmpty else {
+        var configs: [MCPServerConfig] = []
+        var warnings: [String] = []
+        for name in servers.keys.sorted() {
+            guard let entry = servers[name]?.objectValue else {
+                throw MCPError.protocolError("Server \"\(name)\" is missing a \"command\".")
+            }
+            let transport = entry["type"]?.stringValue?.lowercased() ?? entry["transport"]?.stringValue?.lowercased()
+            let isRemote = entry["url"] != nil || entry["serverUrl"] != nil
+                || ["http", "sse", "streamable-http", "streamablehttp"].contains(transport ?? "")
+            guard let command = entry["command"]?.stringValue, !command.isEmpty else {
+                if isRemote {
+                    warnings.append("Skipped \"\(name)\": it is a remote (URL) server, and ORB only runs local command-line servers.")
+                    continue
+                }
                 throw MCPError.protocolError("Server \"\(name)\" is missing a \"command\".")
             }
             var env: [String: String] = [:]
             entry["env"]?.objectValue?.forEach { key, value in
                 if let string = value.stringValue { env[key] = string }
             }
-            return MCPServerConfig(
+            var config = MCPServerConfig(
                 name: name,
                 command: command,
                 args: entry["args"]?.arrayValue?.compactMap(\.stringValue) ?? [],
                 env: env
             )
+            if entry["disabled"]?.boolValue == true { config.isEnabled = false }
+            if let cwd = entry["cwd"]?.stringValue, !cwd.isEmpty { config.workingDirectory = cwd }
+            configs.append(config)
         }
+        guard !configs.isEmpty else {
+            throw MCPError.protocolError(
+                "Nothing to import: every server in this configuration is a remote (URL) server, and ORB only runs local command-line servers."
+            )
+        }
+        return ImportReport(configs: configs, warnings: warnings)
+    }
+
+    // MARK: - Settings helpers
+
+    /// Why `name` cannot be used for the config `id`, or nil when it can.
+    /// Names are routing keys (tool names are qualified by them), so two
+    /// servers whose keys collide would silently shadow each other.
+    nonisolated static func nameError(for name: String, id: UUID, in configs: [MCPServerConfig]) -> String? {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty { return "Give this server a name." }
+        // Case-insensitive too: "GitHub" next to "github" is never intended.
+        let key = MCPToolNaming.serverKey(trimmed).lowercased()
+        if configs.contains(where: { $0.id != id && MCPToolNaming.serverKey($0.name).lowercased() == key }) {
+            return "Another server already uses this name. Names must be unique."
+        }
+        return nil
+    }
+
+    /// A name for a new row that does not collide with an existing one.
+    nonisolated static func uniqueName(_ base: String, in configs: [MCPServerConfig]) -> String {
+        let keys = Set(configs.map { MCPToolNaming.serverKey($0.name).lowercased() })
+        if !keys.contains(MCPToolNaming.serverKey(base).lowercased()) { return base }
+        var index = 2
+        while keys.contains(MCPToolNaming.serverKey("\(base) \(index)").lowercased()) { index += 1 }
+        return "\(base) \(index)"
+    }
+
+    /// Deletes every Keychain secret a removed config referenced. Returns the
+    /// variables whose secret could not be verified as removed.
+    @discardableResult
+    nonisolated static func deleteSecrets(of config: MCPServerConfig, store: CredentialSecretStore) -> [String] {
+        (config.secretEnv ?? [:]).sorted { $0.key < $1.key }.compactMap { variable, reference in
+            store.deleteSecret(forReference: reference) ? nil : variable
+        }
+    }
+
+    /// Stores `value` as a secret env variable of `config`: the store gets
+    /// the value, the config gets only a reference (never plaintext env).
+    /// Returns the updated config, or an error string when the save failed.
+    nonisolated static func settingSecretEnv(
+        _ variable: String, value: String, in config: MCPServerConfig, store: CredentialSecretStore
+    ) -> (config: MCPServerConfig, error: String?) {
+        let key = variable.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !key.isEmpty else { return (config, "Enter a variable name.") }
+        guard !value.isEmpty else { return (config, "Enter a value.") }
+        let reference = config.secretEnv?[key] ?? MCPServerConfig.secretReference(configID: config.id, variable: key)
+        if let error = store.saveSecret(value, forReference: reference) { return (config, error) }
+        var updated = config
+        updated.env[key] = nil
+        var secrets = updated.secretEnv ?? [:]
+        secrets[key] = reference
+        updated.secretEnv = secrets
+        return (updated, nil)
+    }
+
+    /// Removes one secret env variable (reference and stored value).
+    nonisolated static func removingSecretEnv(
+        _ variable: String, from config: MCPServerConfig, store: CredentialSecretStore
+    ) -> MCPServerConfig {
+        var updated = config
+        if let reference = updated.secretEnv?[variable] { _ = store.deleteSecret(forReference: reference) }
+        updated.secretEnv?[variable] = nil
+        if updated.secretEnv?.isEmpty == true { updated.secretEnv = nil }
+        return updated
     }
 
     // MARK: - Secret migration (F01 step 5)
@@ -627,6 +732,57 @@ actor MCPRegistry {
         } catch {
             return .init(content: "Failed to expand \(name): \(error.localizedDescription)", isError: true)
         }
+    }
+
+    /// Live status per config id, for the settings rows. A row whose saved
+    /// config differs from what is running reports `needsApply`.
+    struct RowStatus: Equatable, Sendable {
+        var connected: Bool
+        var toolCount: Int
+        var error: String?
+        /// Enabled, but the running process was launched from an older
+        /// version of this row (edited since), or it is not running yet.
+        var needsApply: Bool
+    }
+
+    func rowStatuses() async -> [UUID: RowStatus] {
+        guard await joinWork() else { return [:] }
+        var rows: [UUID: RowStatus] = [:]
+        for config in configProvider() where rows[config.id] == nil {
+            let launchedKey = connectedConfigs.first { $0.value.id == config.id }?.key
+            let connection = launchedKey.flatMap { connections[$0] }
+            let running = await connection?.isRunning ?? false
+            let launched = launchedKey.flatMap { connectedConfigs[$0] }
+            let upToDate = launched == config
+            let connected = running && upToDate && isDesired(config)
+            let tools = connected ? (await connection?.tools.count ?? 0) : 0
+            let terminationError = upToDate ? await connection?.lastError : nil
+            let failure = failedConfigs[config.name] == config && isDesired(config) ? lastErrors[config.name] : nil
+            let error = connected ? nil : (terminationError ?? failure)
+            let needsApply = config.isEnabled && !connected && error == nil && launched != nil && !upToDate
+            rows[config.id] = RowStatus(connected: connected, toolCount: tools, error: error, needsApply: needsApply)
+        }
+        return rows
+    }
+
+    /// Stops the server launched from config `id`, whatever name it ran
+    /// under (the row may have been renamed since).
+    func stopServer(id: UUID) async {
+        guard await beginWork() else { return }
+        defer { endWork() }
+        for (key, config) in connectedConfigs where config.id == id {
+            connectedConfigs[key] = nil
+            if let existing = connections.removeValue(forKey: key) { await existing.shutdown() }
+            lastErrors[key] = nil
+            failedConfigs[key] = nil
+        }
+    }
+
+    /// True while a process launched from config `id` is registered.
+    func isRunning(id: UUID) async -> Bool {
+        guard let key = connectedConfigs.first(where: { $0.value.id == id })?.key,
+              let connection = connections[key] else { return false }
+        return await connection.isRunning
     }
 
     func status() async -> [(name: String, toolCount: Int, connected: Bool, error: String?)] {

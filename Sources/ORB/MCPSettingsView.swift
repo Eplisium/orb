@@ -10,11 +10,16 @@ struct MCPSettingsView: View {
     @Environment(\.dismiss) private var dismiss
 
     @State private var configs: [MCPServerConfig] = MCPRegistry.loadConfigs()
-    @State private var status: [String: String] = [:]
-    @State private var probing: Set<UUID> = []
+    /// Status text per config id (ids survive renames; names do not).
+    @State private var status: [UUID: String] = [:]
+    /// Enabled rows edited since their process was launched.
+    @State private var needsApply: Set<UUID> = []
+    @State private var probeTasks: [UUID: Task<Void, Never>] = [:]
     @State private var importText = ""
     @State private var showImport = false
     @State private var importError: String?
+    @State private var importNotes: [String] = []
+    @State private var pendingRemoval: MCPServerConfig?
     // Consent-driven secret migration (F01 step 5): per-server checkbox
     // selection (keyed by config id), in-flight markers, and the reported
     // outcome. Only variable NAMES are ever held or displayed — values are
@@ -27,6 +32,18 @@ struct MCPSettingsView: View {
         VStack(alignment: .leading, spacing: 0) {
             header
             Divider()
+
+            if !importNotes.isEmpty {
+                VStack(alignment: .leading, spacing: 3) {
+                    ForEach(importNotes, id: \.self) { note in
+                        Label(note, systemImage: "info.circle")
+                            .orbFont(size: 11)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .padding(.horizontal, 14)
+                .padding(.top, 10)
+            }
 
             if configs.isEmpty {
                 emptyState
@@ -50,6 +67,25 @@ struct MCPSettingsView: View {
         )
         .frame(maxWidth: isEmbedded ? .infinity : nil, alignment: .leading)
         .sheet(isPresented: $showImport) { importSheet }
+        // Live state on open, not only after Test or Reconnect All.
+        .task { await refreshStatus() }
+        .onReceive(NotificationCenter.default.publisher(for: MCPRegistry.configsDidChange)) { _ in
+            let saved = MCPRegistry.loadConfigs()
+            if saved != configs { configs = saved }
+        }
+        .onDisappear {
+            for task in probeTasks.values { task.cancel() }
+        }
+        .confirmationDialog(
+            "Remove \(pendingRemoval?.name ?? "this server")?",
+            isPresented: Binding(get: { pendingRemoval != nil }, set: { if !$0 { pendingRemoval = nil } }),
+            presenting: pendingRemoval
+        ) { config in
+            Button("Remove Server", role: .destructive) { remove(config) }
+            Button("Cancel", role: .cancel) { pendingRemoval = nil }
+        } message: { config in
+            Text(MCPServerRemoval.confirmationMessage(for: config))
+        }
     }
 
     private var header: some View {
@@ -90,31 +126,43 @@ struct MCPSettingsView: View {
     }
 
     private func serverRow(_ config: Binding<MCPServerConfig>) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
+        let id = config.wrappedValue.id
+        let nameError = MCPRegistry.nameError(for: config.wrappedValue.name, id: id, in: configs)
+        return VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 8) {
                 Toggle("", isOn: config.isEnabled)
                     .labelsHidden()
                     .toggleStyle(.switch)
                     .controlSize(.mini)
+                    .accessibilityLabel("Enable \(config.wrappedValue.name)")
                 TextField("Name", text: config.name)
                     .textFieldStyle(.plain)
                     .orbFont(size: 12, weight: .semibold)
                 Spacer()
-                if probing.contains(config.wrappedValue.id) {
+                if probeTasks[id] != nil {
                     ProgressView().controlSize(.mini)
+                    Button("Cancel") { cancelProbe(id) }
+                        .controlSize(.small)
                 } else {
                     Button("Test") { probe(config.wrappedValue) }
                         .controlSize(.small)
+                        .disabled(nameError != nil)
                 }
                 Button {
-                    configs.removeAll { $0.id == config.wrappedValue.id }
-                    persist()
+                    pendingRemoval = config.wrappedValue
                 } label: {
                     Image(systemName: "trash")
                         .foregroundStyle(.secondary)
                 }
                 .buttonStyle(.plain)
                 .accessibilityLabel("Remove server")
+                .help("Remove this server, stop it, and delete its Keychain values")
+            }
+
+            if let nameError {
+                Label(nameError, systemImage: "exclamationmark.triangle.fill")
+                    .orbFont(size: 11)
+                    .foregroundStyle(ORBTheme.warning)
             }
 
             Label(MCPAgentAvailability.status(isEnabled: config.wrappedValue.isEnabled),
@@ -129,12 +177,34 @@ struct MCPSettingsView: View {
 
             MCPArgumentsField(args: config.args)
 
+            TextField("Working folder (optional)", text: Binding(
+                get: { config.wrappedValue.workingDirectory ?? "" },
+                set: { config.wrappedValue.workingDirectory = $0.isEmpty ? nil : $0 }
+            ))
+            .textFieldStyle(.roundedBorder)
+            .orbFont(size: 11, design: .monospaced)
+
+            MCPEnvironmentEditor(config: config)
+
             secretConsentSection(config.wrappedValue)
 
-            if let message = status[config.wrappedValue.name] {
+            if needsApply.contains(id), config.wrappedValue.isEnabled {
+                HStack(spacing: 8) {
+                    Label("Changes not applied — the agent can't use this server until you apply them.",
+                          systemImage: "arrow.triangle.2.circlepath")
+                        .orbFont(size: 11)
+                        .foregroundStyle(ORBTheme.warning)
+                    Spacer()
+                    Button("Apply") { apply(config.wrappedValue) }
+                        .controlSize(.small)
+                        .disabled(nameError != nil)
+                }
+            } else if let message = status[id] {
                 Text(message)
                     .orbFont(size: 11)
-                    .foregroundStyle(message.hasPrefix("✓") ? .green : .red)
+                    .foregroundStyle(message.hasPrefix("✓") ? .green : (message.hasPrefix("Off") ? .secondary : .red))
+                    .textSelection(.enabled)
+                    .fixedSize(horizontal: false, vertical: true)
             }
         }
         .padding(10)
@@ -142,9 +212,18 @@ struct MCPSettingsView: View {
         .clipShape(RoundedRectangle(cornerRadius: 8))
         .onChange(of: config.wrappedValue) { oldValue, newValue in
             persist()
-            // A toggle flip connects or disconnects the server right away.
-            if oldValue.isEnabled != newValue.isEnabled {
-                applyEnablement(of: newValue)
+            switch MCPRowEdit.classify(old: oldValue, new: newValue) {
+            case .toggled:
+                // A toggle flip connects or disconnects the server right away.
+                needsApply.remove(newValue.id)
+                status[newValue.id] = nil
+                applyEnablement(of: newValue, previousName: oldValue.name)
+            case .launchInputsChanged:
+                // The old status described the old command; never keep it.
+                status[newValue.id] = nil
+                if newValue.isEnabled { needsApply.insert(newValue.id) }
+            case .unchanged:
+                break
             }
         }
     }
@@ -152,7 +231,7 @@ struct MCPSettingsView: View {
     private var footer: some View {
         HStack {
             Button {
-                configs.append(MCPServerConfig(name: "New Server", command: ""))
+                configs.append(MCPServerConfig(name: MCPRegistry.uniqueName("New Server", in: configs), command: ""))
                 persist()
             } label: {
                 Label("Add Server", systemImage: "plus")
@@ -169,6 +248,7 @@ struct MCPSettingsView: View {
                 Task {
                     await MCPRegistry.shared.shutdownAll()
                     await MCPRegistry.shared.startEnabledServers()
+                    needsApply.removeAll()
                     await refreshStatus()
                 }
             }
@@ -181,9 +261,10 @@ struct MCPSettingsView: View {
         VStack(alignment: .leading, spacing: 10) {
             Text("Paste an mcpServers configuration")
                 .font(.headline)
-            Text("The same format Claude Desktop and other MCP hosts use.")
+            Text("The same format Claude Desktop and other MCP hosts use. Remote (URL) servers are skipped; ORB runs local command-line servers.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
             TextEditor(text: $importText)
                 .orbFont(size: 11, design: .monospaced)
                 .frame(height: 200)
@@ -201,16 +282,21 @@ struct MCPSettingsView: View {
                 Button("Cancel") { showImport = false }
                 Button("Import") {
                     do {
-                        let imported = try MCPRegistry.parseStandardConfig(importText)
+                        let report = try MCPRegistry.parseStandardConfigReport(importText)
+                        let imported = report.configs
                         // Replace same-named entries so re-importing is idempotent.
+                        let replaced = configs.filter { old in imported.contains { $0.name == old.name } }
                         let names = Set(imported.map(\.name))
                         configs.removeAll { names.contains($0.name) }
                         configs += imported
                         persist()
+                        // A replaced row's Keychain values belong to its old id.
+                        for old in replaced { MCPRegistry.deleteSecrets(of: old, store: KeychainCredentialStore()) }
                         // Imported servers connect immediately, like a toggle.
                         for server in imported where server.isEnabled {
-                            applyEnablement(of: server)
+                            applyEnablement(of: server, previousName: nil)
                         }
+                        importNotes = report.warnings
                         showImport = false
                     } catch {
                         importError = error.localizedDescription
@@ -222,7 +308,6 @@ struct MCPSettingsView: View {
         .padding(16)
         .frame(width: 460)
     }
-
     // MARK: - Secret migration consent (F01 step 5)
 
     /// Lists this server's env variable NAMES and lets the user consent to
@@ -232,26 +317,12 @@ struct MCPSettingsView: View {
     /// migration call.
     @ViewBuilder
     private func secretConsentSection(_ config: MCPServerConfig) -> some View {
-        let stored = (config.secretEnv ?? [:]).keys.sorted()
+        // Stored secrets are listed by `MCPEnvironmentEditor`.
         let candidates = config.env.keys.sorted()
-
-        if !stored.isEmpty {
-            HStack(spacing: 5) {
-                Image(systemName: "lock.fill")
-                    .orbFont(size: 11)
-                    .foregroundStyle(.green)
-                Text("In the Keychain: \(stored.joined(separator: ", "))")
-                    .orbFont(size: 11)
-                    .foregroundStyle(.secondary)
-            }
-        }
 
         if !candidates.isEmpty {
             VStack(alignment: .leading, spacing: 6) {
-                Text("ENV VALUES")
-                    .orbFont(size: 11, weight: .bold)
-                    .foregroundStyle(.secondary)
-                Text("Selected values move into the macOS Keychain; the settings file keeps only a reference. Values are never shown.")
+                Text("Selected plain values move into the macOS Keychain; the settings file keeps only a reference. Values are never shown.")
                     .orbFont(size: 11)
                     .foregroundStyle(.secondary)
                 ForEach(candidates, id: \.self) { variable in
@@ -355,47 +426,200 @@ struct MCPSettingsView: View {
     /// just-imported) server connects now, and a just-disabled one is shut
     /// down — "Enabled" must be true when the switch flips, not only after
     /// Reconnect All or a relaunch.
-    private func applyEnablement(of config: MCPServerConfig) {
+    private func applyEnablement(of config: MCPServerConfig, previousName: String?) {
         Task {
             if config.isEnabled {
                 await MCPRegistry.shared.startServer(named: config.name)
             } else {
-                await MCPRegistry.shared.stopServer(named: config.name)
+                await MCPRegistry.shared.stopServer(id: config.id)
+                await MCPRegistry.shared.stopServer(named: previousName ?? config.name)
             }
             await refreshStatus()
         }
     }
 
-    private func probe(_ config: MCPServerConfig) {
-        probing.insert(config.id)
+    /// Restarts an edited, enabled server from its saved row.
+    private func apply(_ config: MCPServerConfig) {
+        needsApply.remove(config.id)
+        status[config.id] = "Connecting…"
         Task {
+            await MCPRegistry.shared.stopServer(id: config.id)
+            await MCPRegistry.shared.startServer(named: config.name)
+            await refreshStatus()
+        }
+    }
+
+    private func remove(_ config: MCPServerConfig) {
+        pendingRemoval = nil
+        cancelProbe(config.id)
+        configs.removeAll { $0.id == config.id }
+        persist()
+        status[config.id] = nil
+        needsApply.remove(config.id)
+        Task {
+            await MCPServerRemoval.finish(config, registry: MCPRegistry.shared, store: KeychainCredentialStore())
+        }
+    }
+
+    private func probe(_ config: MCPServerConfig) {
+        status[config.id] = nil
+        probeTasks[config.id] = Task {
             let outcome = await MCPRegistry.shared.probe(config)
             await MainActor.run {
-                probing.remove(config.id)
+                probeTasks[config.id] = nil
+                guard !Task.isCancelled else { return }
                 switch outcome {
                 case .success(let report):
                     let detail = report.detail.isEmpty ? "" : "\n" + report.detail
-                    status[config.name] = "✓ Connected — \(report.summary)" + detail
+                    status[config.id] = "✓ Connected — \(report.summary)" + detail
                 case .failure(let error):
-                    status[config.name] = error.localizedDescription
+                    status[config.id] = error is CancellationError ? "Test cancelled." : error.localizedDescription
                 }
             }
         }
     }
 
+    private func cancelProbe(_ id: UUID) {
+        guard let task = probeTasks.removeValue(forKey: id) else { return }
+        task.cancel()
+        status[id] = "Test cancelled."
+    }
+
     private func refreshStatus() async {
-        let rows = await MCPRegistry.shared.status()
+        let rows = await MCPRegistry.shared.rowStatuses()
         await MainActor.run {
-            for row in rows {
-                if let error = row.error {
-                    status[row.name] = error
-                } else if row.connected {
-                    status[row.name] = "✓ Connected — \(row.toolCount) tool(s)"
-                } else {
-                    status[row.name] = "Off — not connected"
-                }
+            for (id, row) in rows where probeTasks[id] == nil {
+                if row.needsApply { needsApply.insert(id) }
+                status[id] = MCPRowStatusText.text(for: row, isEnabled: configs.first { $0.id == id }?.isEnabled ?? false)
             }
         }
+    }
+}
+
+/// How one edit to a server row affects its running process.
+enum MCPRowEdit: Equatable {
+    case unchanged
+    /// The Enabled switch flipped.
+    case toggled
+    /// Name, command, arguments, folder or environment changed.
+    case launchInputsChanged
+
+    static func classify(old: MCPServerConfig, new: MCPServerConfig) -> MCPRowEdit {
+        if old.isEnabled != new.isEnabled { return .toggled }
+        return old == new ? .unchanged : .launchInputsChanged
+    }
+}
+
+/// Status line for a row, from the registry's live state.
+enum MCPRowStatusText {
+    static func text(for row: MCPRegistry.RowStatus, isEnabled: Bool) -> String {
+        if let error = row.error { return error }
+        if row.connected { return "✓ Connected — \(row.toolCount) tool\(row.toolCount == 1 ? "" : "s")" }
+        return isEnabled ? "Not connected yet." : "Off — not connected"
+    }
+}
+
+/// Deleting a server: the row goes, its process stops, and its Keychain
+/// values are deleted, so nothing keeps running or lingers in the Keychain.
+enum MCPServerRemoval {
+    static func confirmationMessage(for config: MCPServerConfig) -> String {
+        let secrets = (config.secretEnv ?? [:]).count
+        let secretNote = secrets == 0 ? "" : " Its \(secrets) Keychain value\(secrets == 1 ? "" : "s") will be deleted."
+        return "ORB stops the server if it is running.\(secretNote) This can't be undone."
+    }
+
+    /// Stops the process launched from `config` and deletes its secrets.
+    /// Returns variables whose secret could not be verified as deleted.
+    @discardableResult
+    static func finish(_ config: MCPServerConfig, registry: MCPRegistry, store: CredentialSecretStore) async -> [String] {
+        await registry.stopServer(id: config.id)
+        await registry.stopServer(named: config.name)
+        return MCPRegistry.deleteSecrets(of: config, store: store)
+    }
+}
+
+/// Env variables for one server: plain values, and secrets that go straight
+/// into the Keychain (the settings file keeps only a reference).
+private struct MCPEnvironmentEditor: View {
+    @Binding var config: MCPServerConfig
+    @State private var newKey = ""
+    @State private var newValue = ""
+    @State private var storeInKeychain = true
+    @State private var error: String?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("ENVIRONMENT")
+                .orbFont(size: 11, weight: .bold)
+                .foregroundStyle(.secondary)
+            ForEach(config.env.keys.sorted(), id: \.self) { key in
+                HStack(spacing: 6) {
+                    Text(key).orbFont(size: 11, design: .monospaced)
+                    TextField("Value", text: Binding(
+                        get: { config.env[key] ?? "" },
+                        set: { config.env[key] = $0 }
+                    ))
+                    .textFieldStyle(.roundedBorder)
+                    .orbFont(size: 11, design: .monospaced)
+                    Button { config.env[key] = nil } label: { Image(systemName: "minus.circle") }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("Remove \(key)")
+                }
+            }
+            ForEach((config.secretEnv ?? [:]).keys.sorted(), id: \.self) { key in
+                HStack(spacing: 6) {
+                    Image(systemName: "lock.fill").orbFont(size: 11).foregroundStyle(.green)
+                    Text(key).orbFont(size: 11, design: .monospaced)
+                    Text("stored in the Keychain").orbFont(size: 11).foregroundStyle(.secondary)
+                    Spacer()
+                    Button {
+                        config = MCPRegistry.removingSecretEnv(key, from: config, store: KeychainCredentialStore())
+                    } label: { Image(systemName: "minus.circle") }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("Remove \(key)")
+                }
+            }
+            HStack(spacing: 6) {
+                TextField("NAME", text: $newKey)
+                    .textFieldStyle(.roundedBorder)
+                    .orbFont(size: 11, design: .monospaced)
+                    .frame(maxWidth: 170)
+                Group {
+                    if storeInKeychain {
+                        SecureField("Value", text: $newValue)
+                    } else {
+                        TextField("Value", text: $newValue)
+                    }
+                }
+                .textFieldStyle(.roundedBorder)
+                .orbFont(size: 11, design: .monospaced)
+                Toggle("Keychain", isOn: $storeInKeychain)
+                    .toggleStyle(.checkbox)
+                    .orbFont(size: 11)
+                    .help("Store the value in the macOS Keychain; the settings file keeps only a reference")
+                Button("Add") { add() }
+                    .controlSize(.small)
+                    .disabled(newKey.trimmingCharacters(in: .whitespaces).isEmpty || newValue.isEmpty)
+            }
+            if let error {
+                Text(error).orbFont(size: 11).foregroundStyle(.red)
+            }
+        }
+    }
+
+    private func add() {
+        let key = newKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        if storeInKeychain {
+            let result = MCPRegistry.settingSecretEnv(key, value: newValue, in: config, store: KeychainCredentialStore())
+            if let failure = result.error { error = failure; return }
+            config = result.config
+        } else {
+            guard !key.isEmpty else { return }
+            config.env[key] = newValue
+        }
+        error = nil
+        newKey = ""
+        newValue = ""
     }
 }
 
@@ -506,7 +730,7 @@ enum MCPAgentAvailability {
 
     static func status(isEnabled: Bool) -> String {
         isEnabled
-            ? "Enabled: connected and offered to the Agent with Computer Access; each call needs approval. Command or argument changes apply after Reconnect All."
+            ? "Enabled: connected and offered to the Agent with Computer Access; each call needs approval. Edits apply when you press Apply."
             : "Off: never offered to the Agent"
     }
 }

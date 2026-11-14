@@ -11,7 +11,8 @@ import Foundation
 //  - Never reveals secrets: API keys, MCP env values, and Keychain items are
 //    not readable through any tool here.
 //  - Cannot change its own privileges: OP Mode itself and Computer Access are
-//    not settable, and MCP servers cannot be created, only toggled.
+//    not settable, and MCP servers cannot be created or enabled — only
+//    disabled (enabling a server is the user's per-server approval).
 //  - Cannot touch the running conversation (delete / prompt edit).
 
 /// What the control tools need from the app. ChatService conforms.
@@ -24,7 +25,15 @@ protocol ORBControlHost: AnyObject {
     func controlDelete(_ id: UUID) -> Bool
     func controlMCPConfigs() -> [MCPServerConfig]
     func controlSaveMCPConfigs(_ configs: [MCPServerConfig])
+    /// Stops a server's live process right away (after it was disabled).
+    func controlStopMCPServer(named name: String)
     var controlDefaults: UserDefaults { get }
+}
+
+extension ORBControlHost {
+    func controlStopMCPServer(named name: String) {
+        Task { await MCPRegistry.shared.stopServer(named: name) }
+    }
 }
 
 enum ORBControlTools {
@@ -94,9 +103,9 @@ enum ORBControlTools {
                 "id": id,
             ], required: ["id"]),
             def("orb_list_mcp_servers", "List configured MCP servers (name, command, enabled). Secrets are never shown."),
-            def("orb_set_mcp_server_enabled", "Enable or disable a configured MCP server; applies from the next run.", [
+            def("orb_set_mcp_server_enabled", "Disable a configured MCP server and stop it now. Enabling a server is reserved for the user in Settings.", [
                 "name": .init(type: "string", description: "Server name from orb_list_mcp_servers."),
-                "enabled": .init(type: "string", description: "true or false."),
+                "enabled": .init(type: "string", description: "false to disable. true is refused: only the user can enable a server."),
             ], required: ["name", "enabled"]),
         ]
     }
@@ -252,9 +261,17 @@ enum ORBControlTools {
             }
             var configs = host.controlMCPConfigs()
             guard let index = configs.firstIndex(where: { $0.name == serverName }) else { return fail("No MCP server named \(serverName).") }
-            configs[index].isEnabled = flag == "true"
+            if flag == "true" {
+                // Enabling is the per-server approval (ToolPolicy.agentSession)
+                // and OP Mode skips prompts, so the agent may never grant it.
+                if configs[index].isEnabled { return ok("\(serverName) is already enabled.") }
+                return fail("Only you can enable an MCP server: enabling one gives the agent new abilities. Ask the user to turn on \"\(serverName)\" in Settings → MCP Servers.")
+            }
+            let wasEnabled = configs[index].isEnabled
+            configs[index].isEnabled = false
             host.controlSaveMCPConfigs(configs)
-            return ok("\(serverName) is now \(flag == "true" ? "enabled" : "disabled"); applies from the next run.")
+            host.controlStopMCPServer(named: serverName)
+            return ok(wasEnabled ? "\(serverName) is now disabled and has been stopped." : "\(serverName) was already disabled.")
 
         default:
             return fail("Unknown ORB function: \(name)")
