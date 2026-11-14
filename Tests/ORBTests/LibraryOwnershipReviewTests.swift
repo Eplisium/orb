@@ -10,8 +10,8 @@ import Testing
 @MainActor
 struct LibraryOwnershipReviewTests {
     private func fixtureRoot() throws -> URL {
-        let root = URL(fileURLWithPath: NSHomeDirectory())
-            .appendingPathComponent(".hermes/cache/scratch/ORB-library-ownership-review-\(UUID())")
+        let root = ORBTestScratch.root
+            .appendingPathComponent("ORB-library-ownership-review-\(UUID())")
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         return root
     }

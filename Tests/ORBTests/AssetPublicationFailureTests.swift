@@ -165,8 +165,8 @@ struct AssetPublicationFailureTests {
     }
 
     private func makeRoot() throws -> URL {
-        let root = URL(fileURLWithPath: NSHomeDirectory())
-            .appendingPathComponent(".hermes/cache/scratch/ORB-asset-publication-\(UUID())", isDirectory: true)
+        let root = ORBTestScratch.root
+            .appendingPathComponent("ORB-asset-publication-\(UUID())", isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         return root
     }

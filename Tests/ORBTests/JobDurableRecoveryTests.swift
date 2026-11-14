@@ -667,8 +667,8 @@ private struct DurableJobFixture {
     var journal: URL { root.appendingPathComponent("pending-jobs", isDirectory: true) }
 
     init() throws {
-        root = URL(fileURLWithPath: NSHomeDirectory())
-            .appendingPathComponent(".hermes/cache/scratch/ORB-job-durable-\(UUID())", isDirectory: true)
+        root = ORBTestScratch.root
+            .appendingPathComponent("ORB-job-durable-\(UUID())", isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
     }
 

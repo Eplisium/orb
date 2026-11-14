@@ -560,7 +560,7 @@ private final class LibraryReviewFixture {
     let store: SavedCreationsStore
 
     init() throws {
-        root = URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent(".hermes/cache/scratch/ORB-library-review-\(UUID())")
+        root = ORBTestScratch.root.appendingPathComponent("ORB-library-review-\(UUID())")
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         databaseURL = root.appendingPathComponent("catalog.sqlite3")
         index = root.appendingPathComponent("creations.json")

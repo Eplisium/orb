@@ -10,8 +10,8 @@ import Testing
 @MainActor
 struct MediaBackendFixTests {
     private func fixtureRoot() throws -> URL {
-        let root = URL(fileURLWithPath: NSHomeDirectory())
-            .appendingPathComponent(".hermes/cache/scratch/ORB-media-fixes-\(UUID().uuidString)", isDirectory: true)
+        let root = ORBTestScratch.root
+            .appendingPathComponent("ORB-media-fixes-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         return root
     }

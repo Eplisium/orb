@@ -336,8 +336,8 @@ private final class JobRecoveryPathFixture {
     let store: SavedCreationsStore
 
     init() throws {
-        let root = URL(fileURLWithPath: NSHomeDirectory())
-            .appendingPathComponent(".hermes/cache/scratch/ORB-job-path-\(UUID().uuidString)")
+        let root = ORBTestScratch.root
+            .appendingPathComponent("ORB-job-path-\(UUID().uuidString)")
         self.root = root
         recovery = root.appendingPathComponent("RecoveryOwner/JobRecovery")
         try FileManager.default.createDirectory(at: recovery.deletingLastPathComponent(), withIntermediateDirectories: true)

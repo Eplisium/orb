@@ -7,9 +7,8 @@ import Testing
 @MainActor
 struct AssetDeletionRecoveryTests {
     private func makeRoot() throws -> URL {
-        // Deliberately avoid the user's library and the system temporary directory.
-        let scratch = URL(fileURLWithPath: NSHomeDirectory())
-            .appendingPathComponent(".hermes/cache/scratch", isDirectory: true)
+        // Deliberately avoid the user's library; use a resolved temporary root.
+        let scratch = ORBTestScratch.root
         let root = scratch.appendingPathComponent("ORB-asset-deletion-\(UUID())", isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         return root

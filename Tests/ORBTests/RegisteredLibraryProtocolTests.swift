@@ -7,7 +7,7 @@ import Testing
 @MainActor
 struct RegisteredLibraryProtocolTests {
     private func root() throws -> URL {
-        let root = URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent(".hermes/cache/scratch/ORB-registered-library-\(UUID())")
+        let root = ORBTestScratch.root.appendingPathComponent("ORB-registered-library-\(UUID())")
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         return root
     }

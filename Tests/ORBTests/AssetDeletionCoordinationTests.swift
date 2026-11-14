@@ -7,7 +7,7 @@ import Testing
 @MainActor
 struct AssetDeletionCoordinationTests {
     private func root() throws -> URL {
-        let url = URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent(".hermes/cache/scratch/ORB-deletion-coordination-\(UUID())")
+        let url = ORBTestScratch.root.appendingPathComponent("ORB-deletion-coordination-\(UUID())")
         try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
         return url
     }

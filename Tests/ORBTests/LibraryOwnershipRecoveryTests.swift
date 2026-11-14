@@ -137,8 +137,8 @@ import Testing
 @MainActor
 struct LibraryOwnershipRecoveryTests {
     private func fixtureRoot() throws -> URL {
-        let root = URL(fileURLWithPath: NSHomeDirectory())
-            .appendingPathComponent(".hermes/cache/scratch/ORB-library-ownership-\(UUID())", isDirectory: true)
+        let root = ORBTestScratch.root
+            .appendingPathComponent("ORB-library-ownership-\(UUID())", isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         return root
     }
