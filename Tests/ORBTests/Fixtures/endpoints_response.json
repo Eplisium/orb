@@ -15,11 +15,11 @@
           "input_cache_read": "0.0000025"
         },
         "quantization": null,
-        "latency_last_30m": 1200,
-        "throughput_last_30m": 85,
-        "uptime_last_5m": 0.999,
-        "uptime_last_30m": 0.998,
-        "uptime_last_1d": 0.997,
+        "latency_last_30m": {"p50": 1200, "p75": 1400, "p90": 1800, "p99": 2600},
+        "throughput_last_30m": {"p50": 85, "p75": 80, "p90": 72, "p99": 60},
+        "uptime_last_5m": 99.9,
+        "uptime_last_30m": 99.8,
+        "uptime_last_1d": 99.7,
         "supports_implicit_caching": true,
         "status": 0
       },
@@ -33,9 +33,9 @@
           "prompt": "0.000006",
           "completion": "0.000018"
         },
-        "latency_last_30m": 1500,
-        "throughput_last_30m": 70,
-        "uptime_last_5m": 0.995,
+        "latency_last_30m": null,
+        "throughput_last_30m": null,
+        "uptime_last_5m": 99.5,
         "status": 0
       }
     ]

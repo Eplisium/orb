@@ -1,0 +1,570 @@
+{
+ "data": [
+  {
+   "id": "openai/gpt-4o",
+   "canonical_slug": "openai/gpt-4o",
+   "hugging_face_id": null,
+   "name": "OpenAI: GPT-4o",
+   "created": 1715558400,
+   "description": "GPT-4o (\"o\" for \"omni\") is OpenAI's latest AI model, supporting both text and image inputs with text outputs. It maintains the intelligence level of [GPT-4 Turbo](/models/openai/gpt-4-turbo) while being twice as...",
+   "context_length": 128000,
+   "architecture": {
+    "modality": "text+image+file->text",
+    "input_modalities": [
+     "text",
+     "image",
+     "file"
+    ],
+    "output_modalities": [
+     "text"
+    ],
+    "tokenizer": "GPT",
+    "instruct_type": null
+   },
+   "pricing": {
+    "prompt": "0.0000025",
+    "completion": "0.00001",
+    "input_cache_read": "0.00000125"
+   },
+   "top_provider": {
+    "context_length": 128000,
+    "max_completion_tokens": 16384,
+    "is_moderated": true
+   },
+   "per_request_limits": null,
+   "supported_parameters": [
+    "frequency_penalty",
+    "logit_bias",
+    "logprobs",
+    "max_completion_tokens",
+    "max_tokens",
+    "prediction",
+    "presence_penalty",
+    "response_format",
+    "seed",
+    "stop",
+    "structured_outputs",
+    "temperature",
+    "tool_choice",
+    "tools",
+    "top_logprobs",
+    "top_p",
+    "web_search_options"
+   ],
+   "default_parameters": {},
+   "supported_voices": null,
+   "knowledge_cutoff": "2023-10-31",
+   "expiration_date": null,
+   "links": {
+    "details": "/api/v1/models/openai/gpt-4o/endpoints"
+   },
+   "endpoints": [
+    "/api/v1/chat/completions",
+    "/api/v1/completions",
+    "/api/v1/messages",
+    "/api/v1/responses"
+   ],
+   "benchmarks": {
+    "design_arena": [
+     {
+      "arena": "models",
+      "category": "3d",
+      "elo": 848,
+      "win_rate": 39.2,
+      "rank": 132
+     },
+     {
+      "arena": "models",
+      "category": "codecategories",
+      "elo": 850,
+      "win_rate": 34.8,
+      "rank": 144
+     },
+     {
+      "arena": "models",
+      "category": "dataviz",
+      "elo": 858,
+      "win_rate": 36,
+      "rank": 134
+     },
+     {
+      "arena": "models",
+      "category": "gamedev",
+      "elo": 895,
+      "win_rate": 42.3,
+      "rank": 140
+     },
+     {
+      "arena": "models",
+      "category": "uicomponent",
+      "elo": 875,
+      "win_rate": 38.1,
+      "rank": 139
+     },
+     {
+      "arena": "models",
+      "category": "website",
+      "elo": 823,
+      "win_rate": 31.5,
+      "rank": 150
+     }
+    ]
+   }
+  },
+  {
+   "id": "openai/gpt-4o-mini",
+   "canonical_slug": "openai/gpt-4o-mini",
+   "hugging_face_id": null,
+   "name": "OpenAI: GPT-4o-mini",
+   "created": 1721260800,
+   "description": "GPT-4o mini is OpenAI's newest model after [GPT-4 Omni](/models/openai/gpt-4o), supporting both text and image inputs with text outputs. As their most advanced small model, it is many multiples more affordable...",
+   "context_length": 128000,
+   "architecture": {
+    "modality": "text+image+file->text",
+    "input_modalities": [
+     "text",
+     "image",
+     "file"
+    ],
+    "output_modalities": [
+     "text"
+    ],
+    "tokenizer": "GPT",
+    "instruct_type": null
+   },
+   "pricing": {
+    "prompt": "0.00000015",
+    "completion": "0.0000006",
+    "input_cache_read": "0.000000075"
+   },
+   "top_provider": {
+    "context_length": 128000,
+    "max_completion_tokens": 16384,
+    "is_moderated": true
+   },
+   "per_request_limits": null,
+   "supported_parameters": [
+    "frequency_penalty",
+    "logit_bias",
+    "logprobs",
+    "max_completion_tokens",
+    "max_tokens",
+    "prediction",
+    "presence_penalty",
+    "response_format",
+    "seed",
+    "stop",
+    "structured_outputs",
+    "temperature",
+    "tool_choice",
+    "tools",
+    "top_logprobs",
+    "top_p",
+    "web_search_options"
+   ],
+   "default_parameters": {},
+   "supported_voices": null,
+   "knowledge_cutoff": "2023-10-31",
+   "expiration_date": null,
+   "links": {
+    "details": "/api/v1/models/openai/gpt-4o-mini/endpoints"
+   },
+   "endpoints": [
+    "/api/v1/chat/completions",
+    "/api/v1/completions",
+    "/api/v1/messages",
+    "/api/v1/responses"
+   ],
+   "benchmarks": {
+    "design_arena": [],
+    "artificial_analysis": {
+     "intelligence_index": null,
+     "coding_index": 11.4,
+     "agentic_index": null
+    }
+   }
+  },
+  {
+   "id": "google/gemini-2.5-flash",
+   "canonical_slug": "google/gemini-2.5-flash",
+   "hugging_face_id": "",
+   "name": "Google: Gemini 2.5 Flash",
+   "created": 1750172488,
+   "description": "Gemini 2.5 Flash is Google's state-of-the-art workhorse model, specifically designed for advanced reasoning, coding, mathematics, and scientific tasks. It includes built-in \"thinking\" capabilities, enabling it to provide responses with greater...",
+   "context_length": 1048576,
+   "architecture": {
+    "modality": "text+image+file+audio+video->text",
+    "input_modalities": [
+     "file",
+     "image",
+     "text",
+     "audio",
+     "video"
+    ],
+    "output_modalities": [
+     "text"
+    ],
+    "tokenizer": "Gemini",
+    "instruct_type": null
+   },
+   "pricing": {
+    "prompt": "0.0000003",
+    "completion": "0.0000025",
+    "image": "0.0000003",
+    "audio": "0.000001",
+    "input_audio_cache": "0.0000001",
+    "web_search": "0.014",
+    "internal_reasoning": "0.0000025",
+    "input_cache_read": "0.00000003",
+    "input_cache_write": "0.0000000833333333333333"
+   },
+   "top_provider": {
+    "context_length": 1048576,
+    "max_completion_tokens": 65535,
+    "is_moderated": false
+   },
+   "per_request_limits": null,
+   "supported_parameters": [
+    "include_reasoning",
+    "max_tokens",
+    "reasoning",
+    "response_format",
+    "seed",
+    "stop",
+    "structured_outputs",
+    "temperature",
+    "tool_choice",
+    "tools",
+    "top_p"
+   ],
+   "default_parameters": {
+    "temperature": null,
+    "top_p": null,
+    "top_k": null,
+    "frequency_penalty": null,
+    "presence_penalty": null,
+    "repetition_penalty": null
+   },
+   "supported_voices": null,
+   "knowledge_cutoff": "2025-01-31",
+   "expiration_date": null,
+   "links": {
+    "details": "/api/v1/models/google/gemini-2.5-flash/endpoints"
+   },
+   "endpoints": [
+    "/api/v1/chat/completions",
+    "/api/v1/completions",
+    "/api/v1/messages",
+    "/api/v1/responses"
+   ],
+   "benchmarks": {
+    "design_arena": [
+     {
+      "arena": "models",
+      "category": "3d",
+      "elo": 1050,
+      "win_rate": 47.4,
+      "rank": 112
+     },
+     {
+      "arena": "models",
+      "category": "codecategories",
+      "elo": 1093,
+      "win_rate": 46.9,
+      "rank": 111
+     },
+     {
+      "arena": "models",
+      "category": "dataviz",
+      "elo": 1131,
+      "win_rate": 49.1,
+      "rank": 91
+     },
+     {
+      "arena": "models",
+      "category": "gamedev",
+      "elo": 1055,
+      "win_rate": 44.3,
+      "rank": 115
+     },
+     {
+      "arena": "models",
+      "category": "uicomponent",
+      "elo": 1083,
+      "win_rate": 48.9,
+      "rank": 106
+     },
+     {
+      "arena": "models",
+      "category": "website",
+      "elo": 1107,
+      "win_rate": 47.1,
+      "rank": 111
+     },
+     {
+      "arena": "models",
+      "category": "svg",
+      "elo": 1009,
+      "win_rate": 43.1,
+      "rank": 90
+     }
+    ]
+   },
+   "reasoning": {
+    "mandatory": false
+   }
+  },
+  {
+   "id": "relace/relace-apply-3",
+   "canonical_slug": "relace/relace-apply-3",
+   "hugging_face_id": "",
+   "name": "Relace: Relace Apply 3",
+   "created": 1758891572,
+   "description": "Relace Apply 3 is a specialized code-patching LLM that merges AI-suggested edits straight into your source files. It can apply updates from GPT-4o, Claude, and others into your files at...",
+   "context_length": 256000,
+   "architecture": {
+    "modality": "text->text",
+    "input_modalities": [
+     "text"
+    ],
+    "output_modalities": [
+     "text"
+    ],
+    "tokenizer": "Other",
+    "instruct_type": null
+   },
+   "pricing": {
+    "prompt": "0.00000085",
+    "completion": "0.00000125"
+   },
+   "top_provider": {
+    "context_length": 256000,
+    "max_completion_tokens": 128000,
+    "is_moderated": false
+   },
+   "per_request_limits": null,
+   "supported_parameters": [
+    "max_tokens",
+    "seed",
+    "stop"
+   ],
+   "default_parameters": {
+    "temperature": null,
+    "top_p": null,
+    "frequency_penalty": null
+   },
+   "supported_voices": null,
+   "knowledge_cutoff": null,
+   "expiration_date": null,
+   "links": {
+    "details": "/api/v1/models/relace/relace-apply-3/endpoints"
+   },
+   "endpoints": [
+    "/api/v1/chat/completions",
+    "/api/v1/completions",
+    "/api/v1/messages",
+    "/api/v1/responses"
+   ]
+  },
+  {
+   "id": "google/gemini-4-hydrogen:batch",
+   "canonical_slug": "google/gemini-4-hydrogen-20261112",
+   "hugging_face_id": null,
+   "name": "Google: Gemini 4 Hydrogen (batch)",
+   "created": 1794506460,
+   "description": "Gemini 4 Hydrogen is the high-efficiency workhorse model of the Gemini 4 family from Google, built for high-throughput agentic workflows, coding and multi-model routing at lower cost and latency than...",
+   "context_length": 1048576,
+   "architecture": {
+    "modality": "text+image+file+audio+video->text",
+    "input_modalities": [
+     "audio",
+     "file",
+     "image",
+     "text",
+     "video"
+    ],
+    "output_modalities": [
+     "text"
+    ],
+    "tokenizer": "Gemini",
+    "instruct_type": null
+   },
+   "pricing": {
+    "prompt": "0.00000075",
+    "completion": "0.00000375",
+    "image": "0.00000075",
+    "audio": "0.00000075",
+    "input_audio_cache": "0.0000000375",
+    "web_search": "0.014",
+    "internal_reasoning": "0.00000375",
+    "input_cache_read": "0.0000000375",
+    "input_cache_write": "0.0000000833333333333333"
+   },
+   "top_provider": {
+    "context_length": 1048576,
+    "max_completion_tokens": 943718,
+    "is_moderated": false
+   },
+   "per_request_limits": null,
+   "supported_parameters": [
+    "include_reasoning",
+    "max_tokens",
+    "reasoning",
+    "reasoning_effort",
+    "response_format",
+    "seed",
+    "stop",
+    "structured_outputs",
+    "temperature",
+    "tool_choice",
+    "tools",
+    "top_p"
+   ],
+   "default_parameters": {
+    "temperature": null,
+    "top_p": null,
+    "top_k": null,
+    "frequency_penalty": null,
+    "presence_penalty": null,
+    "repetition_penalty": null
+   },
+   "supported_voices": null,
+   "knowledge_cutoff": null,
+   "expiration_date": null,
+   "links": {
+    "details": "/api/v1/models/google/gemini-4-hydrogen-20261112/endpoints"
+   },
+   "endpoints": [
+    "/api/v1/batches"
+   ],
+   "benchmarks": {
+    "design_arena": [
+     {
+      "arena": "agents",
+      "category": "pdf",
+      "elo": 1225,
+      "win_rate": 55.2,
+      "rank": 12
+     },
+     {
+      "arena": "models",
+      "category": "3d",
+      "elo": 1422,
+      "win_rate": 66.8,
+      "rank": 7
+     },
+     {
+      "arena": "models",
+      "category": "gamedev",
+      "elo": 1367,
+      "win_rate": 57.4,
+      "rank": 7
+     },
+     {
+      "arena": "models",
+      "category": "website",
+      "elo": 1321,
+      "win_rate": 58.3,
+      "rank": 7
+     }
+    ]
+   },
+   "reasoning": {
+    "mandatory": true,
+    "supported_efforts": [
+     "xhigh",
+     "high",
+     "medium",
+     "low"
+    ],
+    "default_effort": "medium"
+   }
+  },
+  {
+   "id": "cohere/embed-5-fast",
+   "canonical_slug": "cohere/embed-5-fast-20261029",
+   "hugging_face_id": null,
+   "name": "Cohere: Embed 5 Fast",
+   "created": 1793739025,
+   "description": "Embed 5 Fast is the lower-latency, cost-efficient tier of Cohere's Embed 5 family of multimodal embedding models (about 1B parameters). It embeds text, images, and interleaved text and image content...",
+   "context_length": 128000,
+   "architecture": {
+    "modality": "text+image->embeddings",
+    "input_modalities": [
+     "text",
+     "image"
+    ],
+    "output_modalities": [
+     "embeddings"
+    ],
+    "tokenizer": "Cohere",
+    "instruct_type": null
+   },
+   "pricing": {
+    "prompt": "0.00000008",
+    "completion": "0",
+    "image_token": "0.0000004"
+   },
+   "top_provider": {
+    "context_length": 128000,
+    "max_completion_tokens": 115200,
+    "is_moderated": true
+   },
+   "per_request_limits": null,
+   "supported_parameters": [],
+   "default_parameters": {},
+   "supported_voices": null,
+   "knowledge_cutoff": null,
+   "expiration_date": null,
+   "links": {
+    "details": "/api/v1/models/cohere/embed-5-fast-20261029/endpoints"
+   },
+   "endpoints": [
+    "/api/v1/embeddings"
+   ]
+  },
+  {
+   "id": "recraft/recraft-v4.1-flash-v2",
+   "canonical_slug": "recraft/recraft-v4.1-flash-v2-20261113",
+   "hugging_face_id": null,
+   "name": "Recraft: Recraft V4.1 Flash V2",
+   "created": 1794608385,
+   "description": "Recraft V4.1 Flash V2 is a text-to-image model from Recraft, an updated version of [Recraft V4.1 Flash](/recraft/recraft-v4.1-flash) in the speed tier of the V4.1 family. It is suited for rapid...",
+   "context_length": 65536,
+   "architecture": {
+    "modality": "text->image",
+    "input_modalities": [
+     "text"
+    ],
+    "output_modalities": [
+     "image"
+    ],
+    "tokenizer": "Other",
+    "instruct_type": null
+   },
+   "pricing": {
+    "prompt": "0",
+    "completion": "0",
+    "image_token": "0.00000167664670658683",
+    "image_output": "0.00000167664670658683"
+   },
+   "top_provider": {
+    "context_length": 65536,
+    "max_completion_tokens": 58982,
+    "is_moderated": false
+   },
+   "per_request_limits": null,
+   "supported_parameters": [],
+   "default_parameters": {},
+   "supported_voices": null,
+   "knowledge_cutoff": null,
+   "expiration_date": null,
+   "links": {
+    "details": "/api/v1/models/recraft/recraft-v4.1-flash-v2-20261113/endpoints"
+   },
+   "endpoints": [
+    "/api/v1/images"
+   ]
+  }
+ ]
+}

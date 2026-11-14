@@ -206,7 +206,7 @@ struct ModelSelectionTests {
 
         loader.enqueue("https://openrouter.ai/api/v1/models/openai/gpt-a/endpoints", json: endpointsJSON(provider: "Provider-A-2"))
         // refresh() also fetches the model catalog; answer it so the await completes.
-        loader.enqueue("https://openrouter.ai/api/v1/models", json: #"{"data":[]}"#)
+        loader.enqueue(APIService.catalogURL.absoluteString, json: #"{"data":[]}"#)
         await vm.refresh()
         let refetched = await waitUntil { loader.callCount("openai/gpt-a") == 2 }
         #expect(refetched)

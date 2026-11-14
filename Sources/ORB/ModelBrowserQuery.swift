@@ -66,29 +66,128 @@ enum ModelSorter {
     }
 }
 
-/// Lower-cased "id name provider description" per model, built once per
-/// catalog load.
+/// Lower-cased search fields per model, built once per catalog load.
 struct ModelSearchIndex {
-    private let blobs: [String: String]
+    struct Fields {
+        let id: String
+        let slug: String
+        let name: String
+        let title: String
+        let provider: String
+        let author: String
+        let description: String
+        /// Everything joined, for the every-term-appears filter.
+        let blob: String
+    }
+
+    private let fields: [String: Fields]
 
     init(_ models: [ModelInfo]) {
-        var map: [String: String] = [:]
+        var map: [String: Fields] = [:]
         map.reserveCapacity(models.count)
         for m in models {
-            map[m.id] = [m.id, m.name, m.provider, m.description ?? ""].joined(separator: "\n").lowercased()
+            let description = (m.description ?? "").lowercased()
+            let f = Fields(
+                id: m.id.lowercased(), slug: m.modelSlug.lowercased(), name: m.name.lowercased(),
+                title: m.displayTitle.lowercased(), provider: m.provider.lowercased(),
+                author: m.authorName.lowercased(), description: description,
+                blob: [m.id, m.name, m.provider, m.description ?? ""].joined(separator: "\n").lowercased()
+            )
+            map[m.id] = f
         }
-        blobs = map
+        fields = map
     }
+
+    func fields(for model: ModelInfo) -> Fields? { fields[model.id] }
 
     /// Every whitespace-separated term must appear.
     func matches(_ model: ModelInfo, terms: [Substring]) -> Bool {
         guard !terms.isEmpty else { return true }
-        guard let blob = blobs[model.id] else { return false }
+        guard let blob = fields[model.id]?.blob else { return false }
         return terms.allSatisfy { blob.contains($0) }
     }
 
     static func terms(_ query: String) -> [Substring] {
         query.lowercased().split(whereSeparator: \.isWhitespace)
+    }
+}
+
+/// Relevance for a search hit. Tiers, best first: exact id/slug/name, prefix
+/// of slug/name, word-start match in slug/name, substring of slug/name,
+/// author/provider-only match, description-only match. Within a tier a
+/// shorter, earlier match wins. (Same tiering as `FuzzyMatcher` in the
+/// command palette, applied per catalog field.)
+enum ModelSearchRanker {
+    static let exact = 6, prefix = 5, wordStart = 4, substring = 3, provider = 2, description = 1
+
+    static func score(_ fields: ModelSearchIndex.Fields, query: String) -> Double {
+        let phrase = query.lowercased().split(whereSeparator: \.isWhitespace).joined(separator: " ")
+        guard !phrase.isEmpty else { return 0 }
+        let terms = phrase.split(separator: " ").map(String.init)
+        let whole = fieldScore(fields, phrase)
+        // A phrase found in the id or name (tier 3+) stands as is. Tier N
+        // scores lie in (N*1000 - 600, N*1000].
+        if terms.count == 1 || whole > Double(provider) * 1000 { return whole }
+        // Several words ("gemini flash"): the weakest word decides, so every
+        // word has to match well for the model to rank high.
+        return terms.map { fieldScore(fields, $0) }.min() ?? 0
+    }
+
+    private static func fieldScore(_ f: ModelSearchIndex.Fields, _ q: String) -> Double {
+        // The full id only counts as an exact match: its "author/" prefix
+        // would otherwise make every model of a provider a prefix hit.
+        let primary = [f.slug, f.title, f.name]
+        var best = 0.0
+        func consider(_ tier: Int, _ text: String, at offset: Int) {
+            // Tier dominates; then shorter text, then an earlier match.
+            let value = Double(tier) * 1000 - Double(min(text.count, 400)) - Double(min(offset, 400)) * 0.5
+            best = max(best, value)
+        }
+        if f.id == q { consider(exact, f.id, at: 0) }
+        // "openai/gpt" is a prefix of the id itself.
+        else if q.contains("/"), f.id.hasPrefix(q) { consider(prefix, f.id, at: 0) }
+        for text in primary where !text.isEmpty {
+            if text == q { consider(exact, text, at: 0); continue }
+            if text.hasPrefix(q) { consider(prefix, text, at: 0); continue }
+            if let start = firstWordStart(of: q, in: text) {
+                consider(wordStart, text, at: start)
+            } else if let range = text.range(of: q) {
+                consider(substring, text, at: text.distance(from: text.startIndex, to: range.lowerBound))
+            }
+        }
+        if best > 0 { return best }
+        if f.provider.contains(q) || f.author.contains(q) { consider(provider, f.provider, at: 0) }
+        if best > 0 { return best }
+        if let range = f.description.range(of: q) {
+            consider(description, "", at: f.description.distance(from: f.description.startIndex, to: range.lowerBound))
+        }
+        return best
+    }
+
+    /// Offset of the first occurrence of `q` that starts a word (after a
+    /// non-alphanumeric character or at the start).
+    private static func firstWordStart(of q: String, in text: String) -> Int? {
+        var searchStart = text.startIndex
+        while let range = text.range(of: q, range: searchStart..<text.endIndex) {
+            if range.lowerBound == text.startIndex {
+                return 0
+            }
+            let before = text[text.index(before: range.lowerBound)]
+            if !(before.isLetter || before.isNumber) {
+                return text.distance(from: text.startIndex, to: range.lowerBound)
+            }
+            searchStart = text.index(after: range.lowerBound)
+        }
+        return nil
+    }
+
+    /// Orders `models` (already in the user's sort order) by relevance;
+    /// the user's order breaks ties.
+    static func ranked(_ models: [ModelInfo], query: String, index: ModelSearchIndex) -> [ModelInfo] {
+        let scored = models.enumerated().map { offset, model in
+            (model, index.fields(for: model).map { score($0, query: query) } ?? 0, offset)
+        }
+        return scored.sorted { a, b in a.1 != b.1 ? a.1 > b.1 : a.2 < b.2 }.map(\.0)
     }
 }
 
@@ -102,16 +201,26 @@ struct BrowserQuery: Equatable {
     var sortOrder: SortOrder = .descending
     var pinFavorites = true
 
+    var isSearching: Bool { !ModelSearchIndex.terms(searchText).isEmpty }
+
     func run(_ models: [ModelInfo], index: ModelSearchIndex, isNew: (ModelInfo) -> Bool) -> [ModelInfo] {
         let terms = ModelSearchIndex.terms(searchText)
         let filtersActive = filters.isActive
         let kept = models.filter { m in
             if showFavoritesOnly, !favoriteIds.contains(m.id) { return false }
+            // Batch-only variants are hidden unless asked for; a favorited
+            // one still shows in Favorites.
+            if !filters.listsBatchVariant(m), !(showFavoritesOnly && favoriteIds.contains(m.id)) { return false }
             if showNewThisWeek, !isNew(m) { return false }
             if filtersActive, !filters.matches(m) { return false }
             return index.matches(m, terms: terms)
         }
         var result = ModelSorter.sorted(kept, by: sortField, order: sortOrder)
+        if !terms.isEmpty {
+            // While searching, match quality decides the order (pinned
+            // favorites included); the chosen sort only breaks ties.
+            return ModelSearchRanker.ranked(result, query: searchText, index: index)
+        }
         if pinFavorites, !favoriteIds.isEmpty {
             // Stable partition: favourites first, chosen order kept inside each half.
             result = result.filter { favoriteIds.contains($0.id) } + result.filter { !favoriteIds.contains($0.id) }

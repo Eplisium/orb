@@ -29,10 +29,16 @@ struct ModelInfo: Codable, Identifiable, Hashable {
     /// currently route to. Alias `/endpoints` returns nothing — fetch the
     /// target's endpoints instead.
     var aliasTarget: AliasTarget? = nil
+    /// Top-level `endpoints`: the API routes this model can be called on
+    /// (`/api/v1/chat/completions`, `/api/v1/batches`, `/api/v1/embeddings`…).
+    /// nil in caches written before ORB read the field. Decoded leniently: a
+    /// shape change drops the field instead of failing the whole catalog.
+    var apiEndpoints: LossyStringList? = nil
 
     enum CodingKeys: String, CodingKey {
         case id, name, created, description, architecture, pricing, reasoning, benchmarks
         case aliasTarget = "alias_target"
+        case apiEndpoints = "endpoints"
         case canonicalSlug = "canonical_slug"
         case huggingFaceId = "hugging_face_id"
         case contextLength = "context_length"
@@ -390,6 +396,67 @@ struct AliasTarget: Codable, Hashable {
     let slug: String
 }
 
+/// A JSON string array that never fails decoding: any other shape becomes
+/// an empty list, so one changed field can't empty the model browser.
+struct LossyStringList: Codable, Hashable, ExpressibleByArrayLiteral {
+    var values: [String]
+
+    init(_ values: [String]) { self.values = values }
+    init(arrayLiteral elements: String...) { values = elements }
+
+    init(from decoder: Decoder) throws {
+        let c = try? decoder.singleValueContainer()
+        values = (try? c?.decode(LossyArray<String>.self))?.elements ?? []
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.singleValueContainer()
+        try c.encode(values)
+    }
+}
+
+/// `PercentileStats` from `/models/{id}/endpoints` (`latency_last_30m`,
+/// `throughput_last_30m`): `{p50, p75, p90, p99}`. Older responses sent a
+/// bare number, which is kept as the median. Unauthenticated requests get
+/// null.
+struct PercentileStats: Codable, Hashable {
+    var p50: Double?
+    var p75: Double? = nil
+    var p90: Double? = nil
+    var p99: Double? = nil
+
+    init(p50: Double?, p75: Double? = nil, p90: Double? = nil, p99: Double? = nil) {
+        self.p50 = p50; self.p75 = p75; self.p90 = p90; self.p99 = p99
+    }
+
+    private enum CodingKeys: String, CodingKey { case p50, p75, p90, p99 }
+
+    init(from decoder: Decoder) throws {
+        if let single = try? decoder.singleValueContainer(), let value = try? single.decode(Double.self) {
+            self.init(p50: value)
+            return
+        }
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        func number(_ key: CodingKeys) -> Double? {
+            (try? c.decodeIfPresent(Double.self, forKey: key)) ?? LossyPrice.decode(c, key).flatMap(Double.init)
+        }
+        self.init(p50: number(.p50), p75: number(.p75), p90: number(.p90), p99: number(.p99))
+    }
+
+    /// The median, or the best-known percentile when the median is missing.
+    var typical: Double? {
+        [p50, p75, p90, p99].lazy.compactMap { $0 }.first { $0.isFinite && $0 >= 0 }
+    }
+
+    var isEmpty: Bool { typical == nil }
+
+    /// Lenient field decode: an unknown shape is nil, never an error.
+    static func decode<K: CodingKey>(_ c: KeyedDecodingContainer<K>, _ key: K) -> PercentileStats? {
+        guard let stats = try? c.decodeIfPresent(PercentileStats.self, forKey: key), !stats.isEmpty else { return nil }
+        return stats
+    }
+}
+
 /// Accepts a JSON string or number and returns its string form.
 enum LossyPrice {
     static func decode<K: CodingKey>(_ c: KeyedDecodingContainer<K>, _ key: K) -> String? {
@@ -505,8 +572,10 @@ struct ModelEndpoint: Codable, Hashable, Identifiable {
     let maxCompletionTokens: Int?
     let pricing: EndpointPricing?
     let quantization: String?
-    let latencyLast30m: Int?
-    let throughputLast30m: Int?
+    /// Time to first token, milliseconds (null for anonymous requests).
+    let latencyLast30m: PercentileStats?
+    /// Output tokens per second (null for anonymous requests).
+    let throughputLast30m: PercentileStats?
     let uptimeLast5m: Double?
     let uptimeLast30m: Double?
     let uptimeLast1d: Double?
@@ -592,6 +661,43 @@ struct ModelEndpoint: Codable, Hashable, Identifiable {
         case uptimeLast30m = "uptime_last_30m"
         case uptimeLast1d = "uptime_last_1d"
         case supportsImplicitCaching = "supports_implicit_caching"
+    }
+}
+
+extension ModelEndpoint {
+    /// Per-field lenient decoding (in an extension so the memberwise init
+    /// stays): a field whose type changes upstream becomes nil instead of
+    /// failing the whole response and emptying the Providers tab.
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        func value<T: Decodable>(_ type: T.Type, _ key: CodingKeys) -> T? {
+            try? c.decodeIfPresent(T.self, forKey: key)
+        }
+        func int(_ key: CodingKeys) -> Int? {
+            value(Int.self, key) ?? value(Double.self, key).flatMap { $0.isFinite ? Int(exactly: $0.rounded()) : nil }
+        }
+        func double(_ key: CodingKeys) -> Double? {
+            value(Double.self, key) ?? LossyPrice.decode(c, key).flatMap(Double.init)
+        }
+        self.init(
+            name: value(String.self, .name),
+            modelId: value(String.self, .modelId),
+            providerName: value(String.self, .providerName),
+            contextLength: int(.contextLength),
+            maxCompletionTokens: int(.maxCompletionTokens),
+            pricing: value(EndpointPricing.self, .pricing),
+            quantization: value(String.self, .quantization),
+            latencyLast30m: PercentileStats.decode(c, .latencyLast30m),
+            throughputLast30m: PercentileStats.decode(c, .throughputLast30m),
+            uptimeLast5m: double(.uptimeLast5m),
+            uptimeLast30m: double(.uptimeLast30m),
+            uptimeLast1d: double(.uptimeLast1d),
+            supportsImplicitCaching: value(Bool.self, .supportsImplicitCaching),
+            status: int(.status),
+            tag: value(String.self, .tag),
+            supportedParameters: (try? c.decodeIfPresent(LossyArray<String>.self, forKey: .supportedParameters))?.elements,
+            maxPromptTokens: int(.maxPromptTokens)
+        )
     }
 }
 

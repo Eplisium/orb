@@ -82,9 +82,11 @@ enum SelectionReconciliation: Equatable {
 /// and its favorite/compare state, instead of an unlabeled row.
 enum ModelRowAccessibility {
     static func label(_ model: ModelInfo, isFavorite: Bool, isComparing: Bool) -> String {
-        let provider = model.provider.trimmingCharacters(in: CharacterSet(charactersIn: "~"))
-        var parts = [model.name.isEmpty ? model.id : model.name]
-        if !provider.isEmpty { parts.append("by \(provider)") }
+        let author = model.authorName
+        var parts = [model.displayTitle]
+        if !author.isEmpty { parts.append("by \(author)") }
+        if model.isBatchOnly { parts.append("Batch API only") }
+        if model.isAlias { parts.append("alias") }
         if isFavorite { parts.append("favorite") }
         if isComparing { parts.append("in compare") }
         if model.hasExpired { parts.append("expired") }

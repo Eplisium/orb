@@ -26,10 +26,12 @@ final class BrowserViewModel: ObservableObject {
             compareIDs = Array((prefs.compareIDs ?? []).prefix(TestBatchSelection.maximumModels))
         }
         restoringPrefs = false
-        catalogChanged(self.api.models)
-        // `$models` emits synchronously on willSet with the new value, so the
+        catalogChanged(self.api.catalog)
+        // `$catalog` emits synchronously on willSet with the new value, so the
         // index/version are current before anyone reads `filteredModels`.
-        catalogSubscription = self.api.$models.dropFirst().sink { [weak self] models in
+        // The browser lists the whole catalog; Chat, Agent and Test Suite
+        // read `api.models` (chat-capable only).
+        catalogSubscription = self.api.$catalog.dropFirst().sink { [weak self] models in
             MainActor.assumeIsolated { self?.catalogChanged(models) }
         }
         // Views observe this view model, not the service, so the service's
@@ -69,8 +71,11 @@ final class BrowserViewModel: ObservableObject {
     @Published var searchText = "" {
         didSet { if searchDraft != searchText { searchDraft = searchText } }
     }
-    /// Live text in the search field.
-    @Published var searchDraft = "" {
+    /// Live text in the search field. Deliberately not published: the field
+    /// keeps its own state, so a keystroke re-renders only the field, not
+    /// the shell, the detail pane and every row (the debounced commit to
+    /// `searchText` is what the list observes).
+    var searchDraft = "" {
         didSet { scheduleSearchCommit() }
     }
     @Published var sortField: SortField = .created { didSet { persistPrefs() } }
@@ -105,6 +110,12 @@ final class BrowserViewModel: ObservableObject {
     static let searchDebounce: Duration = .milliseconds(150)
     private var searchTask: Task<Void, Never>?
 
+    /// Applies the field's text now (Return or ↓ before the debounce fires).
+    func commitSearchNow() {
+        searchTask?.cancel()
+        if searchText != searchDraft { searchText = searchDraft }
+    }
+
     private func scheduleSearchCommit() {
         searchTask?.cancel()
         guard searchDraft != searchText else { return }
@@ -124,11 +135,44 @@ final class BrowserViewModel: ObservableObject {
     private(set) var providerOptions: [String] = ["All Providers"]
     private var cachedResult: (version: Int, query: BrowserQuery, models: [ModelInfo])?
 
+    /// Batch-only variants in the catalog (hidden unless the filter shows them).
+    private(set) var batchVariantCount = 0
+
     private func catalogChanged(_ models: [ModelInfo]) {
         catalogVersion &+= 1
         searchIndex = ModelSearchIndex(models)
         providerOptions = ["All Providers"] + Set(models.map(\.provider)).sorted()
+        batchVariantCount = models.filter(\.isBatchOnly).count
         cachedResult = nil
+        rowFactsCache = [:]
+        rowFactsUnit = nil
+        newThisWeekCount = NewModelCount.distinct(models, isNew: isNewThisWeek)
+    }
+
+    /// Models the All Models list can show (batch variants only when asked).
+    var listedCatalogCount: Int {
+        api.catalog.count - (filters.showBatchVariants ? 0 : batchVariantCount)
+    }
+
+    // MARK: Row facts cache
+
+    private var rowFactsCache: [String: ModelRowFacts] = [:]
+    private var rowFactsUnit: PriceUnit?
+    /// How many times row facts were computed (tests).
+    private(set) var rowFactsBuilds = 0
+
+    /// Row text (description cleaning is several regex passes) built once
+    /// per model per catalog and price unit, not on every row render.
+    func rowFacts(for model: ModelInfo, unit: PriceUnit) -> ModelRowFacts {
+        if rowFactsUnit != unit {
+            rowFactsCache = [:]
+            rowFactsUnit = unit
+        }
+        if let cached = rowFactsCache[model.id] { return cached }
+        rowFactsBuilds += 1
+        let facts = ModelRowFacts.make(model, unit: unit)
+        rowFactsCache[model.id] = facts
+        return facts
     }
 
     private var currentQuery: BrowserQuery {
@@ -146,7 +190,7 @@ final class BrowserViewModel: ObservableObject {
         if let cached = cachedResult, cached.version == catalogVersion, cached.query == query {
             return cached.models
         }
-        let result = query.run(api.models, index: searchIndex, isNew: isNewThisWeek)
+        let result = query.run(api.catalog, index: searchIndex, isNew: isNewThisWeek)
         cachedResult = (catalogVersion, query, result)
         return result
     }
@@ -211,8 +255,8 @@ final class BrowserViewModel: ObservableObject {
     func setCompare(_ ids: [String]) {
         var seen = Set<String>()
         var unique = ids.filter { seen.insert($0).inserted }
-        if !api.models.isEmpty {
-            let known = Set(api.models.map(\.id))
+        if !api.catalog.isEmpty {
+            let known = Set(api.catalog.map(\.id))
             unique.removeAll { !known.contains($0) }
         }
         compareIDs = Array(unique.prefix(TestBatchSelection.maximumModels))
@@ -227,14 +271,14 @@ final class BrowserViewModel: ObservableObject {
 
     /// Drops IDs that vanished from a loaded catalog (never prunes against an empty one).
     func pruneCompare() {
-        guard !api.models.isEmpty else { return }
-        let known = Set(api.models.map(\.id))
+        guard !api.catalog.isEmpty else { return }
+        let known = Set(api.catalog.map(\.id))
         guard compareIDs.contains(where: { !known.contains($0) }) else { return }
         compareIDs.removeAll { !known.contains($0) }
     }
 
     var compareModels: [ModelInfo] {
-        let lookup = Dictionary(api.models.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        let lookup = Dictionary(api.catalog.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
         return compareIDs.compactMap { lookup[$0] }
     }
 
@@ -245,7 +289,7 @@ final class BrowserViewModel: ObservableObject {
     /// Stored favorites resolved against the loaded catalog. The sidebar
     /// badge and the Favorites list header both read this.
     var favoriteSummary: FavoriteSummary {
-        FavoriteSummary.make(favoriteIds: favoriteIds, catalogIds: Set(api.models.map(\.id)))
+        FavoriteSummary.make(favoriteIds: favoriteIds, catalogIds: Set(api.catalog.map(\.id)))
     }
 
     var listHeaderText: String {
@@ -351,8 +395,13 @@ final class BrowserViewModel: ObservableObject {
     /// Force-refresh endpoints for the currently selected model (e.g. retry after error).
     func refetchEndpoints() {
         guard let model = selectedModel else { return }
-        beginEndpointTransition(model)
+        beginEndpointTransition(model, useCache: false)
     }
+
+    /// Pause before a selection's `/endpoints` request, so holding ↓ through
+    /// the list sends one request for the row it stops on, not one per row.
+    /// Cached results (5 min) skip both the pause and the request.
+    var endpointFetchDelay: Duration = .milliseconds(120)
 
     private func deselect() {
         selectedModelId = nil
@@ -367,19 +416,32 @@ final class BrowserViewModel: ObservableObject {
     /// selected model ID. Results are applied only if the selection still
     /// matches the model the request was started for, so a slow response for
     /// A can never populate B's detail view.
-    private func beginEndpointTransition(_ model: ModelInfo) {
+    private func beginEndpointTransition(_ model: ModelInfo, useCache: Bool = true) {
         endpointTask?.cancel()
         selectedModelId = model.id
         selectedModel = model
+        api.endpointsError = nil
+        // A model seen in the last few minutes fills in at once, without the
+        // empty "Providers (0)" flash.
+        if useCache, let cached = api.cachedEndpoints(for: model.endpointsModelID) {
+            endpointTask = nil
+            endpoints = cached
+            isLoadingEndpoints = false
+            return
+        }
         endpoints = []
         isLoadingEndpoints = true
-        api.endpointsError = nil
+        let delay = endpointFetchDelay
         endpointTask = Task { [weak self] in
+            if delay > .zero {
+                try? await Task.sleep(for: delay)
+                guard !Task.isCancelled else { return }
+            }
             guard let api = self?.api else { return }
             // The side-effect-free load: the shared error is written below,
             // behind the same guard as the endpoints, so a cancelled or late
             // request for A can never show its failure under B.
-            let result = await api.loadEndpoints(for: model.endpointsModelID)
+            let result = await api.loadEndpoints(for: model.endpointsModelID, useCache: useCache)
             guard let self, !Task.isCancelled, self.selectedModelId == model.id else { return }
             switch result {
             case .success(let list):
@@ -401,12 +463,12 @@ final class BrowserViewModel: ObservableObject {
     /// loaded catalog doesn't contain.
     @discardableResult
     func select(id: String) -> Bool {
-        if let model = api.models.first(where: { $0.id == id }) {
+        if let model = api.catalog.first(where: { $0.id == id }) {
             pendingSelectionID = nil
             selectModel(model)
             return true
         }
-        guard api.models.isEmpty else { return false }
+        guard api.catalog.isEmpty else { return false }
         pendingSelectionID = id
         return true
     }
@@ -418,22 +480,66 @@ final class BrowserViewModel: ObservableObject {
             select(id: pending)
         }
         loadFavorites()
-        newThisWeekCount = api.models.filter { isNewThisWeek($0) }.count
+        newThisWeekCount = NewModelCount.distinct(api.catalog, isNew: isNewThisWeek)
         // Refetch the selected model's endpoints explicitly; routing through
         // selectModel would be suppressed by the same-model equality guard.
         // ModelInfo equality is id-only, so take the refreshed value from the
         // catalog or the detail pane keeps the old price, context and expiry.
         if let current = selectedModel {
-            beginEndpointTransition(api.models.first { $0.id == current.id } ?? current)
+            beginEndpointTransition(api.catalog.first { $0.id == current.id } ?? current, useCache: false)
         }
         // Restored or deep-linked compare ids the catalog no longer has would
         // otherwise count as selected with no column and no row to remove them.
         pruneCompare()
     }
 
+    /// Why `id` can't be opened in Chat or the Agent, or nil when it can
+    /// (ids the catalog doesn't know are let through: it may not be loaded).
+    func handoffBlockReason(_ destination: ModelHandoff.Destination, id: String) -> String? {
+        guard let model = api.catalog.first(where: { $0.id == id }) else { return nil }
+        return ModelHandoff.unavailableReason(destination, for: model)
+    }
+
+    /// A catalog older than this is refreshed when ORB becomes active again.
+    static let staleCatalogInterval: TimeInterval = 3600
+
+    /// Whether returning to the app should refresh the catalog in the
+    /// background (never while a refresh is running or before the first).
+    func catalogIsStale(now: Date = Date()) -> Bool {
+        guard !api.isLoading, let last = api.lastRefresh else { return false }
+        return now.timeIntervalSince(last) > Self.staleCatalogInterval
+    }
+
     func isNewThisWeek(_ model: ModelInfo) -> Bool {
         guard let d = model.createdDate else { return false }
         return d > Date().addingTimeInterval(-7 * 86400)
+    }
+
+    /// "Alias of X →", palette and `orb://` model links: show `id` without
+    /// touching the user's filters or search. Returns the section to show it
+    /// in (the current one when it can contain the model), or nil when a
+    /// loaded catalog has no such model. A model the filters hide stays in
+    /// detail under the "Not in the current list" banner.
+    func reveal(id: String, from current: SidebarSection) -> SidebarSection? {
+        let model = api.catalog.first { $0.id == id }
+        let target = BrowserReveal.section(
+            current: current, isFavorite: favoriteIds.contains(id), isNew: model.map(isNewThisWeek) ?? false
+        )
+        return select(id: id) ? target : nil
+    }
+}
+
+/// The New Models badge counts distinct models: `:batch` variants and
+/// `:free` copies of a model listed in the same week are not extra models.
+enum NewModelCount {
+    static func distinct(_ models: [ModelInfo], isNew: (ModelInfo) -> Bool) -> Int {
+        Set(models.filter { !$0.isBatchOnly && isNew($0) }.map { baseID($0.id) }).count
+    }
+
+    /// "vendor/model" for "vendor/model:free" (also ":batch", ":extended").
+    static func baseID(_ id: String) -> String {
+        guard let colon = id.lastIndex(of: ":"), id[..<colon].contains("/") else { return id }
+        return String(id[..<colon])
     }
 }
 
@@ -532,6 +638,8 @@ struct ContentView: View {
     @EnvironmentObject private var environment: AppEnvironment
     @Environment(\.openSettings) private var openSettings
     @FocusState private var searchFocused: Bool
+    @FocusState private var listFocused: Bool
+    @AppStorage(PriceUnit.defaultsKey) private var priceUnit: PriceUnit = .perMillion
     @ObservedObject private var appLock = AppLock.shared
     @State private var startedPostUnlockWork = false
     @State private var showOnboarding = false
@@ -637,10 +745,17 @@ struct ContentView: View {
         }
         .onChange(of: focusManager.searchFocused) { _, newValue in
             if newValue {
-                select(.allModels)
+                // Search the collection on screen (Favorites stays Favorites).
+                let target = BrowserFind.target(current: selectedSection)
+                if target != selectedSection { select(target) }
                 searchFocused = true
                 focusManager.searchFocused = false
             }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+            // Stale-while-revalidate: the old list stays up during the refresh.
+            guard appLock.isUnlocked, vm.catalogIsStale() else { return }
+            Task { await vm.refresh() }
         }
         .onChange(of: vm.selectedModel?.id, initial: true) { _, id in
             shell.focusedModelID = selectedSection.isBrowser ? id : nil
@@ -678,14 +793,17 @@ struct ContentView: View {
         .orbToastHost(AppToasts.center)
         .toolbar {
             ToolbarItemGroup(placement: .primaryAction) {
-                Button {
-                    perform(.refreshModels)
-                } label: {
-                    Label("Refresh Models", systemImage: "arrow.clockwise")
+                // Only where the catalog is on screen; ⌘R still works anywhere.
+                if selectedSection.isBrowser {
+                    Button {
+                        perform(.refreshModels)
+                    } label: {
+                        Label("Refresh Models", systemImage: "arrow.clockwise")
+                    }
+                    .help("Refresh the model catalog from OpenRouter (⌘R)")
+                    .disabled(vm.api.isLoading)
+                    .accessibilityLabel("Refresh models")
                 }
-                .help("Refresh models from OpenRouter (⌘R)")
-                .disabled(vm.api.isLoading)
-                .accessibilityLabel("Refresh models")
 
                 Button {
                     perform(.showPalette)
@@ -792,10 +910,11 @@ struct ContentView: View {
         case .showPalette:
             activeSheet = .palette
         case .selectModel(let id):
-            select(.allModels)
-            vm.searchText = ""
-            vm.clearAllFilters()
-            if !vm.select(id: id) {
+            // Keeps filters, search and (when it can hold the model) the
+            // current collection; see BrowserViewModel.reveal.
+            if let target = vm.reveal(id: id, from: selectedSection) {
+                if target != selectedSection { select(target) }
+            } else {
                 AppToasts.center.show("No model with id \(id)", kind: .warning, duration: 3)
             }
         case .compareModels(let ids):
@@ -803,9 +922,19 @@ struct ContentView: View {
             CompareHandoff.shared.stage(eligible)
             select(.testSuite)
         case .chatWithModel(let id):
+            // The Model menu and links can name a batch-only or image model;
+            // say why instead of opening a chat that can only fail.
+            if let reason = vm.handoffBlockReason(.chat, id: id) {
+                AppToasts.center.show(reason, kind: .warning, duration: 4)
+                return
+            }
             select(.chat)
             _ = chatService.newConversation(modelId: id, mode: .chat)
         case .agentWithModel(let id):
+            if let reason = vm.handoffBlockReason(.agent, id: id) {
+                AppToasts.center.show(reason, kind: .warning, duration: 4)
+                return
+            }
             select(.agent)
             _ = agentService.newConversation(modelId: id, mode: .agent)
         case .openConversation(let id, let mode):
@@ -838,6 +967,8 @@ struct ContentView: View {
     /// the in-view New button create sessions with the same model.
     private func preferredModelId(for mode: PlaygroundMode) -> String {
         let key = (mode == .chat) ? PlaygroundModelDefaults.chatKey : PlaygroundModelDefaults.agentKey
+        // TODO(wave2): resolve through chat-core's CatalogModelPreference;
+        // the selected browser model may be one Chat can't run (batch/image).
         let fallback = vm.selectedModel?.id ?? vm.api.models.first?.id ?? "openai/gpt-4o"
         return PlaygroundModelDefaults.resolve(
             storedModelId: UserDefaults.standard.string(forKey: key) ?? "",
@@ -847,7 +978,7 @@ struct ContentView: View {
     }
 
     private var paletteIndex: PaletteIndex {
-        let favorites = vm.api.models
+        let favorites = vm.api.catalog
             .filter { vm.favoriteIds.contains($0.id) }
             .map { PaletteModel(id: $0.id, name: $0.name) }
         let chats = chatService.conversations.filter { $0.mode == .chat }
@@ -925,7 +1056,7 @@ struct ContentView: View {
 
     private func sidebarCount(_ section: SidebarSection) -> Int {
         switch section {
-        case .allModels: return vm.api.models.count
+        case .allModels: return vm.listedCatalogCount
         case .favorites: return vm.favoriteSummary.available
         case .newThisWeek: return vm.newThisWeekCount
         default: return 0
@@ -954,8 +1085,8 @@ struct ContentView: View {
     private var listState: BrowserListState {
         BrowserListState.resolve(
             isLoading: vm.api.isLoading,
-            hasModels: !vm.api.models.isEmpty,
-            error: vm.api.errorMessage ?? (vm.api.models.isEmpty ? nil : vm.api.lastRefreshError),
+            hasModels: !vm.api.catalog.isEmpty,
+            error: vm.api.errorMessage ?? (vm.api.catalog.isEmpty ? nil : vm.api.lastRefreshError),
             resultCount: vm.filteredModels.count,
             hasRefinements: vm.hasActiveRefinements,
             lastUpdated: vm.api.lastRefresh
@@ -963,22 +1094,13 @@ struct ContentView: View {
     }
 
     private var searchBar: some View {
-        HStack {
-            Image(systemName: "magnifyingglass")
-                .foregroundStyle(.secondary)
-            TextField("Search models...", text: $vm.searchDraft)
-                .textFieldStyle(.plain)
-                .focused($searchFocused)
-            if !vm.searchDraft.isEmpty {
-                Button { vm.searchText = "" } label: {
-                    Image(systemName: "xmark.circle.fill")
-                        .foregroundStyle(.secondary)
-                }
-                .buttonStyle(.plain)
-                .help("Clear search")
-                .accessibilityLabel("Clear search")
-            }
-        }
+        BrowserSearchField(
+            appliedText: vm.searchText,
+            focus: $searchFocused,
+            onDraftChange: { [vm] in vm.searchDraft = $0 },
+            onClear: { [vm] in vm.searchText = "" },
+            onKey: { key in handleSearchKey(key) }
+        )
         .font(ORBFont.body)
         .padding(.horizontal, 10)
         .padding(.vertical, 8)
@@ -987,6 +1109,30 @@ struct ContentView: View {
         .padding(.horizontal, 14)
         .padding(.top, 12)
         .padding(.bottom, 8)
+    }
+
+    /// ↓ / Return / Esc in the search field. Returns whether it was handled.
+    private func handleSearchKey(_ key: BrowserSearchKeys.Key) -> Bool {
+        vm.commitSearchNow()
+        let results = vm.filteredModels
+        let selectionVisible = vm.selectedModel.map { selected in results.contains { $0.id == selected.id } } ?? false
+        switch BrowserSearchKeys.action(
+            for: key, hasQuery: !vm.searchText.isEmpty, resultCount: results.count, selectionVisible: selectionVisible
+        ) {
+        case .focusList(let selectFirst):
+            if selectFirst, let first = results.first { vm.selectModel(first) }
+            listFocused = true
+            return true
+        case .openFirst:
+            if let first = results.first { vm.selectModel(first) }
+            listFocused = true
+            return true
+        case .clear:
+            vm.searchText = ""
+            return true
+        case .ignored:
+            return false
+        }
     }
 
     /// One compact row: Filters popover, sort field + direction, pin toggle.
@@ -1063,17 +1209,14 @@ struct ContentView: View {
             .help("Export the models shown as CSV or JSON")
             .accessibilityLabel("Export model list")
             Spacer()
+            // The cached catalog stays on screen while a refresh runs; this
+            // spinner is the only sign of it. (Refresh itself is the toolbar
+            // button and ⌘R.)
             if vm.api.isLoading {
                 ProgressView()
                     .scaleEffect(0.6)
-            } else {
-                Button { Task { await vm.refresh() } } label: {
-                    Image(systemName: "arrow.clockwise")
-                        .font(.caption)
-                }
-                .buttonStyle(.plain)
-                .help("Refresh models from OpenRouter")
-                .accessibilityLabel("Refresh models")
+                    .help("Refreshing the catalog…")
+                    .accessibilityLabel("Refreshing the catalog")
             }
             if let ts = vm.api.lastRefresh {
                 Text("Updated \(ts.formatted(.relative(presentation: .named)))")
@@ -1123,18 +1266,25 @@ struct ContentView: View {
             let comparing = Set(vm.compareIDs)
             let anyComparing = !comparing.isEmpty
             let copied = vm.copiedModelId
+            let selectedID = vm.selectedModel?.id
+            let unit = priceUnit
+            let actions = rowActions
             List(vm.filteredModels, selection: $vm.selectedModel) { model in
                 ModelRowView(
                     model: model,
+                    facts: vm.rowFacts(for: model, unit: unit),
                     isFavorite: favorites.contains(model.id),
                     isComparing: comparing.contains(model.id),
                     anyComparing: anyComparing,
                     isCopied: copied == model.id,
-                    actions: rowActions
+                    isSelected: selectedID == model.id,
+                    actions: actions
                 )
+                .equatable()
                 .tag(model)
             }
             .listStyle(.inset)
+            .focused($listFocused)
             .accessibilityLabel("Models")
             .onChange(of: vm.selectedModel) { _, newValue in
                 vm.selectModel(newValue)
@@ -1170,13 +1320,66 @@ struct ContentView: View {
                 }
                 Text("Select a model")
                     .font(.title2.weight(.semibold))
-                Text(vm.api.models.isEmpty
+                Text(vm.api.catalog.isEmpty
                      ? "Loading the OpenRouter catalog…"
-                     : "\(vm.api.models.count) models from \(max(vm.providerOptions.count - 1, 0)) model authors")
+                     : "\(vm.listedCatalogCount) models from \(max(vm.providerOptions.count - 1, 0)) model authors")
                     .orbFont(size: 13)
                     .foregroundStyle(.secondary)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+    }
+}
+
+// MARK: - Search field
+
+/// The browser search field. It owns the text being typed, so keystrokes
+/// re-render only this view; the view model debounces the text into the
+/// applied query. ↓ moves into the results, Return opens the top hit, Esc
+/// clears the query.
+struct BrowserSearchField: View {
+    /// The query the list currently applies; external changes (Clear
+    /// filters, a deep link) are copied into the field.
+    let appliedText: String
+    var focus: FocusState<Bool>.Binding
+    let onDraftChange: (String) -> Void
+    let onClear: () -> Void
+    /// Returns whether the key was handled.
+    let onKey: (BrowserSearchKeys.Key) -> Bool
+    @State private var draft = ""
+
+    var body: some View {
+        HStack {
+            Image(systemName: "magnifyingglass")
+                .foregroundStyle(.secondary)
+                .accessibilityHidden(true)
+            TextField("Search models...", text: $draft)
+                .textFieldStyle(.plain)
+                .focused(focus)
+                .accessibilityLabel("Search models")
+                .accessibilityHint("Press Down Arrow to move into the results")
+                .onSubmit { _ = onKey(.submit) }
+                .onKeyPress(.downArrow) { onKey(.down) ? .handled : .ignored }
+                .onKeyPress(.escape) { onKey(.escape) ? .handled : .ignored }
+            if !draft.isEmpty {
+                Button {
+                    draft = ""
+                    onClear()
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .foregroundStyle(.secondary)
+                }
+                .buttonStyle(.plain)
+                .help("Clear search")
+                .accessibilityLabel("Clear search")
+            }
+        }
+        .onAppear { draft = appliedText }
+        .onChange(of: draft) { _, value in onDraftChange(value) }
+        .onChange(of: appliedText) { _, value in
+            // The debounced commit equals the draft; anything else came from
+            // outside the field.
+            if value != draft { draft = value }
         }
     }
 }

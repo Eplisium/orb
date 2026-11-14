@@ -24,7 +24,7 @@ private func auditModel(id: String, name: String = "Old Name") -> ModelInfo {
     )
 }
 
-private let catalogURL = "https://openrouter.ai/api/v1/models"
+private let catalogURL = APIService.catalogURL.absoluteString
 private func endpointsURL(_ id: String) -> String { "https://openrouter.ai/api/v1/models/\(id)/endpoints" }
 private let noEndpoints = #"{"data":{"id":"fixture","name":"Fixture","endpoints":[]}}"#
 private func oneEndpoint(_ provider: String) -> String {
@@ -309,18 +309,18 @@ struct BrowserFactsAuditTests {
         #expect(ModelRowFacts.firstLine(of: nil) == nil)
     }
 
-    @Test("Uptime shows one decimal place and reads fractions and percentages alike")
+    @Test("Uptime shows one decimal place; values are percentages, so 1 is a 1% outage")
     func uptime() {
         #expect(EndpointUptime.label(99.997) == "Uptime 99.9%")
         #expect(EndpointUptime.label(99.89481609843396) == "Uptime 99.9%")
         #expect(EndpointUptime.label(97.27894707082307) == "Uptime 97.3%")
-        #expect(EndpointUptime.label(0.997) == "Uptime 99.7%")
+        #expect(EndpointUptime.label(0.997) == "Uptime 1.0%")
         #expect(EndpointUptime.label(100) == "Uptime 100%")
-        #expect(EndpointUptime.label(1) == "Uptime 100%")
+        #expect(EndpointUptime.label(1) == "Uptime 1.0%")
         #expect(EndpointUptime.label(0) == "Uptime 0.0%")
         #expect(EndpointUptime.label(-1) == nil)
         #expect(EndpointUptime.label(.nan) == nil)
-        #expect(EndpointUptime.percent(0.5) == 50)
+        #expect(EndpointUptime.percent(0.5) == 0.5)
         #expect(EndpointUptime.percent(250) == 100)
     }
 

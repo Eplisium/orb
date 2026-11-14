@@ -25,15 +25,29 @@ struct ModelRowActions {
     var agent: (ModelInfo) -> Void
 }
 
-struct ModelRowView: View {
+/// A model list row. Equatable on its value inputs (the callbacks always
+/// route to the same view model), so with `.equatable()` SwiftUI skips rows
+/// whose model, facts and flags did not change.
+struct ModelRowView: View, Equatable {
     let model: ModelInfo
+    /// Precomputed once per catalog and price unit by the view model.
+    let facts: ModelRowFacts
     let isFavorite: Bool
     let isComparing: Bool
     let anyComparing: Bool
     let isCopied: Bool
+    var isSelected: Bool = false
     let actions: ModelRowActions
-    @AppStorage(PriceUnit.defaultsKey) private var priceUnit: PriceUnit = .perMillion
     @State private var isHovered = false
+
+    nonisolated static func == (lhs: ModelRowView, rhs: ModelRowView) -> Bool {
+        lhs.model.id == rhs.model.id && lhs.facts == rhs.facts
+            && lhs.isFavorite == rhs.isFavorite && lhs.isComparing == rhs.isComparing
+            && lhs.anyComparing == rhs.anyComparing && lhs.isCopied == rhs.isCopied
+            && lhs.isSelected == rhs.isSelected
+    }
+
+    private var handoff: Set<ModelHandoff.Destination> { ModelHandoff.available(for: model) }
 
     private func factsLine(_ facts: ModelRowFacts, price: String, elo: Bool, icons: Bool) -> some View {
         HStack(spacing: 10) {
@@ -48,10 +62,15 @@ struct ModelRowView: View {
         .fixedSize()
     }
 
+    private func titleText(_ facts: ModelRowFacts) -> some View {
+        Text(facts.title)
+            .font(ORBFont.body.weight(.medium))
+            .lineLimit(1)
+            .truncationMode(.tail)
+    }
+
     var body: some View {
-        // Built once per render and passed down. As a computed property it
-        // was rebuilt (regex cleaning included) at every one of ~16 reads.
-        let facts = ModelRowFacts.make(model, unit: priceUnit)
+        let available = handoff
         HStack(spacing: 10) {
             avatar(facts.avatarLetter)
 
@@ -63,14 +82,27 @@ struct ModelRowView: View {
                             .foregroundStyle(.yellow)
                             .accessibilityLabel("Favorite")
                     }
-                    Text(model.modelSlug)
-                        .font(ORBFont.body.weight(.medium))
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                        .help(model.id)
+                    // Human name first; the slug follows when there is room
+                    // (never as a truncated stub) and is always in the tooltip.
+                    ViewThatFits(in: .horizontal) {
+                        HStack(spacing: 6) {
+                            titleText(facts)
+                            Text(facts.slug)
+                                .orbFont(size: 11, design: .monospaced)
+                                .foregroundStyle(.tertiary)
+                                .lineLimit(1)
+                        }
+                        titleText(facts)
+                    }
+                    .help(model.id)
                     if model.isAlias {
                         Text("ALIAS").orbFont(size: 11, weight: .bold).foregroundStyle(ORBTheme.accentLink)
                             .fixedSize()
+                    }
+                    if model.isBatchOnly {
+                        Text("BATCH API").orbFont(size: 11, weight: .bold).foregroundStyle(.secondary)
+                            .fixedSize()
+                            .help(ModelHandoff.unavailableReason(.chat, for: model) ?? "Batch API")
                     }
                     if model.hasExpired {
                         Text("EXPIRED").orbFont(size: 11, weight: .bold).foregroundStyle(.red)
@@ -96,21 +128,30 @@ struct ModelRowView: View {
 
             Spacer(minLength: 8)
 
-            quickActions
+            quickActions(available)
         }
         .padding(.vertical, 4)
         .contentShape(Rectangle())
         .onHover { isHovered = $0 }
-        // One labelled element per row (model + provider + state). The
-        // hover-only quick buttons are reachable as named actions below.
+        // One labelled, selectable element per row (model + provider +
+        // state). The hover-only quick buttons are reachable as named
+        // actions below.
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(ModelRowAccessibility.label(model, isFavorite: isFavorite, isComparing: isComparing))
         .accessibilityValue(ModelRowAccessibility.value(facts))
-        .accessibilityAction(named: isFavorite ? "Remove from favorites" : "Add to favorites") { actions.toggleFavorite(model) }
-        .accessibilityAction(named: isComparing ? "Remove from compare" : "Add to compare") { actions.toggleCompare(model) }
-        .accessibilityAction(named: "Copy model ID") { actions.copyID(model) }
-        .accessibilityAction(named: "Chat with this model") { actions.chat(model) }
-        .accessibilityAction(named: "Use in the Agent") { actions.agent(model) }
+        .accessibilityHint("Shows the model's details")
+        .accessibilityAddTraits(isSelected ? [.isButton, .isSelected] : .isButton)
+        .accessibilityActions {
+            Button(isFavorite ? "Remove from favorites" : "Add to favorites") { actions.toggleFavorite(model) }
+            Button(isComparing ? "Remove from compare" : "Add to compare") { actions.toggleCompare(model) }
+            Button("Copy model ID") { actions.copyID(model) }
+            if available.contains(.chat) {
+                Button("Chat with this model") { actions.chat(model) }
+            }
+            if available.contains(.agent) {
+                Button("Use in the Agent") { actions.agent(model) }
+            }
+        }
         .contextMenu {
             Button {
                 actions.copyID(model)
@@ -129,11 +170,21 @@ struct ModelRowView: View {
                 Label(isComparing ? "Remove from Compare" : "Add to Compare", systemImage: "rectangle.split.3x1")
             }
             Divider()
-            Button { actions.chat(model) } label: {
-                Label("Chat with this Model", systemImage: "bubble.left")
+            if available.contains(.chat) {
+                Button { actions.chat(model) } label: {
+                    Label("Chat with this Model", systemImage: "bubble.left")
+                }
+            } else {
+                Button {} label: { Label(model.isBatchOnly ? "Batch API only: can't chat" : "Can't chat with this model", systemImage: "bubble.left") }
+                    .disabled(true)
             }
-            Button { actions.agent(model) } label: {
-                Label("Run in Agent", systemImage: "wand.and.stars")
+            if available.contains(.agent) {
+                Button { actions.agent(model) } label: {
+                    Label("Run in Agent", systemImage: "wand.and.stars")
+                }
+            } else if available.contains(.chat) {
+                Button {} label: { Label("Agent needs tool calling", systemImage: "wand.and.stars") }
+                    .disabled(true)
             }
             if let url = model.openRouterURL {
                 Divider()
@@ -145,16 +196,17 @@ struct ModelRowView: View {
     }
 
     private func avatar(_ letter: String) -> some View {
-        Text(letter)
+        let color = Self.providerColor(for: model.provider)
+        return Text(letter)
             .orbFont(size: 13, weight: .bold, design: .rounded)
-            .foregroundStyle(providerColor)
+            .foregroundStyle(color)
             .frame(width: 30, height: 30)
-            .background(providerColor.opacity(0.16), in: Circle())
-            .help(model.provider)
-            .accessibilityLabel("Provider \(model.provider)")
+            .background(color.opacity(0.16), in: Circle())
+            .help(facts.author.isEmpty ? model.provider : facts.author)
+            .accessibilityHidden(true)
     }
 
-    private var quickActions: some View {
+    private func quickActions(_ available: Set<ModelHandoff.Destination>) -> some View {
         HStack(spacing: 8) {
             let compareVisible = isHovered || isComparing || anyComparing
             Button { actions.toggleCompare(model) } label: {
@@ -170,7 +222,7 @@ struct ModelRowView: View {
                 Image(systemName: "bubble.left").foregroundStyle(.secondary)
             }
             .buttonStyle(.plain)
-            .hiddenUnless(isHovered)
+            .hiddenUnless(isHovered && available.contains(.chat))
             .help("Chat with this model")
             .accessibilityLabel("Chat with this model")
 
@@ -214,8 +266,13 @@ struct ModelRowView: View {
 
     private static let maxCapabilityIcons = 4
 
-    var providerColor: Color {
-        let p = model.provider.lowercased()
+    /// System palette colors cycled for providers without a hand-picked one.
+    private static let fallbackPalette: [Color] = [.blue, .green, .orange, .purple, .pink, .teal, .indigo, .mint, .cyan, .brown, .red]
+
+    /// Brand-ish colors for well-known authors; any other author gets a
+    /// stable palette slot instead of the same grey for everyone.
+    static func providerColor(for provider: String) -> Color {
+        let p = provider.lowercased().trimmingCharacters(in: CharacterSet(charactersIn: "~"))
         if p.contains("openai") { return .green }
         if p.contains("anthropic") { return .orange }
         if p.contains("google") { return .blue }
@@ -230,11 +287,11 @@ struct ModelRowView: View {
         if p.contains("x-ai") || p.contains("xai") || p.contains("grok") { return .gray }
         if p.contains("perplexity") { return .teal }
         if p.contains("nous") { return .brown }
-        if p.contains("01-ai") || p.contains("yi") { return .pink }
+        if p.contains("01-ai") { return .pink }
         if p.contains("phind") { return .indigo }
         if p.contains("sao10k") { return .purple }
         if p.contains("liquid") { return .cyan }
-        return .gray
+        return fallbackPalette[ProviderPalette.slot(for: p, count: fallbackPalette.count)]
     }
 }
 
@@ -251,7 +308,7 @@ private extension View {
 // MARK: - Model Detail
 
 enum ModelDetailTab: String, CaseIterable, Identifiable {
-    case overview = "Overview", providers = "Providers", notes = "Notes"
+    case overview = "Overview", providers = "Providers", api = "API", notes = "Notes"
     var id: String { rawValue }
 }
 
@@ -283,6 +340,8 @@ struct ModelDetailView: View {
                     case .providers:
                         endpointComparison
                         providersSection
+                    case .api:
+                        ModelSnippetPanel(model: model)
                     case .notes:
                         notesTab
                     }
@@ -309,14 +368,20 @@ struct ModelDetailView: View {
 
     @ViewBuilder
     private func detailActions(isFav: Bool, iconOnly: Bool) -> some View {
+        let chatBlocked = ModelHandoff.unavailableReason(.chat, for: model)
+        let agentBlocked = ModelHandoff.unavailableReason(.agent, for: model)
         let row = HStack(spacing: 8) {
             Button { shell.send(.chatWithModel(model.id)) } label: { Label("Chat", systemImage: "bubble.left") }
                 .buttonStyle(.borderedProminent).tint(ORBTheme.accent)
-                .help("Start a chat with this model")
-                .accessibilityLabel("Chat with \(model.name)")
+                .disabled(chatBlocked != nil)
+                .help(chatBlocked ?? "Start a chat with this model")
+                .accessibilityLabel("Chat with \(model.displayTitle)")
+                .accessibilityHint(chatBlocked ?? "")
             Button { shell.send(.agentWithModel(model.id)) } label: { Label("Agent", systemImage: "wand.and.stars") }
-                .help("Run this model in the Agent")
-                .accessibilityLabel("Use \(model.name) in the Agent")
+                .disabled(agentBlocked != nil)
+                .help(agentBlocked ?? "Run this model in the Agent")
+                .accessibilityLabel("Use \(model.displayTitle) in the Agent")
+                .accessibilityHint(agentBlocked ?? "")
             Button { viewModel.toggleFavorite(model) } label: {
                 Label(isFav ? "Favorited" : "Favorite", systemImage: isFav ? "star.fill" : "star")
             }
@@ -368,6 +433,10 @@ struct ModelDetailView: View {
                     .foregroundStyle(.secondary)
                 if model.isUnofficial { Text("UNOFFICIAL").font(ORBFont.caption.weight(.bold)).foregroundStyle(.orange) }
                 if model.isAlias { Text("ALIAS").font(ORBFont.caption.weight(.bold)).foregroundStyle(ORBTheme.accentLink) }
+                if model.isBatchOnly {
+                    Text("BATCH API").font(ORBFont.caption.weight(.bold)).foregroundStyle(.secondary)
+                        .help("Runs only through the Batch API (/api/v1/batches); Chat and Agent can't use it")
+                }
                 if model.hasExpired {
                     Text("EXPIRED").font(ORBFont.caption.weight(.bold)).foregroundStyle(.red)
                 } else if let warning = model.expirationWarning() {
@@ -384,7 +453,8 @@ struct ModelDetailView: View {
                 .buttonStyle(.link)
                 .help("Currently routes to \(target.slug). Open that model.")
             }
-            Text(model.modelSlug).orbFont(size: 22, weight: .semibold).lineLimit(2)
+            Text(model.displayTitle).orbFont(size: 22, weight: .semibold).lineLimit(2)
+                .textSelection(.enabled)
             Text(model.id)
                 .orbFont(size: 12, design: .monospaced)
                 .foregroundStyle(.secondary)
@@ -418,12 +488,15 @@ struct ModelDetailView: View {
         if eps.count > 1 {
             let cheapest = ModelEndpoint.cheapestInputPrice(in: eps)
             let unit = priceUnit
-            let fastest = eps.compactMap(\.latencyLast30m).min()
+            let fastest = eps.compactMap { $0.latencyLast30m?.typical }.min()
+            let hasStats = EndpointPerformance.hasStats(eps)
             VStack(alignment: .leading, spacing: 6) {
                 Text("Price and latency by provider").font(.headline)
                 Grid(alignment: .leading, horizontalSpacing: 18, verticalSpacing: 6) {
                     GridRow {
-                        Text("Provider"); Text("Input / \(unit.suffix)"); Text("Output / \(unit.suffix)"); Text("Latency"); Text("Throughput")
+                        Text("Provider"); Text("Input / \(unit.suffix)"); Text("Output / \(unit.suffix)")
+                        Text("Latency").help(hasStats ? "Median time to first token over the last 30 minutes" : EndpointPerformance.unavailableHelp)
+                        Text("Throughput").help(hasStats ? "Median output tokens per second over the last 30 minutes" : EndpointPerformance.unavailableHelp)
                     }
                     .font(ORBFont.caption.weight(.semibold)).foregroundStyle(.secondary)
                     ForEach(eps) { ep in
@@ -438,16 +511,24 @@ struct ModelDetailView: View {
                             }
                             Text(PriceDisplay.perToken(ep.pricing?.completion).map { PriceDisplay.amount(perToken: $0, unit: unit) } ?? "—")
                             HStack(spacing: 3) {
-                                Text(ep.latencyLast30m.map { "\($0) ms" } ?? "—")
-                                if let l = ep.latencyLast30m, l == fastest {
+                                Text(EndpointPerformance.latencyText(ep.latencyLast30m) ?? "—")
+                                if let l = ep.latencyLast30m?.typical, l == fastest, eps.count > 1 {
                                     Image(systemName: "bolt.fill").foregroundStyle(ORBTheme.success)
                                         .help("Lowest latency").accessibilityLabel("Lowest latency")
                                 }
                             }
-                            Text(ep.throughputLast30m.map { "\($0) tok/s" } ?? "—")
+                            .help(EndpointPerformance.help(ep.latencyLast30m, unit: "ms", what: "Time to first token"))
+                            Text(EndpointPerformance.throughputText(ep.throughputLast30m) ?? "—")
+                                .help(EndpointPerformance.help(ep.throughputLast30m, unit: "tokens/s", what: "Output throughput"))
                         }
                         .font(ORBFont.footnote)
                     }
+                }
+                if !hasStats {
+                    Text("Latency and throughput need a signed-in request; ORB loads provider data anonymously.")
+                        .font(ORBFont.caption)
+                        .foregroundStyle(.tertiary)
+                        .help(EndpointPerformance.unavailableHelp)
                 }
             }
         }
@@ -471,9 +552,12 @@ struct ModelDetailView: View {
     @ViewBuilder
     private var descriptionSection: some View {
         if let desc = model.description, !desc.isEmpty {
-            Text(desc)
+            // Catalog descriptions are Markdown: links open, bold renders.
+            Text(CatalogDescriptionText.attributed(desc))
                 .font(.body)
                 .foregroundStyle(.secondary)
+                .tint(ORBTheme.accentLink)
+                .textSelection(.enabled)
                 .fixedSize(horizontal: false, vertical: true)
         }
     }
@@ -489,8 +573,7 @@ struct ModelDetailView: View {
             StatCard(title: "Modality", value: model.modalityLabel, icon: "arrow.triangle.branch", color: .purple)
 
             if let maxTokens = model.topProvider?.maxCompletionTokens {
-                let formatted = maxTokens >= 1000 ? "\(maxTokens/1000)K" : "\(maxTokens)"
-                StatCard(title: "Max Output", value: formatted, icon: "text.alignleft", color: .green)
+                StatCard(title: "Max Output", value: BrowserFormat.context(maxTokens), icon: "text.alignleft", color: .green)
             }
 
             if model.isFree {
@@ -712,10 +795,13 @@ struct ProviderRow: View {
 
     var body: some View {
         HStack(spacing: 12) {
-            // Status dot
+            // Status dot, with the state in words for the tooltip and VoiceOver.
+            let status = EndpointStatusPresentation(status: endpoint.status)
             Circle()
-                .fill(endpoint.isAvailable ? Color.green : Color.red)
+                .fill(statusColor(status))
                 .frame(width: 8, height: 8)
+                .help(status.label)
+                .accessibilityLabel(status.label)
 
             VStack(alignment: .leading, spacing: 2) {
                 Text(endpoint.displayName)
@@ -763,6 +849,14 @@ struct ProviderRow: View {
         .padding(10)
         .background(.quaternary.opacity(0.3))
         .clipShape(RoundedRectangle(cornerRadius: 8))
+    }
+
+    private func statusColor(_ status: EndpointStatusPresentation) -> Color {
+        switch status {
+        case .available: return ORBTheme.success
+        case .degraded: return ORBTheme.danger
+        case .unknown: return Color.secondary.opacity(0.5)
+        }
     }
 
     private func ctxFormatted(_ ctx: Int) -> String {
@@ -897,5 +991,68 @@ struct FlowLayout: Layout {
         }
 
         return (offsets, CGSize(width: maxX, height: y + rowHeight))
+    }
+}
+
+// MARK: - API snippet
+
+/// The detail pane's API tab: a ready-to-paste request for this model in
+/// curl, Python or TypeScript. The key is always the `$OPENROUTER_API_KEY`
+/// placeholder, never the user's credential.
+struct ModelSnippetPanel: View {
+    let model: ModelInfo
+    @AppStorage("orb.browser.snippetLanguage") private var languageRaw = ModelSnippet.Language.curl.rawValue
+    @State private var copied = false
+
+    private var language: ModelSnippet.Language {
+        ModelSnippet.Language(rawValue: languageRaw) ?? .curl
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Call this model").font(.headline)
+            if let snippet = ModelSnippet.render(model: model, language: language) {
+                HStack(spacing: 8) {
+                    Picker("Language", selection: $languageRaw) {
+                        ForEach(ModelSnippet.Language.allCases) { Text($0.title).tag($0.rawValue) }
+                    }
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
+                    .frame(maxWidth: 360)
+                    Spacer(minLength: 4)
+                    Button {
+                        NSPasteboard.general.clearContents()
+                        NSPasteboard.general.setString(snippet, forType: .string)
+                        copied = true
+                        Task {
+                            try? await Task.sleep(for: .seconds(2))
+                            copied = false
+                        }
+                    } label: {
+                        Label(copied ? "Copied" : "Copy", systemImage: copied ? "checkmark" : "doc.on.doc")
+                    }
+                    .help("Copy this \(language.title) example")
+                }
+                ScrollView(.horizontal) {
+                    Text(snippet)
+                        .orbFont(size: 12, design: .monospaced)
+                        .textSelection(.enabled)
+                        .fixedSize(horizontal: true, vertical: true)
+                        .padding(12)
+                }
+                .background(.orbSurface(0.05), in: RoundedRectangle(cornerRadius: ORBMetrics.cardRadius))
+                .accessibilityLabel("\(language.title) example")
+                Text("Set OPENROUTER_API_KEY in your shell first. The example never includes your key.")
+                    .font(ORBFont.caption)
+                    .foregroundStyle(.secondary)
+            } else {
+                Text(model.isBatchOnly
+                     ? "This variant runs only through the Batch API (/api/v1/batches), which takes uploaded JSONL files rather than a single request."
+                     : "ORB doesn't have a request example for this kind of model yet. See its page on OpenRouter.")
+                    .font(ORBFont.footnote)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
     }
 }

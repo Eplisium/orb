@@ -122,6 +122,9 @@ struct BrowserFiltersPopover: View {
                 .toggleStyle(.checkbox).font(ORBFont.footnote)
             Toggle("Hide aliases (~…-latest)", isOn: $vm.filters.hideAliases)
                 .toggleStyle(.checkbox).font(ORBFont.footnote)
+            Toggle("Show Batch API variants (:batch)", isOn: $vm.filters.showBatchVariants)
+                .toggleStyle(.checkbox).font(ORBFont.footnote)
+                .help("Batch-only copies of models, run through /api/v1/batches. They can't chat, so they're hidden by default.")
 
             ORBSectionHeader("Providers")
             TextField("Find a provider", text: $providerSearch)
@@ -357,8 +360,9 @@ struct ComparePanel: View {
                     .padding(.vertical, 4)
                 }
             }
-            Text("Latency and throughput are the best of each model's providers over the last 30 minutes. “—” means no data.")
+            Text(compareFootnote)
                 .font(ORBFont.caption).foregroundStyle(.secondary)
+                .help(EndpointPerformance.unavailableHelp)
             if !failedNames.isEmpty {
                 HStack(spacing: 6) {
                     Image(systemName: "wifi.exclamationmark").foregroundStyle(.orange)
@@ -371,6 +375,16 @@ struct ComparePanel: View {
         .padding(ORBMetrics.spacingLG)
         .frame(minWidth: 680, minHeight: 460)
         .task(id: vm.compareIDs) { await load(retryFailed: false) }
+    }
+
+    /// Anonymous `/endpoints` responses carry no latency, so say why the
+    /// rows are empty instead of implying the providers have no data.
+    private var compareFootnote: String {
+        let loaded = endpointResults.values.compactMap { try? $0.get() }
+        if loaded.contains(where: EndpointPerformance.hasStats) {
+            return "Latency and throughput are the best median of each model's providers over the last 30 minutes. “—” means no data."
+        }
+        return "Latency and throughput show “—”: OpenRouter shares them only with signed-in requests, and ORB loads provider data anonymously."
     }
 
     private func highlight(for title: String, _ best: ComparisonColumn.Highlights) -> String? {
