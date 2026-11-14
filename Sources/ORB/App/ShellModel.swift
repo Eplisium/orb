@@ -78,6 +78,8 @@ enum ShellShortcuts {
             (ConversationShortcuts.regenerate, "Regenerate response"),
             (ConversationShortcuts.copyLastReply, "Copy last reply"),
             (ConversationShortcuts.export, "Export conversation"),
+            (ConversationShortcuts.chooseModel, "Choose model"),
+            (ConversationShortcuts.findInConversation, "Find in conversation"),
             (ConversationShortcuts.searchSessions, "Search sessions"),
         ]
         return [
