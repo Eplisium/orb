@@ -168,7 +168,7 @@ enum PDFEngine: String, CaseIterable, Sendable {
         }
     }
 
-    /// Pricing as documented; OCR is billed even with BYOK.
+    /// Pricing as documented (features/multimodal/pdfs).
     var costNote: String {
         switch self {
         case .mistralOCR: return "billed per page (about $2 per 1,000 pages)"
