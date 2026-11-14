@@ -246,8 +246,10 @@ struct PlaygroundWelcome: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
 
-            HStack(spacing: 8) {
-                ForEach(pills, id: \.title) { CapabilityPill(title: $0.title, icon: $0.icon) }
+            if !pills.isEmpty {
+                HStack(spacing: 8) {
+                    ForEach(pills, id: \.title) { CapabilityPill(title: $0.title, icon: $0.icon) }
+                }
             }
 
             VStack(spacing: 10) {
@@ -432,14 +434,28 @@ struct ToolCallCard: View {
 
             if isExpanded {
                 Divider().padding(.horizontal, 8)
-                CodeBlockView(
-                    language: "arguments",
-                    source: prettyArguments,
-                    accent: accent
-                )
-                .padding(.horizontal, 8)
-                .padding(.vertical, 6)
-                if let result = toolCall.result {
+                if let preview = readablePreview {
+                    Text(preview.header)
+                        .orbFont(size: 11, design: .monospaced)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                        .truncationMode(.middle)
+                        .textSelection(.enabled)
+                        .padding(.horizontal, 10)
+                        .padding(.top, 6)
+                    CodeBlockView(language: preview.language, source: preview.body, accent: accent)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 6)
+                } else {
+                    CodeBlockView(
+                        language: "arguments",
+                        source: prettyArguments,
+                        accent: accent
+                    )
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 6)
+                }
+                if let result = toolCall.result, showsResultBlock {
                     CodeBlockView(
                         language: toolCall.isError ? "error" : "output",
                         source: result,
@@ -455,6 +471,22 @@ struct ToolCallCard: View {
             RoundedRectangle(cornerRadius: 9)
                 .stroke(toolCall.isExecuting ? accent.opacity(0.35) : Color.primary.opacity(0.07), lineWidth: 0.5)
         }
+    }
+
+    /// File writes, commands and scripts read as what they are (path +
+    /// content/diff, shell, AppleScript) instead of escaped JSON.
+    private var readablePreview: ToolCallReadablePreview? {
+        ToolCallReadablePreview.make(
+            toolName: toolCall.name,
+            argumentsJSON: toolCall.arguments ?? toolCall.argumentsSummary,
+            result: toolCall.isError ? nil : toolCall.result
+        )
+    }
+
+    /// A successful write_file's result is already in the preview (its
+    /// header, or the diff), so it is not repeated as an output block.
+    private var showsResultBlock: Bool {
+        !(toolCall.name == "write_file" && !toolCall.isError && readablePreview != nil)
     }
 
     /// Pretty-printed JSON so expanded arguments are readable rather than a
@@ -1056,7 +1088,9 @@ enum PlaygroundErrorSummary {
         // says "tool call", and would otherwise read as "malformed".
         if lowered.contains("truncated") {
             let hint: String = switch mode {
-            case .agent: "Ask for smaller steps (for example, write a large file in several parts), or pick a model with a larger output limit."
+            // A single cut-off call goes back to the model and the run goes
+            // on; this banner means it kept overflowing and the run stopped.
+            case .agent: "ORB asked the model to split the work, but it kept overflowing. Ask for smaller steps (for example, write a large file in several parts), or pick a model with a larger output limit."
             case .chat: "Raise Max tokens in the chat settings, then regenerate."
             case nil: "Ask for a smaller response, or pick a model with a larger output limit."
             }

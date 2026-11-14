@@ -485,7 +485,7 @@ enum NativeAgentError: LocalizedError {
         case .invalidToolCall(let message):
             return "Invalid streamed tool call: \(message)"
         case .truncatedToolCall:
-            return "The model's tool call was truncated before completion and was not executed."
+            return "The model's tool calls were truncated at its output limit several times in a row, so the run stopped. Nothing truncated was executed."
         case .duplicateToolCallID(let id):
             return "OpenRouter returned duplicate tool-call ID \(id)."
         case .reasoningOnly:
