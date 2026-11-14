@@ -253,7 +253,8 @@ struct ImageEndpointDiscoveryTests {
                 "https://openrouter.ai/api/v1/images/models/bytedance-seed/seedream%204.5/endpoints")
         #expect(request.url?.path == "/api/v1/images/models/bytedance-seed/seedream 4.5/endpoints")
         #expect(request.url?.query == nil)
-        #expect(request.value(forHTTPHeaderField: "Authorization") == "Bearer test-key")
+        // V-4: the endpoint list is a public catalog route — no credential.
+        #expect(request.value(forHTTPHeaderField: "Authorization") == nil)
 
         // Endpoints are sorted by provider slug.
         #expect(endpoints.map(\.providerSlug) == ["bytedance", "replicate"])

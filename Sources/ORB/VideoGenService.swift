@@ -294,7 +294,7 @@ final class VideoGenService: ObservableObject {
                 modelsTask = nil
             }
             do {
-                let request = try transport.request(path: "videos/models")
+                let request = try transport.publicRequest(path: "videos/models")
                 let list: VideoGenModelList = try await transport.send(request)
                 models = list.data.sorted { $0.name < $1.name }
             } catch is CancellationError {
@@ -320,6 +320,20 @@ final class VideoGenService: ObservableObject {
         _ request: VideoGenRequest,
         pollInterval: Duration = .seconds(5),
         onUpdate: @escaping @Sendable (VideoJob) -> Void = { _ in }
+    ) async throws -> VideoJob {
+        try await submitAndPoll(request, pollInterval: pollInterval, reportingSubmission: { _ in }, onUpdate: onUpdate)
+    }
+
+    /// `submitAndPoll` that also reports the moment the POST succeeded
+    /// (STUDIO-6), so the caller can release its submit button while the
+    /// job keeps polling in the tray. A separate, fully labelled entry
+    /// point: adding a second defaulted closure to `submitAndPoll` would let
+    /// existing trailing-closure callers bind to the wrong parameter.
+    func submitAndPoll(
+        _ request: VideoGenRequest,
+        pollInterval: Duration = .seconds(5),
+        reportingSubmission onSubmitted: (VideoJob) -> Void,
+        onUpdate: @escaping @Sendable (VideoJob) -> Void
     ) async throws -> VideoJob {
         let body = try JSONEncoder().encode(request)
         let submit = try transport.request(path: "videos", method: "POST", body: body)
@@ -362,6 +376,9 @@ final class VideoGenService: ObservableObject {
             cost: job.cost,
             prompt: request.prompt
         )
+        // STUDIO-6: the POST is done and a remote job exists; the caller can
+        // release its submit button while polling continues in the tray.
+        onSubmitted(job)
         onUpdate(job)
         return try await runOwnedPollLoop(
             from: job, modelID: request.model, pollInterval: pollInterval, onUpdate: onUpdate
@@ -690,6 +707,39 @@ final class VideoGenService: ObservableObject {
 
     /// Every known job, with pending snapshots overriding stale database rows.
     var allJobRecords: [JobRecord] { jobController.allJobs() }
+
+    /// All, resumable and downloadable records from ONE storage read
+    /// (STUDIO-5). Views cache the result and refresh it on
+    /// `jobRecordsRevision` / `activeJob` changes, never from `body`.
+    struct JobRecordSnapshot: Equatable {
+        var all: [JobRecord] = []
+        var resumable: [JobRecord] = []
+        var downloadable: [JobRecord] = []
+        static let empty = JobRecordSnapshot()
+    }
+
+    /// Storage reads performed by `jobRecordSnapshot()` (diagnostics/tests).
+    private(set) var jobSnapshotReads = 0
+
+    func jobRecordSnapshot() -> JobRecordSnapshot {
+        jobSnapshotReads += 1
+        let all = jobController.allJobs()
+        let conflicts = jobController.persistenceConflicts
+        return JobRecordSnapshot(
+            all: all,
+            resumable: all.filter { $0.isResumable && conflicts[$0.id] == nil },
+            downloadable: all.filter { $0.needsDownload && conflicts[$0.id] == nil }
+        )
+    }
+
+    /// Dismisses a finished or failed job from the tray (STUDIO-4). Refused
+    /// while this process still polls it, or when it is resumable,
+    /// downloadable or unsaved.
+    @discardableResult
+    func dismissJob(_ record: JobRecord) -> Bool {
+        guard !isRunInFlight(for: record) else { return false }
+        return jobController.dismiss(id: record.id)
+    }
 
     var unsavedJobRecordCount: Int { jobController.unsavedRecordCount }
     var unsavedJobRecords: [JobRecord] { jobController.pendingRecords }

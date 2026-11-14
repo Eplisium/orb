@@ -96,6 +96,13 @@ enum JobTray {
 
     static func activeCount(_ jobs: [JobRecord]) -> Int { jobs.filter { group($0) == 0 }.count }
 
+    /// Whether the tray offers Dismiss for a job with no live poll loop.
+    static func isDismissible(_ job: JobRecord) -> Bool {
+        JobPresentation.make(job, hasLiveRun: false).actions.contains(.dismiss)
+    }
+
+    static func dismissibleCount(_ jobs: [JobRecord]) -> Int { jobs.filter(isDismissible).count }
+
     static func badgeText(_ jobs: [JobRecord]) -> String? {
         let n = activeCount(jobs)
         return n > 0 ? "\(n)" : nil
@@ -128,6 +135,8 @@ struct JobTrayButton: View {
     let onStop: (JobRecord) -> Void
     var onDownload: (JobRecord) -> Void = { _ in }
     var onOpen: (JobRecord) -> Void = { _ in }
+    /// Acknowledges a finished/failed job so it leaves the tray (STUDIO-4).
+    var onDismiss: (JobRecord) -> Void = { _ in }
     var isDownloading: (JobRecord) -> Bool = { _ in false }
     /// Whether a poll loop currently owns the job (see `JobPresentation.make`).
     var hasLiveRun: (JobRecord) -> Bool = { _ in true }
@@ -153,6 +162,19 @@ struct JobTrayButton: View {
                 .padding(14)
             }
             .frame(width: 380, height: min(420, CGFloat(max(jobs.count, 1)) * 92 + 30))
+            .safeAreaInset(edge: .bottom, spacing: 0) {
+                if JobTray.dismissibleCount(jobs) > 1 {
+                    HStack {
+                        Spacer()
+                        Button("Dismiss All") {
+                            for job in jobs where JobTray.isDismissible(job) { onDismiss(job) }
+                        }
+                        .controlSize(.small)
+                    }
+                    .padding(8)
+                    .background(.bar)
+                }
+            }
         }
     }
 
@@ -180,7 +202,7 @@ struct JobTrayButton: View {
                             Button("Download & save") { onDownload(job) }
                         }
                     case .open: Button("Show in Library") { open = false; onOpen(job) }
-                    case .dismiss: EmptyView()
+                    case .dismiss: Button("Dismiss") { onDismiss(job) }
                     }
                 }
             }.controlSize(.small)

@@ -91,6 +91,16 @@ enum MediaStudioImageFile {
         }
         return "data:\(mime);base64,\(data.base64EncodedString())"
     }
+
+    /// Reads and base64-encodes files on a background task (STUDIO-10), so a
+    /// batch of large references never blocks the main actor. Same output,
+    /// in the same order, as calling `dataURL(for:)` for each URL.
+    static func dataURLsOffMain(_ urls: [URL]) async throws -> [String] {
+        guard !urls.isEmpty else { return [] }
+        return try await Task.detached(priority: .userInitiated) {
+            try urls.map { try dataURL(for: $0) }
+        }.value
+    }
 }
 
 // MARK: - Images studio
@@ -130,6 +140,9 @@ struct ImagesView: View {
     /// The endpoint lookup for the selected model; Generate waits for it.
     @State private var endpointLookup = ImageEndpointLookup()
     @EnvironmentObject private var shell: ShellController
+    @StudioState("ImagesView.promptHistoryRevision") private var promptHistoryRevision = 0
+    @State private var referenceDropTargeted = false
+    private let promptHistory = StudioPromptHistory(studio: .images)
 
     private let accent = ORBTheme.accent
     /// Images per press, and the ceiling of unfinished images across overlapping runs.
@@ -235,7 +248,12 @@ struct ImagesView: View {
             }
 
             VStack(alignment: .leading, spacing: 6) {
-                StudioLabel("Prompt")
+                HStack {
+                    StudioLabel("Prompt")
+                    Spacer(minLength: 0)
+                    StudioPromptHistoryMenu(history: promptHistory, onPick: { prompt = $0 },
+                                            revision: promptHistoryRevision)
+                }
                 StudioPromptEditor(text: $prompt, placeholder: "Describe the image you want…",
                                    accessibilityLabel: "Image prompt")
                 enhanceRow
@@ -288,10 +306,6 @@ struct ImagesView: View {
                 Text("Provider rates differ; pin a provider to inspect its advertised pricing. Actual charge is reported after generation.")
                     .font(.caption2).foregroundStyle(.secondary)
             }
-            if !KeychainManager.hasAPIKey {
-                Text("Add an inference API key in Settings → Accounts & Keys to generate images.")
-                    .font(.caption).foregroundStyle(.orange)
-            }
 
             }
             .padding(18)
@@ -319,6 +333,9 @@ struct ImagesView: View {
                 StudioPrimaryButton(title: "Generate", busyTitle: "Generating…", isBusy: pendingImages > 0,
                                     isEnabled: canGenerate, accent: accent, action: generate)
                     .keyboardShortcut(.return, modifiers: .command)
+                Text(costLine)
+                    .font(.caption2).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
                 if pendingImages > 0 {
                     Button(role: .cancel) { cancelRun() } label: {
                         Label("Cancel", systemImage: "stop.circle")
@@ -397,10 +414,12 @@ struct ImagesView: View {
                 }
             }
             if service.models.first(where: { $0.id == selectedModelId })?.architecture?.takesReferenceImages == true {
-                Text("Up to \(capabilities.referenceLimit ?? 16) references, 20 MB each. Endpoint support may vary.")
+                Text("Up to \(capabilities.referenceLimit ?? 16) references, 20 MB each — or drop images here. Endpoint support may vary.")
                     .font(.caption2).foregroundStyle(.secondary)
             }
         }
+        .padding(4)
+        .studioFileDrop(kind: .image, isTargeted: $referenceDropTargeted) { dropReferences($0) }
     }
 
     // MARK: Gallery
@@ -512,11 +531,15 @@ struct ImagesView: View {
                 .frame(maxWidth: .infinity).frame(height: 140)
                 .background(.orbSurface(0.06))
                 .clipShape(RoundedRectangle(cornerRadius: 8))
+                .contentShape(Rectangle())
+                .onTapGesture { CreationActions.open(creation, in: saved) }
+                .help("Open")
                 .creationDrag(creation, store: saved)
             HStack(spacing: 6) {
                 Text(creation.prompt ?? creation.modelID).font(.caption).lineLimit(1)
                 Spacer()
-                CreationActionsMenu(creation: creation, store: saved)
+                CreationActionsMenu(creation: creation, store: saved,
+                                    openInStudio: { StudioNavigation.openInStudio($0, shell: shell) })
             }
         }
         .padding(8)
@@ -524,13 +547,13 @@ struct ImagesView: View {
         .contextMenu {
             if let text = creation.prompt, !text.isEmpty { Button("Reuse Prompt") { prompt = text } }
             Button("Edit") { editSaved(creation) }
-            CreationActionItems(creation: creation, store: saved)
+            CreationActionItems(creation: creation, store: saved,
+                                openInStudio: { StudioNavigation.openInStudio($0, shell: shell) })
         }
     }
 
-    private func showLibrary() {
-        StudioStore.shared.box("FilesView.showingCreations", initial: { false }).value = true
-        shell.send(.section(.files))
+    private func showLibrary(_ creationID: UUID? = nil) {
+        StudioNavigation.showInLibrary(creationID, shell: shell)
     }
 
     private func galleryCard(_ result: GeneratedImage) -> some View {
@@ -553,10 +576,13 @@ struct ImagesView: View {
                 if result.savedID != nil {
                     Label("Saved in ORB", systemImage: "checkmark.circle.fill").foregroundStyle(.green)
                         .accessibilityLabel("Saved in the ORB library")
-                    Button("View in Library") { showLibrary() }
+                    Button("View in Library") { showLibrary(result.savedID) }
                         .buttonStyle(.link)
-                        .help("Open Files → Saved creations")
-                    if let savedCreation { CreationActionsMenu(creation: savedCreation, store: saved) }
+                        .help("Show this image in the Library")
+                    if let savedCreation {
+                        CreationActionsMenu(creation: savedCreation, store: saved,
+                                            openInStudio: { StudioNavigation.openInStudio($0, shell: shell) })
+                    }
                 } else {
                     Button("Retry save") { Task { await persist(result.id) } }
                     Text(result.saveError ?? "Not saved").foregroundStyle(.orange).lineLimit(2)
@@ -572,19 +598,6 @@ struct ImagesView: View {
         .overlay { RoundedRectangle(cornerRadius: 14).stroke(.orbSurface(0.07), lineWidth: 0.5) }
     }
 
-    private func header(title: String, subtitle: String, icon: String) -> some View {
-        HStack(spacing: 10) {
-            ZStack {
-                Circle().fill(accent.opacity(0.13)).frame(width: 34, height: 34)
-                Image(systemName: icon).foregroundStyle(accent)
-            }
-            VStack(alignment: .leading, spacing: 1) {
-                Text(title).orbFont(size: 15, weight: .semibold)
-                Text(subtitle).orbFont(size: 11).foregroundStyle(.secondary)
-            }
-        }
-    }
-
     // MARK: Actions
 
     private var canGenerate: Bool {
@@ -598,6 +611,23 @@ struct ImagesView: View {
 
     private var selectedImageModel: ImageGenModel? {
         service.models.first { $0.id == selectedModelId }
+    }
+
+    /// Per-image endpoint pricing × count (STUDIO-12): the pinned provider,
+    /// or a min–max range across every endpoint when unpinned.
+    private var costEstimate: StudioCostEstimate? {
+        let pricing = selectedEndpoint.map { [$0.pricing] } ?? endpoints.map(\.pricing)
+        return StudioCostEstimate.images(endpoints: pricing, count: imageCount,
+                                         variant: resolution == "auto" ? nil : resolution)
+    }
+
+    private var costLine: String {
+        if let costEstimate {
+            return "\(costEstimate.label). The actual charge is reported after generation."
+        }
+        return endpoints.isEmpty
+            ? "Price unknown until the model's endpoints load."
+            : "Price not listed per image for this model; the actual charge is reported after generation."
     }
 
     private var pinOptions: [ImageModelEndpoint] {
@@ -623,16 +653,30 @@ struct ImagesView: View {
         panel.allowsMultipleSelection = true
         panel.canChooseFiles = true
         panel.canChooseDirectories = false
-        panel.allowedContentTypes = [.png, .jpeg, .gif, .heic]
+        panel.allowedContentTypes = StudioDropFilter.imageTypes
         if panel.runModal() == .OK { referenceURLs.append(contentsOf: panel.urls.filter { !referenceURLs.contains($0) }) }
     }
 
-    private func referenceDataURLs() throws -> [String]? {
+    /// Adds dropped images, de-duplicated and within the reference limit (STUDIO-14).
+    private func dropReferences(_ urls: [URL]) {
+        guard selectedImageModel?.architecture?.takesReferenceImages == true else {
+            errorMessage = "This model does not accept reference images."
+            return
+        }
+        let merged = StudioDropFilter.merge(urls, into: referenceURLs, limit: capabilities.referenceLimit ?? 16)
+        referenceURLs = merged.urls
+        if merged.refused > 0 {
+            errorMessage = "Added up to the reference limit; \(merged.refused) image\(merged.refused == 1 ? " was" : "s were") not added."
+        }
+    }
+
+    /// Reads and encodes references off the main actor (STUDIO-10).
+    private func referenceDataURLs() async throws -> [String]? {
         guard !referenceURLs.isEmpty else { return nil }
         if let warning = capabilities.referenceError(count: referenceURLs.count) {
             throw MediaStudioImageFile.Failure.invalid(warning)
         }
-        return try referenceURLs.map(MediaStudioImageFile.dataURL(for:))
+        return try await MediaStudioImageFile.dataURLsOffMain(referenceURLs)
     }
 
     /// Cancels every image run in flight (overlapping runs included).
@@ -641,10 +685,7 @@ struct ImagesView: View {
     }
 
     private func generate() {
-        guard canGenerate else {
-            if !KeychainManager.hasAPIKey { errorMessage = "Add your OpenRouter API key in Settings → Accounts & Keys first." }
-            return
-        }
+        guard canGenerate else { return }
         errorMessage = nil
         runSummary = nil
         let modelId = selectedModelId
@@ -661,7 +702,7 @@ struct ImagesView: View {
             var base: ImageGenRequest
             do {
                 let takesReferences = service.models.first(where: { $0.id == modelId })?.architecture?.takesReferenceImages == true
-                let references = takesReferences ? try referenceDataURLs() : nil
+                let references = takesReferences ? try await referenceDataURLs() : nil
                 base = ImageGenRequest(model: modelId, prompt: promptText)
                 base.aspectRatio = options("aspect_ratio").contains(aspectRatio) && aspectRatio != "auto" ? aspectRatio : nil
                 base.resolution = options("resolution").contains(resolution) && resolution != "auto" ? resolution : nil
@@ -718,6 +759,8 @@ struct ImagesView: View {
             }
             runSummary = summary.text
             if summary.delivered > 0 {
+                promptHistory.record(promptText)
+                promptHistoryRevision += 1
                 StudioNotifier.shared.finished(section: SidebarSection.images.rawValue,
                     title: "Images ready", body: "\(summary.delivered) image\(summary.delivered == 1 ? "" : "s") generated with \(shortModelName(modelId)).")
             }

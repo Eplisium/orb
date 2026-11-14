@@ -251,7 +251,7 @@ final class ImageGenService: ObservableObject {
                 modelsTask = nil
             }
             do {
-                let request = try transport.request(path: "images/models")
+                let request = try transport.publicRequest(path: "images/models")
                 let list: ImageGenModelList = try await transport.send(request)
                 models = list.data.sorted { $0.name < $1.name }
             } catch is CancellationError {
@@ -274,7 +274,10 @@ final class ImageGenService: ObservableObject {
         guard !trimmed.isEmpty else {
             throw MediaServiceError.invalidPath(modelID)
         }
-        let request = try transport.request(path: "images/models/\(trimmed)/endpoints")
+        let path = "images/models/\(trimmed)/endpoints"
+        // Public catalog route: no credential is attached (V-4).
+        let request = try MediaTransport.isPublicCatalogPath(path)
+            ? transport.publicRequest(path: path) : transport.request(path: path)
         let response: ImageModelEndpointsResponse = try await transport.send(request)
         return response.endpoints.sorted { $0.providerSlug < $1.providerSlug }
     }

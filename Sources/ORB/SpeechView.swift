@@ -25,8 +25,13 @@ struct SpeechView: View {
     @StudioState("SpeechView.selectedAudioURL") private var selectedAudioURL: URL? = nil
     @StudioState("SpeechView.lastAudio") private var lastAudio: SavedCreation? = nil
     @StudioState("SpeechView.pendingAudio") private var pendingAudio: (data: Data, mimeType: String, modelID: String, prompt: String)? = nil
-    @StudioState("SpeechView.audioPlayer") private var audioPlayer: AVAudioPlayer? = nil
     @StudioState("SpeechView.isSaving") private var isSaving = false
+    /// One player per studio: stopped when the page is left (STUDIO-8).
+    @StudioState("SpeechView.playback") private var playback = StudioAudioPlayback()
+    @StudioState("SpeechView.promptHistoryRevision") private var promptHistoryRevision = 0
+    @State private var audioDropTargeted = false
+    @EnvironmentObject private var shell: ShellController
+    private let promptHistory = StudioPromptHistory(studio: .speech)
 
     enum Mode: String, CaseIterable { case tts = "Text → Speech", stt = "Speech → Text" }
 
@@ -37,11 +42,19 @@ struct SpeechView: View {
         VStack(spacing: 0) {
             headerBar
             Divider()
-            if mode == .tts { ttsBody } else { sttBody }
+            // Shared scaffold (V-3): controls + pinned action left, history right.
+            StudioScaffold {
+                if mode == .tts { ttsControls } else { sttControls }
+            } footer: {
+                footer
+            } results: {
+                historyPane
+            }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color(nsColor: .windowBackgroundColor))
         .task { await discoverMode() }
+        .onDisappear { playback.stop() }
         .onChange(of: mode) { _, newMode in
             modelId = ""
             voice = ""
@@ -84,72 +97,92 @@ struct SpeechView: View {
         .background(.ultraThinMaterial.opacity(0.45))
     }
 
+    // MARK: Footer (pinned primary action; errors first — STUDIO-2)
+
+    @ViewBuilder private var footer: some View {
+        if let errorMessage {
+            PlaygroundErrorBanner(message: errorMessage) { self.errorMessage = nil }
+        }
+        if mode == .tts {
+            StudioPrimaryButton(title: "Synthesize", busyTitle: service.isWorking ? "Synthesizing…" : "Saving…",
+                                isBusy: service.isWorking || isSaving,
+                                isEnabled: canSynthesize, accent: accent, action: synthesize)
+                .keyboardShortcut(.return, modifiers: .command)
+            Text(speechCostLine)
+                .font(.caption2).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        } else {
+            StudioPrimaryButton(title: "Transcribe", busyTitle: service.isWorking ? "Transcribing…" : "Saving…",
+                                isBusy: service.isWorking || isSaving,
+                                isEnabled: canTranscribe, accent: accent, action: transcribe)
+                .keyboardShortcut(.return, modifiers: .command)
+            Text("Billed per request; the charge is shown with the transcript.")
+                .font(.caption2).foregroundStyle(.secondary)
+        }
+    }
+
+    /// Per-character estimate from catalog pricing (STUDIO-12).
+    private var speechCostLine: String {
+        let characters = text.trimmingCharacters(in: .whitespacesAndNewlines).count
+        if let estimate = StudioCostEstimate.speech(promptPrice: selectedSpeechModel?.pricing?.prompt, characters: characters) {
+            return "\(estimate.label). Audio is saved to the Library first; export is optional."
+        }
+        return "Price unknown for this model. Audio is saved to the Library first; export is optional."
+    }
+
     // MARK: TTS
 
-    private var ttsBody: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 14) {
-                modelField(choices: speechModels)
-                VStack(alignment: .leading, spacing: 6) {
-                    StudioLabel("Text")
-                    StudioPromptEditor(text: $text, placeholder: "Type what you want spoken…",
-                                       accessibilityLabel: "Speech text", height: 150)
-                }
-                StudioCard(title: "Voice") {
-                    StudioGrid {
-                        StudioField("Format") {
-                            Picker("Format", selection: $audioFormat) {
-                                Text("MP3").tag("mp3")
-                                Text("PCM (raw)").tag("pcm")
-                            }.labelsHidden()
-                        }
-                        if let model = selectedSpeechModel, let voices = model.supportedVoices, !voices.isEmpty {
-                            StudioField("Voice") {
-                                Picker("Voice", selection: $voice) {
-                                    Text("Provider default").tag("")
-                                    ForEach(voices, id: \.self) { Text($0).tag($0) }
-                                }.labelsHidden()
-                            }
-                        }
-                    }
-                    if selectedSpeechModel?.supportedVoices?.isEmpty != false,
-                       CatalogCapability.voice(for: selectedSpeechModel) == .unknown {
-                        StudioNotice(text: "Voice support is unknown for this model; using provider default.")
-                    }
-                    if selectedSpeechModel?.id.hasPrefix("openai/") == true {
-                        StudioField("Speed \(String(format: "%.2f", speed))×") {
-                            Slider(value: $speed, in: 0.25...4.0, step: 0.05)
-                        }
-                    }
-                }
-                if let errorMessage {
-                    PlaygroundErrorBanner(message: errorMessage) { self.errorMessage = nil }
-                }
-                StudioPrimaryButton(title: "Synthesize", busyTitle: service.isWorking ? "Synthesizing…" : "Saving…",
-                                    isBusy: service.isWorking || isSaving,
-                                    isEnabled: canSynthesize, accent: accent, action: synthesize)
-                if let lastAudio {
-                    HStack {
-                        Label("Saved in app", systemImage: "checkmark.circle.fill")
-                        Button("Play") { play(lastAudio) }
-                        Button("Export…") { export(lastAudio) }
-                    }.font(.caption)
-                } else if let pendingAudio {
-                    HStack {
-                        Text("Generated audio is not yet saved").foregroundStyle(.orange)
-                        Button("Retry save") { Task { await savePendingAudio() } }
-                            .disabled(isSaving)
-                        Button("Export…") {
-                            exportPendingAudio(pendingAudio.data, mimeType: pendingAudio.mimeType)
-                        }
-                    }.font(.caption)
-                }
-                Text("Audio is saved in the local creations library first. Export is optional. Billed per request.")
-                    .font(.caption2).foregroundStyle(.secondary)
+    @ViewBuilder private var ttsControls: some View {
+        modelField(choices: speechModels)
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                StudioLabel("Text")
+                Spacer(minLength: 0)
+                StudioPromptHistoryMenu(history: promptHistory, onPick: { text = $0 },
+                                        revision: promptHistoryRevision)
             }
-            .padding(20)
-            .frame(maxWidth: 700)
-            .frame(maxWidth: .infinity)
+            StudioPromptEditor(text: $text, placeholder: "Type what you want spoken…",
+                               accessibilityLabel: "Speech text", height: 150)
+        }
+        StudioCard(title: "Voice") {
+            StudioGrid {
+                StudioField("Format") {
+                    Picker("Format", selection: $audioFormat) {
+                        Text("MP3").tag("mp3")
+                        Text("PCM (raw)").tag("pcm")
+                    }.labelsHidden()
+                }
+                if let model = selectedSpeechModel, let voices = model.supportedVoices, !voices.isEmpty {
+                    StudioField("Voice") {
+                        Picker("Voice", selection: $voice) {
+                            Text("Provider default").tag("")
+                            ForEach(voices, id: \.self) { Text($0).tag($0) }
+                        }.labelsHidden()
+                    }
+                }
+            }
+            if audioFormat == "pcm" {
+                StudioNotice(text: "Raw PCM has no header, so ORB can't play it. Export it to use in an audio editor.")
+            }
+            if selectedSpeechModel?.supportedVoices?.isEmpty != false,
+               CatalogCapability.voice(for: selectedSpeechModel) == .unknown {
+                StudioNotice(text: "Voice support is unknown for this model; using provider default.")
+            }
+            if selectedSpeechModel?.id.hasPrefix("openai/") == true {
+                StudioField("Speed \(String(format: "%.2f", speed))×") {
+                    Slider(value: $speed, in: 0.25...4.0, step: 0.05)
+                }
+            }
+        }
+        if let pendingAudio {
+            HStack {
+                Text("Generated audio is not yet saved").foregroundStyle(.orange)
+                Button("Retry save") { Task { await savePendingAudio() } }
+                    .disabled(isSaving)
+                Button("Export…") {
+                    exportPendingAudio(pendingAudio.data, mimeType: pendingAudio.mimeType)
+                }
+            }.font(.caption)
         }
     }
 
@@ -175,10 +208,7 @@ struct SpeechView: View {
     }
 
     private func synthesize() {
-        guard canSynthesize else {
-            if !KeychainManager.hasAPIKey { errorMessage = "Add your OpenRouter API key in Settings → Accounts & Keys first." }
-            return
-        }
+        guard canSynthesize else { return }
         errorMessage = nil
         lastAudio = nil
         var request = SpeechRequest(model: modelId, input: text)
@@ -192,6 +222,8 @@ struct SpeechView: View {
                 let mime = contentType?.components(separatedBy: ";").first?.trimmingCharacters(in: .whitespacesAndNewlines)
                     ?? (request.responseFormat == "pcm" ? "audio/pcm" : "audio/mpeg")
                 pendingAudio = (data, mime, request.model, request.input)
+                promptHistory.record(request.input)
+                promptHistoryRevision += 1
                 await savePendingAudio()
                 StudioNotifier.shared.finished(section: SidebarSection.speech.rawValue, title: "Speech ready", body: "Your audio was generated.")
             } catch is CancellationError {
@@ -202,99 +234,154 @@ struct SpeechView: View {
         }
     }
 
-    // MARK: STT
+    // MARK: History pane (V-3)
 
-    private var sttBody: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 14) {
-                modelField(choices: transcriptionModels)
-                Text("Up to 100 MB. Files above 25 MB use base64 JSON upload; smaller files use multipart.").font(.caption2).foregroundStyle(.secondary)
-                StudioCard(title: "Options") {
-                    StudioField("Language (ISO-639-1, optional)") {
-                        TextField("auto-detect", text: $language).textFieldStyle(.roundedBorder)
-                    }
-                    StudioGrid {
-                        StudioField("Response") {
-                            Picker("Response", selection: $transcriptionFormat) {
-                                Text("Text JSON").tag("json")
-                                Text("Verbose JSON").tag("verbose_json")
-                            }.labelsHidden()
-                        }
-                        if transcriptionFormat == "verbose_json" {
-                            StudioField("Timestamps") {
-                                Picker("Timestamps", selection: $timestampMode) {
-                                    Text("Provider default").tag("none")
-                                    Text("Segments").tag("segment")
-                                    Text("Words and segments").tag("word")
-                                }.labelsHidden()
+    private var history: [SavedCreation] {
+        let kind: SavedCreation.Kind = mode == .tts ? .audio : .transcript
+        return Array(creations.creations.filter { $0.kind == kind }.prefix(30))
+    }
+
+    private var historyPane: some View {
+        let items = history
+        return Group {
+            if mode == .stt && !transcript.isEmpty || !items.isEmpty {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 14) {
+                        if mode == .stt && !transcript.isEmpty { transcriptResult }
+                        if !items.isEmpty {
+                            HStack {
+                                StudioSectionTitle(mode == .tts ? "Recent audio" : "Recent transcripts")
+                                Button("Show all in Library") { StudioNavigation.showInLibrary(nil, shell: shell) }
+                                    .font(.caption).buttonStyle(.link)
                             }
+                            ForEach(items) { historyRow($0) }
                         }
                     }
+                    .padding(20)
                 }
-                HStack(spacing: 10) {
-                    Button(action: chooseAudio) {
-                        Label(selectedAudioURL?.lastPathComponent ?? "Choose Audio…", systemImage: "waveform")
-                    }
-                    .buttonStyle(StudioChipButtonStyle())
-                    if selectedAudioURL != nil {
-                        Button("Clear") { selectedAudioURL = nil }
-                            .font(.caption).buttonStyle(.plain).foregroundStyle(.secondary)
-                    }
+            } else {
+                StudioEmptyState(icon: mode == .tts ? "waveform" : "text.quote",
+                                 title: mode == .tts ? "No audio yet" : "No transcripts yet",
+                                 message: mode == .tts ? "Synthesized speech is saved here and in the Library."
+                                                       : "Choose or drop an audio file, then Transcribe.",
+                                 accent: accent)
+            }
+        }
+    }
+
+    private func historyRow(_ creation: SavedCreation) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(alignment: .top) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(creation.prompt ?? creation.modelID).font(.caption).lineLimit(2)
+                    Text("\(creation.modelID) · \(creation.createdAt.formatted(date: .abbreviated, time: .shortened))")
+                        .font(.caption2).foregroundStyle(.tertiary).lineLimit(1)
                 }
-                if let errorMessage {
-                    PlaygroundErrorBanner(message: errorMessage) { self.errorMessage = nil }
-                }
-                StudioPrimaryButton(title: "Transcribe", busyTitle: service.isWorking ? "Transcribing…" : "Saving…",
-                                    isBusy: service.isWorking || isSaving,
-                                    isEnabled: canTranscribe, accent: accent, action: transcribe)
-                if !transcript.isEmpty {
-                    VStack(alignment: .leading, spacing: 6) {
-                        StudioLabel("Transcript")
-                        Text(transcript)
-                            .orbFont(size: 12)
-                            .textSelection(.enabled)
-                            .padding(10)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .background(.orbSurface(0.04))
-                            .clipShape(RoundedRectangle(cornerRadius: 8))
-                        Button("Copy") {
-                            AppToasts.copy(transcript, what: "Transcript")
-                        }
-                        .font(.caption)
-                    }
-                }
-                if let response = lastTranscription {
-                    if let language = response.language { Text("Language: \(language)").font(.caption) }
-                    if let duration = response.duration { Text("Duration: \(duration, specifier: "%.2f")s").font(.caption) }
-                    if let cost = response.usage?.cost { Text("Cost: $\(cost, specifier: "%.5f")").font(.caption) }
-                    if let segments = response.segments, !segments.isEmpty {
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text("TIMESTAMPED SEGMENTS").font(.caption.bold())
-                            ForEach(Array(segments.enumerated()), id: \.offset) { _, segment in
-                                Text("\(segment.start, specifier: "%.2f")–\(segment.end, specifier: "%.2f")s  \(segment.text)")
-                                    .font(.caption).textSelection(.enabled)
-                            }
-                        }
-                    }
-                    if let words = response.words, !words.isEmpty {
-                        DisclosureGroup("\(words.count) timestamped words") {
-                            ForEach(Array(words.enumerated()), id: \.offset) { _, word in
-                                Text("\(word.start, specifier: "%.2f")–\(word.end, specifier: "%.2f")s  \(word.word)")
-                                    .font(.caption).textSelection(.enabled)
-                            }
-                        }
-                    }
-                }
-                if let pendingTranscript {
-                    HStack {
-                        Text("Transcript available; local save failed.").foregroundStyle(.orange)
-                        Button("Retry save") { Task { await saveTranscript(pendingTranscript) } }.disabled(isSaving)
-                    }.font(.caption)
+                Spacer()
+                CreationActionsMenu(creation: creation, store: creations, onError: { errorMessage = $0 },
+                                    openInStudio: { StudioNavigation.openInStudio($0, shell: shell) })
+                Button("Export…") { export(creation) }.font(.caption)
+            }
+            if creation.kind == .audio {
+                if StudioAudioPlayback.canPlay(mimeType: creation.mimeType) {
+                    StudioAudioPlayerBar(creation: creation, store: creations, playback: playback)
+                } else {
+                    Text("Raw PCM — export to play in an audio editor.")
+                        .font(.caption2).foregroundStyle(.secondary)
                 }
             }
-            .padding(20)
-            .frame(maxWidth: 700)
-            .frame(maxWidth: .infinity)
+        }
+        .padding(12)
+        .background(.orbSurface(lastAudio?.id == creation.id ? 0.07 : 0.035), in: RoundedRectangle(cornerRadius: 12))
+    }
+
+    // MARK: STT
+
+    @ViewBuilder private var sttControls: some View {
+        modelField(choices: transcriptionModels)
+        Text("Up to 100 MB. Files above 25 MB use base64 JSON upload; smaller files use multipart.").font(.caption2).foregroundStyle(.secondary)
+        StudioCard(title: "Options") {
+            StudioField("Language (ISO-639-1, optional)") {
+                TextField("auto-detect", text: $language).textFieldStyle(.roundedBorder)
+            }
+            StudioGrid {
+                StudioField("Response") {
+                    Picker("Response", selection: $transcriptionFormat) {
+                        Text("Text JSON").tag("json")
+                        Text("Verbose JSON").tag("verbose_json")
+                    }.labelsHidden()
+                }
+                if transcriptionFormat == "verbose_json" {
+                    StudioField("Timestamps") {
+                        Picker("Timestamps", selection: $timestampMode) {
+                            Text("Provider default").tag("none")
+                            Text("Segments").tag("segment")
+                            Text("Words and segments").tag("word")
+                        }.labelsHidden()
+                    }
+                }
+            }
+        }
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 10) {
+                Button(action: chooseAudio) {
+                    Label(selectedAudioURL?.lastPathComponent ?? "Choose Audio…", systemImage: "waveform")
+                }
+                .buttonStyle(StudioChipButtonStyle())
+                if selectedAudioURL != nil {
+                    Button("Clear") { selectedAudioURL = nil }
+                        .font(.caption).buttonStyle(.plain).foregroundStyle(.secondary)
+                }
+            }
+            Text("or drop an audio file here").font(.caption2).foregroundStyle(.tertiary)
+        }
+        .padding(4)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        // Drag-and-drop audio (STUDIO-14).
+        .studioFileDrop(kind: .audio, isTargeted: $audioDropTargeted) { selectedAudioURL = $0.first }
+        if let pendingTranscript {
+            HStack {
+                Text("Transcript available; local save failed.").foregroundStyle(.orange)
+                Button("Retry save") { Task { await saveTranscript(pendingTranscript) } }.disabled(isSaving)
+            }.font(.caption)
+        }
+    }
+
+    private var transcriptResult: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                StudioSectionTitle("Transcript")
+                Button("Copy") { AppToasts.copy(transcript, what: "Transcript") }.font(.caption)
+            }
+            Text(transcript)
+                .orbFont(size: 12)
+                .textSelection(.enabled)
+                .padding(10)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(.orbSurface(0.04))
+                .clipShape(RoundedRectangle(cornerRadius: 8))
+            if let response = lastTranscription {
+                if let language = response.language { Text("Language: \(language)").font(.caption) }
+                if let duration = response.duration { Text("Duration: \(duration, specifier: "%.2f")s").font(.caption) }
+                if let cost = response.usage?.cost { Text("Cost: $\(cost, specifier: "%.5f")").font(.caption) }
+                if let segments = response.segments, !segments.isEmpty {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("TIMESTAMPED SEGMENTS").font(.caption.bold())
+                        ForEach(Array(segments.enumerated()), id: \.offset) { _, segment in
+                            Text("\(segment.start, specifier: "%.2f")–\(segment.end, specifier: "%.2f")s  \(segment.text)")
+                                .font(.caption).textSelection(.enabled)
+                        }
+                    }
+                }
+                if let words = response.words, !words.isEmpty {
+                    DisclosureGroup("\(words.count) timestamped words") {
+                        ForEach(Array(words.enumerated()), id: \.offset) { _, word in
+                            Text("\(word.start, specifier: "%.2f")–\(word.end, specifier: "%.2f")s  \(word.word)")
+                                .font(.caption).textSelection(.enabled)
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -314,17 +401,13 @@ struct SpeechView: View {
     }
 
     private func transcribe() {
-        guard canTranscribe, let url = selectedAudioURL else {
-            if !KeychainManager.hasAPIKey { errorMessage = "Add your OpenRouter API key in Settings → Accounts & Keys first." }
-            return
-        }
+        guard canTranscribe, let url = selectedAudioURL else { return }
         errorMessage = nil
         Task {
             do {
-                let scoped = url.startAccessingSecurityScopedResource()
-                defer { if scoped { url.stopAccessingSecurityScopedResource() } }
                 try LocalFilePreflight.check(url, limit: LocalFilePreflight.maxTranscriptionBytes, purpose: "transcription")
-                let data = try Data(contentsOf: url)
+                // Read off the main actor (STUDIO-10).
+                let data = try await LocalFileRead.data(at: url)
                 let mime = (try? url.resourceValues(forKeys: [.contentTypeKey]).contentType?.preferredMIMEType)
                     ?? "audio/wav"
                 var request = TranscriptionRequest(
@@ -422,19 +505,6 @@ struct SpeechView: View {
         if panel.runModal() == .OK, let url = panel.url {
             do { try creations.export(data: data, to: url) }
             catch { errorMessage = "Audio export failed: \(error.localizedDescription)" }
-        }
-    }
-
-    private func play(_ creation: SavedCreation) {
-        Task {
-            do {
-                guard creationExtension(creation) != "pcm" else {
-                    throw MediaServiceError.decoding("Raw PCM playback needs sample-rate metadata; export the bytes instead.")
-                }
-                let data = try await creations.data(for: creation)
-                audioPlayer = try AVAudioPlayer(data: data)
-                audioPlayer?.play()
-            } catch { errorMessage = error.localizedDescription }
         }
     }
 

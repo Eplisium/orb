@@ -26,7 +26,10 @@ struct SavedCreationsLibraryView: View {
     @State private var query = LibraryQuery()
     @State private var selection = LibrarySelection()
     @State private var errorMessage: String?
-    @State private var isOpening = false
+    @State private var gridWidth: CGFloat = 0
+    /// Set by "Show in Library" from a studio or the job tray (STUDIO-4).
+    @StudioState(StudioNavigation.libraryFocusKey) private var focusID: UUID? = nil
+    @EnvironmentObject private var shell: ShellController
     @State private var pendingDelete: [SavedCreation]?
     @State private var undoPresentation = LibraryUndoPresentation()
     @State private var maintenanceObserver = UUID()
@@ -72,8 +75,25 @@ struct SavedCreationsLibraryView: View {
         .focused($focused)
         .onAppear { store.startForegroundMaintenance(observer: maintenanceObserver) }
         .onKeyPress(.space) {
-            guard let target = LibraryPreview.target(selection: selection.ids, visible: visible) else { return .ignored }
-            open(target); return .handled
+            guard let target = LibraryPreview.target(selection: selection.ids, anchor: selection.anchorID,
+                                                     visible: visible) else { return .ignored }
+            open(target, previewSelection: true); return .handled
+        }
+        // Finder keys (STUDIO-7): Esc clears, ⌘A selects all, arrows move.
+        .onExitCommand { selection.clear() }
+        .onCommand(#selector(NSResponder.selectAll(_:))) { selection.selectAll(visible.map(\.id)) }
+        .onKeyPress(keys: [.leftArrow, .rightArrow, .upArrow, .downArrow]) { press in
+            let columns = isGrid ? LibraryPreview.gridColumns(width: gridWidth) : 1
+            let offset: Int
+            switch press.key {
+            case .leftArrow: offset = isGrid ? -1 : 0
+            case .rightArrow: offset = isGrid ? 1 : 0
+            case .upArrow: offset = -columns
+            default: offset = columns
+            }
+            guard offset != 0 else { return .ignored }
+            selection.move(by: offset, in: visible.map(\.id), extending: press.modifiers.contains(.shift))
+            return .handled
         }
         .onChange(of: visible.map(\.id)) { _, ids in selection.prune(toVisible: ids) }
         .confirmationDialog(
@@ -186,25 +206,58 @@ struct SavedCreationsLibraryView: View {
                 description: Text("Try a different search or clear the type filters."))
                 .frame(maxWidth: .infinity, minHeight: 200)
         } else {
-            ScrollView {
-                if isGrid {
-                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 150, maximum: 220), spacing: 10, alignment: .top)], alignment: .leading, spacing: 10) {
-                        ForEach(visible) { cell($0) }
+            ScrollViewReader { proxy in
+                ScrollView {
+                    Group {
+                        if isGrid {
+                            LazyVGrid(columns: [GridItem(.adaptive(minimum: 150, maximum: 220), spacing: 10, alignment: .top)], alignment: .leading, spacing: 10) {
+                                ForEach(visible) { cell($0).id($0.id) }
+                            }
+                            .padding(.trailing, 2)
+                        } else {
+                            LazyVStack(spacing: 6) { ForEach(visible) { row($0).id($0.id) } }
+                        }
                     }
-                    .padding(.trailing, 2)
-                } else {
-                    LazyVStack(spacing: 6) { ForEach(visible) { row($0) } }
+                    .background(GeometryReader { geo in
+                        Color.clear.onAppear { gridWidth = geo.size.width }
+                            .onChange(of: geo.size.width) { _, width in gridWidth = width }
+                    })
+                    // Clicking empty space clears the selection, as in Finder.
+                    .frame(maxWidth: .infinity, minHeight: 200, alignment: .topLeading)
+                    .contentShape(Rectangle())
+                    .onTapGesture { selection.clear(); focused = true }
                 }
-                if isOpening { ProgressView("Opening…").padding() }
+                .onChange(of: selection.anchorID) { _, id in
+                    if let id { withAnimation(.easeOut(duration: 0.15)) { proxy.scrollTo(id) } }
+                }
+                .task(id: focusID) { applyFocus(proxy) }
             }
         }
     }
 
+    /// Finder-like click (STUDIO-7). One gesture reads the click count, so a
+    /// single click selects immediately instead of waiting out a double-tap.
     private func tap(_ c: SavedCreation) {
         let mods = NSEvent.modifierFlags
-        if mods.contains(.shift) { selection.extend(to: c.id, in: visible.map(\.id)) }
-        else { selection.toggle(c.id) }
+        if NSApp.currentEvent?.clickCount == 2 {
+            selection.select(c.id)
+            open(c)
+        } else {
+            selection.click(c.id, command: mods.contains(.command), shift: mods.contains(.shift),
+                            in: visible.map(\.id))
+        }
         focused = true
+    }
+
+    /// Selects and scrolls to a creation requested by "Show in Library".
+    private func applyFocus(_ proxy: ScrollViewProxy) {
+        guard let id = focusID else { return }
+        if store.creations.contains(where: { $0.id == id }) {
+            query.clear()
+            selection.select(id)
+            proxy.scrollTo(id, anchor: .center)
+        }
+        focusID = nil
     }
 
     private func label(_ c: SavedCreation) -> String { c.prompt.flatMap { $0.isEmpty ? nil : $0 } ?? c.kind.title }
@@ -236,7 +289,6 @@ struct SavedCreationsLibraryView: View {
 
         return card
             .creationDrag(c, store: store)
-            .onTapGesture(count: 2) { open(c) }
             .onTapGesture { tap(c) }
             .contextMenu { itemMenu(c) }
             .help(label(c))
@@ -286,9 +338,9 @@ struct SavedCreationsLibraryView: View {
     }
 
     @ViewBuilder private func itemMenu(_ c: SavedCreation) -> some View {
-        Button("Open") { open(c) }
         Button("Export…") { export(c) }
-        CreationActionItems(creation: c, store: store)
+        CreationActionItems(creation: c, store: store,
+                            openInStudio: { StudioNavigation.openInStudio($0, shell: shell) })
         Divider()
         Button(selection.contains(c.id) ? "Deselect" : "Select") { selection.toggle(c.id) }
         Button("Delete…", role: .destructive) {
@@ -299,7 +351,7 @@ struct SavedCreationsLibraryView: View {
 
     // MARK: Actions
 
-    private func open(_ creation: SavedCreation) {
+    private func open(_ creation: SavedCreation, previewSelection: Bool = false) {
         guard LibraryPreview.canQuickLook(creation) else {
             errorMessage = "Raw PCM audio has no container or sample-rate metadata for safe playback. Export the .pcm bytes instead."
             return
@@ -307,8 +359,9 @@ struct SavedCreationsLibraryView: View {
         do {
             // Space previews the whole selection; double-click previews one item.
             // Files are cloned from the library, never read into memory.
-            let group = selection.contains(creation.id) && selection.count > 1
-                ? visible.filter { selection.contains($0.id) && LibraryPreview.canQuickLook($0) }
+            // The clicked/anchor item is shown first, then the rest in order.
+            let group = previewSelection && selection.contains(creation.id) && selection.count > 1
+                ? [creation] + visible.filter { $0.id != creation.id && selection.contains($0.id) && LibraryPreview.canQuickLook($0) }
                 : [creation]
             let urls = try group.map { try CreationActions.stagedFileURL(for: $0, in: store) }
             guard QuickLookPreview.shared.show(fileURLs: urls) else { throw CocoaError(.fileReadUnknown) }
@@ -385,8 +438,8 @@ struct SavedCreationsLibraryView: View {
 
 enum LibraryLayout: String { case grid, list }
 
-/// Thumbnails are decoded lazily and only for images; other kinds show their
-/// symbol. Decoding is a downsampled ImageIO thumbnail of the stored file,
+/// Thumbnails are decoded lazily for images and videos (poster frame);
+/// other kinds show their symbol. Decoding is a downsampled ImageIO thumbnail of the stored file,
 /// cached in memory — no full decode or checksum per cell.
 struct LibraryThumbnail: View {
     let creation: SavedCreation
@@ -407,11 +460,24 @@ struct LibraryThumbnail: View {
             }
             .clipped()
             .accessibilityHidden(true)
+            .overlay {
+                if creation.kind == .video, image != nil {
+                    Image(systemName: "play.circle.fill")
+                        .font(ORBFont.title2)
+                        .foregroundStyle(.white, .black.opacity(0.45))
+                        .accessibilityHidden(true)
+                }
+            }
             .task(id: creation.id) {
-                guard creation.kind == .image, image == nil else { return }
+                guard creation.kind == .image || creation.kind == .video, image == nil else { return }
                 if let hit = CreationThumbnails.shared.cached(id: creation.id, maxPixel: maxPixel) { image = hit; return }
                 guard let url = try? store.fileURL(for: creation) else { return }
-                image = await CreationThumbnails.shared.thumbnail(id: creation.id, fileURL: url, maxPixel: maxPixel)
+                if creation.kind == .video {
+                    image = await CreationThumbnails.shared.videoPoster(id: creation.id, fileURL: url,
+                                                                        mimeType: creation.mimeType, maxPixel: maxPixel)
+                } else {
+                    image = await CreationThumbnails.shared.thumbnail(id: creation.id, fileURL: url, maxPixel: maxPixel)
+                }
             }
     }
 }

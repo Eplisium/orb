@@ -24,12 +24,17 @@ struct VideoView: View {
     @StudioState("VideoView.savedVideos") private var savedVideos: [String: SavedCreation] = [:]
     @StudioState("VideoView.downloadErrors") private var downloadErrors: [String: String] = [:]
     @StudioState("VideoView.downloading") private var downloading: Set<String> = []
-    @StudioState("VideoView.isSubmitting") private var isSubmitting = false
-    // Durable jobs that can be resumed (W09 step 3). Refreshed on appear and
-    // whenever the service's active job changes (poll ticks, terminal states).
-    @StudioState("VideoView.resumableRecords") private var resumableRecords: [JobRecord] = []
-    // Finished jobs whose video was never saved (e.g. app quit mid-download).
-    @StudioState("VideoView.downloadableRecords") private var downloadableRecords: [JobRecord] = []
+    /// POST /videos requests not yet answered (STUDIO-6). Only these lock
+    /// the button; a submitted job keeps polling in the tray.
+    @StudioState("VideoView.postingSubmits") private var postingSubmits = 0
+    // Every known, resumable and downloadable job from ONE storage read,
+    // refreshed on appear, poll ticks and storage revisions — never from
+    // `body` (STUDIO-5).
+    @StudioState("VideoView.jobSnapshot") private var jobSnapshot = VideoGenService.JobRecordSnapshot.empty
+    @StudioState("VideoView.promptHistoryRevision") private var promptHistoryRevision = 0
+    @State private var dropTargetFirst = false
+    @State private var dropTargetLast = false
+    @EnvironmentObject private var shell: ShellController
 
     /// Preset staged by Apply for a different model; consumed by the model-change reset.
     @State private var pendingPreset: VideoPresetValues? = nil
@@ -42,6 +47,9 @@ struct VideoView: View {
     }
 
     private let accent = ORBTheme.accent
+    private let promptHistory = StudioPromptHistory(studio: .video)
+    private var resumableRecords: [JobRecord] { jobSnapshot.resumable }
+    private var downloadableRecords: [JobRecord] { jobSnapshot.downloadable }
 
     struct VideoJobRecord: Identifiable {
         let id: String
@@ -160,8 +168,8 @@ struct VideoView: View {
     }
 
     private func refreshResumableRecords() {
-        resumableRecords = service.resumableRecords
-        downloadableRecords = service.downloadableRecords
+        let next = service.jobRecordSnapshot()
+        if next != jobSnapshot { jobSnapshot = next }
     }
 
     /// Placeholder prompt for rows whose durable record predates prompt storage.
@@ -175,6 +183,7 @@ struct VideoView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 14) {
                 StudioHeader(title: "Video", subtitle: "Text-to-video generation", icon: "video.fill", accent: accent) {
+                    jobTray
                     StudioPresetMenu(
                         studio: .video,
                         snapshot: {
@@ -213,7 +222,12 @@ struct VideoView: View {
             }
 
             VStack(alignment: .leading, spacing: 6) {
-                StudioLabel("Prompt")
+                HStack {
+                    StudioLabel("Prompt")
+                    Spacer(minLength: 0)
+                    StudioPromptHistoryMenu(history: promptHistory, onPick: { prompt = $0 },
+                                            revision: promptHistoryRevision)
+                }
                 StudioPromptEditor(text: $prompt, placeholder: "Describe the video you want…",
                                    accessibilityLabel: "Video prompt")
             }
@@ -275,14 +289,6 @@ struct VideoView: View {
                 frameSelector("Last frame", kind: "last_frame", selection: $lastFrameURL)
             }
 
-            if !KeychainManager.hasAPIKey {
-                Text("Add an inference API key in Settings → Accounts & Keys to generate or resume video.")
-                    .font(.caption).foregroundStyle(.orange)
-            }
-            if let errorMessage {
-                PlaygroundErrorBanner(message: errorMessage) { self.errorMessage = nil }
-            }
-
             }
             .padding(18)
         }
@@ -290,6 +296,11 @@ struct VideoView: View {
         // (it used to sit at the end of the scroll content, half-clipped by the window edge).
         .safeAreaInset(edge: .bottom, spacing: 0) {
             StudioPinnedFooter {
+            // Errors sit at the top of the pinned footer, always on screen
+            // (STUDIO-2): the form above can be taller than the window.
+            if let errorMessage {
+                PlaygroundErrorBanner(message: errorMessage) { self.errorMessage = nil }
+            }
             if !service.inFlightRemoteIDs.isEmpty {
                 HStack(spacing: 8) {
                     ProgressView().controlSize(.small)
@@ -303,12 +314,17 @@ struct VideoView: View {
                 }
             }
 
-            StudioPrimaryButton(title: "Generate Video", busyTitle: "Generating…", isBusy: isSubmitting,
+            StudioPrimaryButton(title: "Generate Video", busyTitle: "Submitting…", isBusy: postingSubmits > 0,
                                 isEnabled: canSubmit, accent: accent, action: submit)
                 .keyboardShortcut(.return, modifiers: .command)
 
-            Text("Video bills per job — check the model's price before submitting.")
+            Text(costLine)
                 .font(.caption2).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            if service.inFlightRemoteIDs.count >= VideoSubmitGate.maxConcurrentJobs {
+                Text("Up to \(VideoSubmitGate.maxConcurrentJobs) jobs can poll at once. Wait for one to finish, or stop checking one.")
+                    .font(.caption2).foregroundStyle(.secondary)
+            }
             if totalCost > 0 {
                 Text("Reported spend (known charges): $\(totalCost, specifier: "%.4f")")
                     .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
@@ -326,8 +342,9 @@ struct VideoView: View {
                     .font(.caption).foregroundStyle(.secondary)
             }
             if let skus = model.pricingSkus, !skus.isEmpty {
-                Text("Pricing SKUs: " + skus.sorted { $0.key < $1.key }.map { "\($0.key): \($0.value)" }.joined(separator: " · "))
+                Text("Rates: " + StudioCostEstimate.videoRateLines(skus).joined(separator: " · "))
                     .font(.caption).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
             if model.generateAudio == true {
                 Text("Supports audio generation").font(.caption).foregroundStyle(.secondary)
@@ -337,6 +354,25 @@ struct VideoView: View {
 
     private var selectedVideoModel: VideoGenModel? {
         service.models.first(where: { $0.id == selectedModelId })
+    }
+
+    /// Pre-submit estimate from SKU pricing × duration (STUDIO-12). Never a
+    /// guessed number: unknown pricing says so.
+    private var costEstimate: StudioCostEstimate? {
+        guard let model = selectedVideoModel else { return nil }
+        let duration = Int(durationText) ?? model.supportedDurations?.first
+        let res = resolution == "auto" ? nil : resolution
+        let audio: Bool? = model.generateAudio == true ? generateAudio : nil
+        return StudioCostEstimate.video(skus: model.pricingSkus, durationSeconds: duration, resolution: res,
+                                        audio: audio, usesFrames: firstFrameURL != nil || lastFrameURL != nil)
+    }
+
+    private var costLine: String {
+        if let costEstimate {
+            let defaulted = durationText.isEmpty ? " (default duration assumed)" : ""
+            return "\(costEstimate.label)\(defaulted). Billed per job; the actual charge is reported when it finishes."
+        }
+        return "Price unknown for these settings — check the model's rates before submitting. Billed per job."
     }
 
     private func supportedAspects() -> [String] {
@@ -353,7 +389,7 @@ struct VideoView: View {
             HStack(spacing: 4) {
                 Button(selection.wrappedValue == nil ? "Choose…" : "Replace…") {
                     let panel = NSOpenPanel()
-                    panel.allowedContentTypes = [.png, .jpeg, .gif, .heic]
+                    panel.allowedContentTypes = StudioDropFilter.imageTypes
                     panel.canChooseDirectories = false
                     if panel.runModal() == .OK { selection.wrappedValue = panel.url }
                 }
@@ -365,31 +401,43 @@ struct VideoView: View {
             }.font(.caption)
             if let url = selection.wrappedValue {
                 Text(url.lastPathComponent).font(.caption2).lineLimit(1)
+            } else if selectedVideoModel?.supportedFrameImages?.contains(kind) == true {
+                Text("or drop an image").font(.caption2).foregroundStyle(.tertiary)
             }
-        }.frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(4)
+        .studioFileDrop(kind: .image, isTargeted: kind == "first_frame" ? $dropTargetFirst : $dropTargetLast) { urls in
+            guard selectedVideoModel?.supportedFrameImages?.contains(kind) == true, let url = urls.first else { return }
+            selection.wrappedValue = url
+        }
+    }
+
+    /// Media job tray, in the studio header beside Presets (V-3). Fed from
+    /// the cached snapshot, never a storage read in `body` (STUDIO-5).
+    private var jobTray: some View {
+        JobTrayButton(
+            jobs: jobSnapshot.all,
+            onResume: { resumeDurable($0) },
+            onStop: { record in
+                if let remoteID = record.remoteID { service.stopPolling(remoteID: remoteID) }
+                refreshResumableRecords()
+            },
+            onDownload: { record in Task { await downloadDurable(record) } },
+            // Opens ORB's Library on the saved item — not Finder (STUDIO-4).
+            onOpen: { record in StudioNavigation.showInLibrary(record.savedCreationID, shell: shell) },
+            onDismiss: { record in
+                if service.dismissJob(record) { refreshResumableRecords() }
+            },
+            isDownloading: { record in record.remoteID.map { service.downloadingRemoteIDs.contains($0) } ?? false },
+            hasLiveRun: { service.isRunInFlight(for: $0) }
+        )
+        .labelStyle(.iconOnly)
+        .buttonStyle(.borderless)
     }
 
     private var jobsColumn: some View {
-        VStack(alignment: .trailing, spacing: 0) {
-            JobTrayButton(
-                jobs: service.allJobRecords,
-                onResume: { resumeDurable($0) },
-                onStop: { record in
-                    if let remoteID = record.remoteID { service.stopPolling(remoteID: remoteID) }
-                    refreshResumableRecords()
-                },
-                onDownload: { record in Task { await downloadDurable(record) } },
-                onOpen: { record in
-                    if let id = record.savedCreationID, let creation = saved.creations.first(where: { $0.id == id }) {
-                        CreationActions.reveal(creation, in: saved)
-                    }
-                },
-                isDownloading: { record in record.remoteID.map { service.downloadingRemoteIDs.contains($0) } ?? false },
-                hasLiveRun: { service.isRunInFlight(for: $0) }
-            )
-            .padding(.horizontal, 14).padding(.top, 10)
-            jobsColumnBody
-        }
+        jobsColumnBody
     }
 
     private var jobsColumnBody: some View {
@@ -416,14 +464,7 @@ struct VideoView: View {
                         if saved.creations.contains(where: { $0.kind == .video }) {
                             Text("SAVED VIDEOS").font(.caption.bold()).frame(maxWidth: .infinity, alignment: .leading)
                             ForEach(saved.creations.filter { $0.kind == .video }) { creation in
-                                HStack {
-                                    VStack(alignment: .leading) {
-                                        Text(creation.modelID).font(.caption.monospacedDigit())
-                                        if let prompt = creation.prompt { Text(prompt).font(.caption).lineLimit(2) }
-                                    }
-                                    Spacer()
-                                    Button("Export…") { exportSaved(creation) }
-                                }.padding(12).background(.orbSurface(0.03))
+                                savedVideoCard(creation)
                             }
                         }
                         ForEach(jobs) { record in
@@ -656,6 +697,9 @@ struct VideoView: View {
                     .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
             }
             if record.job.isSuccess {
+                if let creation = savedVideos[record.id] {
+                    SavedVideoPlayerCard(creation: creation, store: saved)
+                }
                 HStack(spacing: 8) {
                     if downloading.contains(record.id) || service.downloadingRemoteIDs.contains(record.job.id) {
                         ProgressView().controlSize(.small); Text("Saving in ORB…")
@@ -664,7 +708,8 @@ struct VideoView: View {
                     else { Button("Download & save") { Task { await keepVideo(record.id) } } }
                     Spacer()
                     if let creation = savedVideos[record.id] {
-                        CreationActionsMenu(creation: creation, store: saved) { errorMessage = $0 }
+                        CreationActionsMenu(creation: creation, store: saved, onError: { errorMessage = $0 },
+                                            openInStudio: { StudioNavigation.openInStudio($0, shell: shell) })
                         Button("Export…") { exportSaved(creation) }
                     }
                 }
@@ -711,31 +756,37 @@ struct VideoView: View {
             .clipShape(Capsule())
     }
 
-    private func header(title: String, subtitle: String, icon: String) -> some View {
-        HStack(spacing: 10) {
-            ZStack {
-                Circle().fill(accent.opacity(0.13)).frame(width: 34, height: 34)
-                Image(systemName: icon).foregroundStyle(accent)
-            }
-            VStack(alignment: .leading, spacing: 1) {
-                Text(title).orbFont(size: 15, weight: .semibold)
-                Text(subtitle).orbFont(size: 11).foregroundStyle(.secondary)
+    private func savedVideoCard(_ creation: SavedCreation) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            SavedVideoPlayerCard(creation: creation, store: saved, height: 150)
+            HStack(alignment: .top) {
+                VStack(alignment: .leading, spacing: 2) {
+                    if let prompt = creation.prompt { Text(prompt).font(.caption).lineLimit(2) }
+                    Text(creation.modelID).font(.caption.monospacedDigit()).foregroundStyle(.tertiary).lineLimit(1)
+                }
+                Spacer()
+                CreationActionsMenu(creation: creation, store: saved, onError: { errorMessage = $0 },
+                                    openInStudio: { StudioNavigation.openInStudio($0, shell: shell) })
+                Button("Export…") { exportSaved(creation) }
             }
         }
+        .padding(12)
+        .background(.orbSurface(0.03))
+        .clipShape(RoundedRectangle(cornerRadius: 12))
     }
 
     private var canSubmit: Bool {
-        !selectedModelId.isEmpty && !service.isLoadingModels
-            && !prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            && KeychainManager.hasAPIKey
-            && !isSubmitting && !resumableRecords.contains(where: { service.isRunInFlight(for: $0) })
+        VideoSubmitGate.canSubmit(
+            hasModel: !selectedModelId.isEmpty && !service.isLoadingModels,
+            hasPrompt: !prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+            hasKey: KeychainManager.hasAPIKey,
+            postingSubmits: postingSubmits,
+            pollingJobs: service.inFlightRemoteIDs.count
+        )
     }
 
     private func submit() {
-        guard canSubmit else {
-            if !KeychainManager.hasAPIKey { errorMessage = "Add your OpenRouter API key in Settings → Accounts & Keys first." }
-            return
-        }
+        guard canSubmit else { return }
         errorMessage = nil
         let modelId = selectedModelId
         let promptText = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -748,13 +799,9 @@ struct VideoView: View {
             request.duration = seconds
         }
         request.generateAudio = selectedVideoModel?.generateAudio == true ? generateAudio : nil
+        let firstFrame = selectedVideoModel?.supportedFrameImages?.contains("first_frame") == true ? firstFrameURL : nil
+        let lastFrame = selectedVideoModel?.supportedFrameImages?.contains("last_frame") == true ? lastFrameURL : nil
         do {
-            if let firstFrameURL, selectedVideoModel?.supportedFrameImages?.contains("first_frame") == true {
-                request.firstFrameImage = try MediaStudioImageFile.dataURL(for: firstFrameURL)
-            }
-            if let lastFrameURL, selectedVideoModel?.supportedFrameImages?.contains("last_frame") == true {
-                request.lastFrameImage = try MediaStudioImageFile.dataURL(for: lastFrameURL)
-            }
             if selectedVideoModel?.seed == true, !seedText.trimmingCharacters(in: .whitespaces).isEmpty {
                 guard let seed = Int(seedText.trimmingCharacters(in: .whitespaces)) else {
                     throw MediaStudioImageFile.Failure.invalid("Seed must be a whole number.")
@@ -772,17 +819,40 @@ struct VideoView: View {
             prompt: promptText.isEmpty ? "(no prompt)" : promptText,
             modelId: modelId
         ), at: 0)
-        isSubmitting = true
+        let submitRequest = request
+        postingSubmits += 1
         Task {
-            defer { isSubmitting = false }
+            // The button is released once the POST is answered (or fails);
+            // polling continues in the tray (STUDIO-6).
+            var released = false
+            @MainActor func release() { if !released { released = true; postingSubmits -= 1 } }
+            defer { release() }
+            // Frame files are read and base64-encoded off the main actor
+            // (STUDIO-10). A local read failure sent nothing: drop the row.
+            let frames: [String]
             do {
-                let finished = try await service.submitAndPoll(request) { update in
+                frames = try await MediaStudioImageFile.dataURLsOffMain([firstFrame, lastFrame].compactMap { $0 })
+            } catch {
+                errorMessage = error.localizedDescription
+                jobs.removeAll { $0.id == recordId }
+                return
+            }
+            do {
+                var request = submitRequest
+                var next = frames.makeIterator()
+                if firstFrame != nil { request.firstFrameImage = next.next() }
+                if lastFrame != nil { request.lastFrameImage = next.next() }
+                let finished = try await service.submitAndPoll(request, reportingSubmission: { _ in
+                    release()
+                    promptHistory.record(promptText)
+                    promptHistoryRevision += 1
+                }, onUpdate: { update in
                     Task { @MainActor in
                         if let index = jobs.firstIndex(where: { $0.id == recordId }) {
                             jobs[index].job = update
                         }
                     }
-                }
+                })
                 totalCost += finished.cost ?? 0
                 if let index = jobs.firstIndex(where: { $0.id == recordId }) { jobs[index].job = finished }
                 await keepVideo(recordId)
@@ -846,4 +916,16 @@ struct VideoView: View {
 private extension VideoJob {
     /// Convenience alias — the API calls them `unsigned_urls`.
     var urls: [String] { unsignedURLs ?? [] }
+}
+
+/// Submit gating for the Video studio (STUDIO-6). Only an unanswered POST
+/// locks the button — a submitted job polls in the tray — and at most
+/// `maxConcurrentJobs` jobs poll at once.
+enum VideoSubmitGate {
+    static let maxConcurrentJobs = 4
+
+    static func canSubmit(hasModel: Bool, hasPrompt: Bool, hasKey: Bool,
+                          postingSubmits: Int, pollingJobs: Int) -> Bool {
+        hasModel && hasPrompt && hasKey && postingSubmits == 0 && pollingJobs < maxConcurrentJobs
+    }
 }

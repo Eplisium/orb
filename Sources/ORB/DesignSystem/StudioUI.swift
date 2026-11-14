@@ -227,3 +227,67 @@ struct StudioNotice: View {
         }
     }
 }
+
+// MARK: - Shared studio scaffold (V-3)
+
+/// The left control column every studio uses: header + scrolling controls,
+/// with the primary action pinned in a footer that is always on screen.
+/// Errors belong at the top of `footer` (STUDIO-2), never at the end of the
+/// scrolling form where they can render below the fold.
+struct StudioControlColumn<Controls: View, Footer: View>: View {
+    static var width: CGFloat { 340 }
+    @ViewBuilder var controls: Controls
+    @ViewBuilder var footer: Footer
+
+    init(@ViewBuilder controls: () -> Controls, @ViewBuilder footer: () -> Footer) {
+        self.controls = controls()
+        self.footer = footer()
+    }
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 14) { controls }
+                .padding(18)
+        }
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+            StudioPinnedFooter { footer }
+        }
+        .frame(width: Self.width)
+        .background(.ultraThinMaterial.opacity(0.72))
+    }
+}
+
+/// Control column + hairline + results pane: the layout shared by Images,
+/// Video, Speech and Embeddings (Files hosts the Library full-width).
+struct StudioScaffold<Controls: View, Footer: View, Results: View>: View {
+    @ViewBuilder var controls: Controls
+    @ViewBuilder var footer: Footer
+    @ViewBuilder var results: Results
+
+    init(@ViewBuilder controls: () -> Controls, @ViewBuilder footer: () -> Footer,
+         @ViewBuilder results: () -> Results) {
+        self.controls = controls(); self.footer = footer(); self.results = results()
+    }
+
+    var body: some View {
+        HStack(spacing: 0) {
+            StudioControlColumn { controls } footer: { footer }
+            Rectangle().fill(.orbSurface(0.07)).frame(width: 1)
+            results
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .background(Color(nsColor: .windowBackgroundColor))
+        }
+    }
+}
+
+/// Heading for a results/history pane section.
+struct StudioSectionTitle: View {
+    let text: String
+    init(_ text: String) { self.text = text }
+    var body: some View {
+        Text(text.uppercased())
+            .font(ORBFont.caption.weight(.bold))
+            .foregroundStyle(ORBTheme.textSecondary)
+            .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}

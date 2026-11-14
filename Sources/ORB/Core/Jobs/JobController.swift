@@ -334,7 +334,7 @@ final class JobController: ObservableObject {
     @discardableResult
     func demoteInterruptedPolls(excluding live: Set<String> = []) -> Int {
         var demoted = 0
-        for record in allJobs() where record.pollingState == .polling {
+        for record in allJobs(includeDismissed: true) where record.pollingState == .polling {
             guard persistenceConflicts[record.id] == nil else { continue }
             guard let remoteID = record.remoteID, !live.contains(remoteID) else { continue }
             recordStoppedLocally(remoteID: remoteID)
@@ -417,13 +417,27 @@ final class JobController: ObservableObject {
         allJobs().filter { $0.needsDownload && persistenceConflicts[$0.id] == nil }
     }
 
-    func allJobs() -> [JobRecord] {
+    /// Every job for the tray and studio lists. Dismissed jobs are left out
+    /// (STUDIO-4) unless `includeDismissed` — recovery passes always see all.
+    func allJobs(includeDismissed: Bool = false) -> [JobRecord] {
         do {
             let stored = try database.loadJobRecordsChecked()
             setReadError(nil)
             var merged: [UUID: JobRecord] = [:]
             for record in stored where merged[record.id] == nil { merged[record.id] = record }
             for (id, record) in pending { merged[id] = record }
+            // Dismissed rows leave the listing; unsaved snapshots never do, so
+            // a dismissal can never hide a pending durability warning. A
+            // dismissed job that became actionable again (resumable or
+            // downloadable) reappears.
+            if !includeDismissed {
+                let dismissed = dismissedIDs()
+                for id in dismissed where pending[id] == nil {
+                    if let record = merged[id], JobPresentation.make(record, hasLiveRun: false).actions.contains(.dismiss) {
+                        merged[id] = nil
+                    }
+                }
+            }
             return sorted(Array(merged.values))
         } catch {
             // Do not return a partial database inventory. Owned pending rows
@@ -431,6 +445,36 @@ final class JobController: ObservableObject {
             setReadError(error.localizedDescription)
             return pendingRecords
         }
+    }
+
+    // MARK: Dismissal (STUDIO-4)
+
+    /// Session copy of dismissals, so a dismissal still applies when the side
+    /// table cannot be read or written (it then lasts until relaunch).
+    private var sessionDismissals: Set<UUID> = []
+
+    private func dismissedIDs() -> Set<UUID> {
+        guard let stored = try? database.loadDismissedJobIDsChecked() else { return sessionDismissals }
+        return sessionDismissals.union(stored)
+    }
+
+    /// True when the tray offers Dismiss for the record: failed, rejected,
+    /// unconfirmed, cancelled, expired or non-resumable stopped jobs. Active
+    /// (resumable), downloadable and unsaved records are never dismissible.
+    func canDismiss(_ record: JobRecord) -> Bool {
+        pending[record.id] == nil && persistenceConflicts[record.id] == nil
+            && JobPresentation.make(record, hasLiveRun: false).actions.contains(.dismiss)
+    }
+
+    /// Acknowledges a job so it leaves the tray, badge and attention count.
+    /// Only the side table changes: the durable job row is left intact.
+    @discardableResult
+    func dismiss(id: UUID) -> Bool {
+        guard let record = allJobs().first(where: { $0.id == id }), canDismiss(record) else { return false }
+        sessionDismissals.insert(id)
+        try? database.dismissJobChecked(id: id)
+        revision += 1
+        return true
     }
 
     private func sorted(_ records: [JobRecord]) -> [JobRecord] {

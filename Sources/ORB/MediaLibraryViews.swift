@@ -22,6 +22,8 @@ enum CatalogCapability: Equatable {
     /// Discovery belongs to this model, not to a transient SwiftUI task.
     private var loadTask: Task<Void, Never>?
     private var loadingModality: String?
+    /// Modality of the last load, so a network failure can offer Retry.
+    private(set) var lastModality: String?
     init(catalog: GenerateModelCatalog? = nil) { self.catalog = catalog ?? GenerateModelCatalog() }
 
     func load(_ modality: String) async {
@@ -35,6 +37,7 @@ enum CatalogCapability: Equatable {
         }
         isLoading = true
         loadingModality = modality
+        lastModality = modality
         error = nil
         let task = Task { @MainActor in
             defer {
@@ -48,6 +51,13 @@ enum CatalogCapability: Equatable {
         }
         loadTask = task
         await task.value
+    }
+
+    /// Re-runs discovery after a genuine failure (V-2: discovery is public,
+    /// so this is a network retry, not a key prompt).
+    func retry() async {
+        guard let lastModality, !isLoading else { return }
+        await load(lastModality)
     }
 
     var status: String? {
@@ -99,7 +109,14 @@ struct ModalityModelField: View {
                 }
             }
             if let status = choices.status {
-                Text(status).font(.caption2).foregroundStyle(choices.error == nil ? Color.secondary : Color.orange)
+                HStack(alignment: .firstTextBaseline, spacing: 6) {
+                    Text(status).font(.caption2).foregroundStyle(choices.error == nil ? Color.secondary : Color.orange)
+                        .fixedSize(horizontal: false, vertical: true)
+                    if choices.error != nil {
+                        Button("Retry") { Task { await choices.retry() } }
+                            .buttonStyle(.link).font(.caption2)
+                    }
+                }
             }
         }
     }

@@ -30,6 +30,10 @@ extension DatabaseManager {
                 identity TEXT NOT NULL,
                 root TEXT
             );
+            CREATE TABLE IF NOT EXISTS job_dismissals (
+                job_id TEXT PRIMARY KEY,
+                dismissed_at REAL NOT NULL
+            );
             CREATE TABLE IF NOT EXISTS asset_catalog_origin (
                 singleton INTEGER PRIMARY KEY CHECK(singleton=1),
                 identity TEXT NOT NULL, version INTEGER NOT NULL, database_path TEXT NOT NULL
@@ -133,6 +137,22 @@ extension DatabaseManager {
             }
         }
         try requireDone(stmt)
+    }
+
+    // MARK: Job dismissals (STUDIO-4)
+
+    /// Hides a finished/failed job from the tray. Additive side table: the
+    /// job row itself (and its durable recovery state) is never modified.
+    func dismissJobChecked(id: UUID, at date: Date = Date()) throws {
+        try libraryExecute(
+            "INSERT INTO job_dismissals(job_id, dismissed_at) VALUES (?, ?) ON CONFLICT(job_id) DO NOTHING;",
+            [id.uuidString, String(date.timeIntervalSince1970)]
+        )
+    }
+
+    /// IDs of dismissed jobs. A failed read throws, never returns an empty set.
+    func loadDismissedJobIDsChecked() throws -> Set<UUID> {
+        Set(try libraryRows("SELECT job_id FROM job_dismissals;").compactMap { UUID(uuidString: $0[0]) })
     }
 
     // MARK: Job media fields

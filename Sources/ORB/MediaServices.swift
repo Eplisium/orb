@@ -17,10 +17,41 @@ struct GenerateCatalogModel: Decodable, Sendable, Identifiable {
             case outputModalities = "output_modalities"
         }
     }
+    /// Catalog prices (USD per unit as decimal strings). Optional and
+    /// lenient: a missing or odd pricing block never drops the model.
+    var pricing: Pricing? = nil
+    struct Pricing: Decodable, Sendable, Equatable {
+        let prompt: String?
+        let completion: String?
+        init(prompt: String?, completion: String? = nil) { self.prompt = prompt; self.completion = completion }
+        init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            func value(_ key: CodingKeys) -> String? {
+                if let text = try? c.decodeIfPresent(String.self, forKey: key) { return text }
+                if let number = try? c.decodeIfPresent(Double.self, forKey: key) { return String(number) }
+                return nil
+            }
+            prompt = value(.prompt)
+            completion = value(.completion)
+        }
+        enum CodingKeys: String, CodingKey { case prompt, completion }
+    }
     var outputModalities: [String]? { architecture?.outputModalities }
     enum CodingKeys: String, CodingKey {
-        case id, name, architecture
+        case id, name, architecture, pricing
         case supportedVoices = "supported_voices"
+    }
+    init(id: String, name: String, supportedVoices: [String]?, architecture: Architecture?, pricing: Pricing? = nil) {
+        self.id = id; self.name = name; self.supportedVoices = supportedVoices
+        self.architecture = architecture; self.pricing = pricing
+    }
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(String.self, forKey: .id)
+        name = try c.decode(String.self, forKey: .name)
+        supportedVoices = try c.decodeIfPresent([String].self, forKey: .supportedVoices)
+        architecture = try c.decodeIfPresent(Architecture.self, forKey: .architecture)
+        pricing = try? c.decodeIfPresent(Pricing.self, forKey: .pricing)
     }
 }
 
@@ -38,7 +69,8 @@ final class GenerateModelCatalog {
         }
         struct List: Decodable { let data: [GenerateCatalogModel] }
         let embeddingsOnly = outputModalities == ["embeddings"]
-        let request = try transport.request(
+        // Public catalog routes: discovery works before a key exists (V-4).
+        let request = try transport.publicRequest(
             path: embeddingsOnly ? "embeddings/models" : "models",
             queryItems: embeddingsOnly ? [] : [URLQueryItem(name: "output_modalities", value: outputModalities.joined(separator: ","))]
         )
@@ -134,8 +166,15 @@ struct RerankResponse: Decodable {
 
 @MainActor
 final class EmbeddingService: ObservableObject {
-    @Published var isWorking = false
+    /// Separate in-flight counts (STUDIO-3): an embed finishing must not
+    /// re-enable or relabel a rerank that is still running, and vice versa.
+    @Published private(set) var embedsInFlight = 0
+    @Published private(set) var reranksInFlight = 0
     @Published var lastError: String?
+    var isEmbedding: Bool { embedsInFlight > 0 }
+    var isReranking: Bool { reranksInFlight > 0 }
+    /// Either operation running (sidebar busy dot).
+    var isWorking: Bool { isEmbedding || isReranking }
 
     private let transport: MediaTransport
 
@@ -146,8 +185,8 @@ final class EmbeddingService: ObservableObject {
               request.encodingFormat == nil || request.encodingFormat == "float" else {
             throw MediaServiceError.invalidUpload("Embeddings require positive dimensions and float encoding for vector decoding.")
         }
-        isWorking = true
-        defer { isWorking = false }
+        embedsInFlight += 1
+        defer { embedsInFlight -= 1 }
         let body = try JSONEncoder().encode(request)
         let urlRequest = try transport.request(path: "embeddings", method: "POST", body: body)
         let response: EmbeddingResponse = try await transport.send(urlRequest)
@@ -161,8 +200,8 @@ final class EmbeddingService: ObservableObject {
         guard !request.documents.isEmpty, request.topN.map({ $0 > 0 }) ?? true else {
             throw MediaServiceError.invalidUpload("Rerank needs documents and a positive top_n.")
         }
-        isWorking = true
-        defer { isWorking = false }
+        reranksInFlight += 1
+        defer { reranksInFlight -= 1 }
         let body = try JSONEncoder().encode(request)
         let urlRequest = try transport.request(path: "rerank", method: "POST", body: body)
         let response: RerankResponse = try await transport.send(urlRequest)
@@ -447,17 +486,9 @@ final class DirectoryService: ObservableObject {
 
     func fetchProviders() async {
         do {
-            // Public endpoint, but MediaTransport requires a key; fall back to
-            // an unauthenticated fetch when none is configured.
-            if KeychainManager.getAPIKey() == nil {
-                let url = URL(string: "https://openrouter.ai/api/v1/providers")!
-                let (data, _) = try await URLSession.shared.data(from: url)
-                providers = try JSONDecoder().decode(ProviderList.self, from: data).data
-            } else {
-                let request = try transport.request(path: "providers")
-                let list: ProviderList = try await transport.send(request)
-                providers = list.data
-            }
+            // Public endpoint: never read the Keychain just to list providers.
+            let list: ProviderList = try await transport.send(transport.publicRequest(path: "providers"))
+            providers = list.data
         } catch is CancellationError {
             // Leave prior providers in place; a cancelled refresh is not an error.
         } catch {

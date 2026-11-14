@@ -142,6 +142,35 @@ open class MediaTransport: @unchecked Sendable {
         try request(url: MediaEndpointURL.url(path: path, queryItems: queryItems, base: baseURL), method: method, body: body)
     }
 
+    /// Catalog routes that OpenRouter serves without authentication, so a
+    /// studio can list models before any key exists (V-4).
+    static let publicCatalogPaths: Set<String> = [
+        "images/models", "videos/models", "embeddings/models", "models", "providers"
+    ]
+
+    /// True for a public catalog path, including an image model's
+    /// `images/models/{author}/{slug}/endpoints` listing.
+    static func isPublicCatalogPath(_ path: String) -> Bool {
+        if publicCatalogPaths.contains(path) { return true }
+        let parts = path.split(separator: "/", omittingEmptySubsequences: false)
+        return parts.count == 5 && parts[0] == "images" && parts[1] == "models"
+            && parts[4] == "endpoints" && !parts[2].isEmpty && !parts[3].isEmpty
+    }
+
+    /// An unauthenticated GET for a public catalog route. The credential
+    /// provider is never consulted and no `Authorization` header is set, and
+    /// the URL is still built and origin-checked by `MediaEndpointURL`, so a
+    /// catalog call can neither leak the key nor reach another origin.
+    func publicRequest(path: String, queryItems: [URLQueryItem] = []) throws -> URLRequest {
+        guard Self.isPublicCatalogPath(path) else { throw MediaServiceError.invalidPath(path) }
+        let url = try MediaEndpointURL.url(path: path, queryItems: queryItems, base: baseURL)
+        let approved = try MediaEndpointURL.validate(url, original: url.absoluteString)
+        var request = URLRequest(url: approved, timeoutInterval: NetworkTimeouts.request)
+        request.httpMethod = "GET"
+        request.setValue("ORB", forHTTPHeaderField: "X-OpenRouter-Title")
+        return request
+    }
+
     /// Sends the request and decodes a `Decodable` body, mapping HTTP
     /// failures to typed `MediaServiceError` cases.
     open func send<T: Decodable>(_ request: URLRequest, as type: T.Type = T.self) async throws -> T {

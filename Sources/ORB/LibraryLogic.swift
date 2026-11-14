@@ -94,6 +94,37 @@ struct LibrarySelection: Equatable {
         if ids.remove(id) == nil { ids.insert(id); anchor = id }
     }
 
+    /// The item last clicked or moved to (Finder's selection anchor).
+    var anchorID: UUID? { anchor }
+
+    /// Plain click: select only this item and make it the anchor (STUDIO-7).
+    mutating func select(_ id: UUID) { ids = [id]; anchor = id }
+
+    /// Finder click semantics: ⌘ toggles, ⇧ extends from the anchor, a
+    /// plain click replaces the selection.
+    mutating func click(_ id: UUID, command: Bool, shift: Bool, in ordered: [UUID]) {
+        if shift { extend(to: id, in: ordered) }
+        else if command { toggle(id) }
+        else { select(id) }
+    }
+
+    /// Arrow-key move by `offset` positions (±1 across, ±columns down/up).
+    /// With `extending`, the range from the old anchor grows instead.
+    mutating func move(by offset: Int, in ordered: [UUID], extending: Bool) {
+        guard !ordered.isEmpty else { return }
+        let current = anchor.flatMap { ordered.firstIndex(of: $0) }
+        let target: Int
+        if let current { target = min(max(current + offset, 0), ordered.count - 1) }
+        else { target = offset >= 0 ? 0 : ordered.count - 1 }
+        let id = ordered[target]
+        if extending, current != nil {
+            ids.insert(id)
+            anchor = id
+        } else {
+            select(id)
+        }
+    }
+
     mutating func selectAll(_ all: [UUID]) { ids = Set(all); anchor = all.first }
     mutating func clear() { ids = []; anchor = nil }
 
@@ -221,6 +252,19 @@ enum LibraryPreview {
     /// Space previews the first selected item in visible order.
     static func target(selection: Set<UUID>, visible: [SavedCreation]) -> SavedCreation? {
         visible.first { selection.contains($0.id) }
+    }
+
+    /// Space previews the anchor (the item just clicked) when it is selected,
+    /// otherwise the first selected item in visible order.
+    static func target(selection: Set<UUID>, anchor: UUID?, visible: [SavedCreation]) -> SavedCreation? {
+        if let anchor, selection.contains(anchor), let hit = visible.first(where: { $0.id == anchor }) { return hit }
+        return target(selection: selection, visible: visible)
+    }
+
+    /// Columns of the adaptive Library grid at a given content width.
+    static func gridColumns(width: CGFloat, minimum: CGFloat = 150, spacing: CGFloat = 10) -> Int {
+        guard width.isFinite, width > 0 else { return 1 }
+        return max(1, Int((width + spacing) / (minimum + spacing)))
     }
 
     static func fileName(for c: SavedCreation) -> String { "\(c.id.uuidString).\(creationExtension(c))" }

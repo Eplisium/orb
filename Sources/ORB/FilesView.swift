@@ -12,12 +12,15 @@ struct FilesView: View {
     @ObservedObject private var listing = StudioServices.shared.remoteFileList
     @StudioState("FilesView.errorMessage") private var errorMessage: String? = nil
     // Shared so "Show all in Library" from a studio can open the Library tab.
-    @StudioState("FilesView.showingCreations") private var showingCreations = false
+    // The local Library is the default (STUDIO-11): it needs no network and
+    // no key, and holds everything the user generated.
+    @StudioState(FilesViewDefaults.showingCreationsKey) private var showingCreations = FilesViewDefaults.showsLibraryFirst
     @StudioState("FilesView.isUploading") private var isUploading = false
     /// The file awaiting delete confirmation. The service layer refuses an
     /// unconfirmed delete, so the confirmation dialog is the only way the
     /// destructive call is ever issued.
     @State private var pendingDelete: WorkspaceFile?
+    @State private var dropTargeted = false
 
     private let accent = ORBTheme.accent
 
@@ -30,14 +33,15 @@ struct FilesView: View {
             } else if listing.isFetchingPage && listing.files.isEmpty {
                 ProgressView().frame(maxWidth: .infinity, maxHeight: .infinity)
             } else if listing.files.isEmpty {
-                emptyState
+                emptyState.studioFileDrop(kind: .anyFile, isTargeted: $dropTargeted) { upload($0) }
             } else {
-                fileList
+                fileList.studioFileDrop(kind: .anyFile, isTargeted: $dropTargeted) { upload($0) }
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color(nsColor: .windowBackgroundColor))
-        .task { await listing.refresh() }
+        // Remote uploads are fetched only when that tab is shown (STUDIO-11).
+        .task { if FilesViewDefaults.shouldFetchRemote(showingCreations: showingCreations) { await listing.refresh() } }
         .onChange(of: showingCreations) { _, selected in
             if !selected { Task { await listing.refresh() } }
         }
@@ -61,11 +65,13 @@ struct FilesView: View {
 
     private var headerBar: some View {
         HStack(spacing: 12) {
-            StudioHeader(title: "Files", subtitle: "Remote uploads · creations stay on this Mac",
-                         icon: "folder.fill", accent: accent)
+            StudioHeader(title: showingCreations ? "Library" : "Files",
+                         subtitle: showingCreations ? "Everything you created · stored on this Mac"
+                                                    : "Remote uploads for chat · drop files here to upload",
+                         icon: showingCreations ? "square.stack.fill" : "folder.fill", accent: accent)
             Picker("Library", selection: $showingCreations) {
+                Text("Library").tag(true)
                 Text("Uploaded files").tag(false)
-                Text("Saved creations").tag(true)
             }
             .pickerStyle(.segmented)
             .labelsHidden()
@@ -188,33 +194,36 @@ struct FilesView: View {
         panel.canChooseFiles = true
         panel.canChooseDirectories = false
         panel.allowsMultipleSelection = true
-        if panel.runModal() == .OK {
-            isUploading = true
-            errorMessage = nil
-            Task {
-                defer { isUploading = false }
-                var failures: [String] = []
-                for url in panel.urls {
-                    do {
-                        let scoped = url.startAccessingSecurityScopedResource()
-                        defer { if scoped { url.stopAccessingSecurityScopedResource() } }
-                        // Size from metadata first: never read an oversized file.
-                        try LocalFilePreflight.check(url, limit: FileService.maxUploadBytes, purpose: "upload")
-                        let data = try Data(contentsOf: url)
-                        let mime = (try? url.resourceValues(forKeys: [.contentTypeKey]).contentType?.preferredMIMEType)
-                            ?? "application/octet-stream"
-                        // Empty/oversized uploads are validated (and rejected
-                        // with a clear message) by FileService before any
-                        // request is sent.
-                        _ = try await listing.upload(filename: url.lastPathComponent, mimeType: mime, data: data)
-                    } catch is CancellationError {
-                        break
-                    } catch {
-                        failures.append("\(url.lastPathComponent): \(error.localizedDescription)")
-                    }
+        if panel.runModal() == .OK { upload(panel.urls) }
+    }
+
+    /// Uploads picked or dropped files (STUDIO-14) one at a time.
+    private func upload(_ urls: [URL]) {
+        guard !isUploading, KeychainManager.hasAPIKey, !urls.isEmpty else { return }
+        isUploading = true
+        errorMessage = nil
+        Task {
+            defer { isUploading = false }
+            var failures: [String] = []
+            for url in urls {
+                do {
+                    // Size from metadata first: never read an oversized file.
+                    try LocalFilePreflight.check(url, limit: FileService.maxUploadBytes, purpose: "upload")
+                    // Read off the main actor (STUDIO-10).
+                    let data = try await LocalFileRead.data(at: url)
+                    let mime = (try? url.resourceValues(forKeys: [.contentTypeKey]).contentType?.preferredMIMEType)
+                        ?? "application/octet-stream"
+                    // Empty/oversized uploads are validated (and rejected
+                    // with a clear message) by FileService before any
+                    // request is sent.
+                    _ = try await listing.upload(filename: url.lastPathComponent, mimeType: mime, data: data)
+                } catch is CancellationError {
+                    break
+                } catch {
+                    failures.append("\(url.lastPathComponent): \(error.localizedDescription)")
                 }
-                if !failures.isEmpty { errorMessage = failures.joined(separator: "\n") }
             }
+            if !failures.isEmpty { errorMessage = failures.joined(separator: "\n") }
         }
     }
 
@@ -229,4 +238,11 @@ struct FilesView: View {
             }
         }
     }
+}
+
+/// Files/Library tab defaults (STUDIO-11), separated for tests.
+enum FilesViewDefaults {
+    static let showingCreationsKey = "FilesView.showingCreations"
+    static let showsLibraryFirst = true
+    static func shouldFetchRemote(showingCreations: Bool) -> Bool { !showingCreations }
 }

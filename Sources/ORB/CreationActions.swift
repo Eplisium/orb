@@ -1,4 +1,5 @@
 import AppKit
+import AVKit
 import SwiftUI
 import UniformTypeIdentifiers
 
@@ -44,6 +45,24 @@ enum CreationActions {
         }
     }
 
+    /// Quick Look preview of the staged, friendly-named copy (STUDIO-1).
+    /// Raw PCM has nothing safe to preview and is refused.
+    @discardableResult
+    static func open(_ creation: SavedCreation, in store: SavedCreationsStore) -> Bool {
+        guard LibraryPreview.canQuickLook(creation),
+              let url = try? stagedFileURL(for: creation, in: store) else { return false }
+        return QuickLookPreview.shared.show(fileURLs: [url])
+    }
+
+    /// Item titles in menu order, so tests can assert the shared menu.
+    static func menuTitles(for creation: SavedCreation, canOpenInStudio: Bool) -> [String] {
+        var titles: [String] = []
+        if LibraryPreview.canQuickLook(creation) { titles.append("Open") }
+        if canOpenInStudio, StudioReusePlan.plan(for: creation) != nil { titles.append("Open in Studio") }
+        titles += [creation.kind == .image ? "Copy Image" : "Copy File", "Reveal in Finder", "Share…"]
+        return titles
+    }
+
     static func reveal(_ creation: SavedCreation, in store: SavedCreationsStore) {
         guard let url = try? store.fileURL(for: creation) else { return }
         NSWorkspace.shared.activateFileViewerSelecting([url])
@@ -85,8 +104,16 @@ enum CreationActions {
 struct CreationActionItems: View {
     let creation: SavedCreation
     let store: SavedCreationsStore
+    /// Re-run in the matching studio (STUDIO-13); nil hides the item.
+    var openInStudio: ((SavedCreation) -> Void)? = nil
 
     var body: some View {
+        if LibraryPreview.canQuickLook(creation) {
+            Button("Open") { CreationActions.open(creation, in: store) }
+        }
+        if let openInStudio, StudioReusePlan.plan(for: creation) != nil {
+            Button("Open in Studio") { openInStudio(creation) }
+        }
         Button(creation.kind == .image ? "Copy Image" : "Copy File") { CreationActions.copy(creation, in: store) }
         Button("Reveal in Finder") { CreationActions.reveal(creation, in: store) }
         Button("Share…") { CreationActions.share(creation, in: store) }
@@ -98,10 +125,11 @@ struct CreationActionsMenu: View {
     let creation: SavedCreation
     let store: SavedCreationsStore
     var onError: (String) -> Void = { _ in }
+    var openInStudio: ((SavedCreation) -> Void)? = nil
 
     var body: some View {
         Menu {
-            CreationActionItems(creation: creation, store: store)
+            CreationActionItems(creation: creation, store: store, openInStudio: openInStudio)
         } label: {
             Image(systemName: "ellipsis.circle")
         }
@@ -109,7 +137,7 @@ struct CreationActionsMenu: View {
         .menuIndicator(.hidden)
         .fixedSize()
         .accessibilityLabel("More actions")
-        .help("Copy, reveal in Finder, or share")
+        .help("Open, copy, reveal in Finder, or share")
     }
 }
 
@@ -117,5 +145,61 @@ extension View {
     /// Drag the creation's file out to Finder or another app.
     func creationDrag(_ creation: SavedCreation, store: SavedCreationsStore) -> some View {
         onDrag { CreationActions.itemProvider(for: creation, in: store) }
+    }
+}
+
+// MARK: - In-studio video playback (STUDIO-1)
+
+/// A saved video's poster frame; clicking it plays the video inline with
+/// AVKit controls. The player plays the staged friendly-named copy, never
+/// the content-addressed original, and stops when the card leaves screen.
+struct SavedVideoPlayerCard: View {
+    let creation: SavedCreation
+    let store: SavedCreationsStore
+    var height: CGFloat = 180
+    @State private var player: AVPlayer?
+    @State private var failure: String?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            ZStack {
+                if let player {
+                    VideoPlayer(player: player)
+                } else {
+                    Button(action: start) {
+                        LibraryThumbnail(creation: creation, store: store, maxPixel: 640)
+                            .overlay {
+                                Image(systemName: "play.circle.fill")
+                                    .font(.system(.largeTitle))
+                                    .foregroundStyle(.white, .black.opacity(0.45))
+                            }
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Play video")
+                    .help("Play")
+                }
+            }
+            .frame(maxWidth: .infinity)
+            .frame(height: height)
+            .background(.black.opacity(0.85))
+            .clipShape(RoundedRectangle(cornerRadius: ORBMetrics.radiusMD))
+            if let failure {
+                Text(failure).font(ORBFont.caption).foregroundStyle(ORBTheme.warning)
+            }
+        }
+        .onDisappear { player?.pause(); player = nil }
+    }
+
+    private func start() {
+        do {
+            let url = try CreationActions.stagedFileURL(for: creation, in: store)
+            let player = AVPlayer(url: url)
+            self.player = player
+            failure = nil
+            player.play()
+        } catch {
+            failure = "Couldn't play this video: \(error.localizedDescription)"
+        }
     }
 }

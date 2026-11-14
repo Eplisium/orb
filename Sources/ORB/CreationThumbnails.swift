@@ -1,4 +1,5 @@
 import AppKit
+import AVFoundation
 import ImageIO
 
 // MARK: - Library / studio thumbnails
@@ -29,6 +30,39 @@ final class CreationThumbnails: @unchecked Sendable {
         }.value
         if let image { cache.setObject(image, forKey: key) }
         return image
+    }
+
+    /// Poster frame for a video file (STUDIO-1), generated off the main
+    /// actor with AVAssetImageGenerator and cached like image thumbnails.
+    /// Managed files have no extension, so the MIME type is passed through.
+    func videoPoster(id: UUID, fileURL: URL, mimeType: String?, maxPixel: Int) async -> NSImage? {
+        let key = Self.key(id, maxPixel)
+        if let hit = cache.object(forKey: key) { return hit }
+        let image = await Task.detached(priority: .utility) {
+            await Self.decodeVideoPoster(fileURL: fileURL, mimeType: mimeType, maxPixel: maxPixel)
+        }.value
+        if let image { cache.setObject(image, forKey: key) }
+        return image
+    }
+
+    static func decodeVideoPoster(fileURL: URL, mimeType: String?, maxPixel: Int) async -> NSImage? {
+        var options: [String: Any] = [:]
+        if let mimeType, !mimeType.isEmpty, fileURL.pathExtension.isEmpty {
+            options[AVURLAssetOverrideMIMETypeKey] = mimeType
+        }
+        let asset = AVURLAsset(url: fileURL, options: options)
+        let generator = AVAssetImageGenerator(asset: asset)
+        generator.appliesPreferredTrackTransform = true
+        let side = CGFloat(max(1, maxPixel))
+        generator.maximumSize = CGSize(width: side, height: side)
+        generator.requestedTimeToleranceBefore = .positiveInfinity
+        generator.requestedTimeToleranceAfter = .positiveInfinity
+        // A frame slightly in, so a fade-from-black opening is not the poster.
+        let duration = (try? await asset.load(.duration)).map(CMTimeGetSeconds) ?? 0
+        let seconds = duration.isFinite && duration > 0 ? min(1, duration / 3) : 0
+        guard let result = try? await generator.image(at: CMTime(seconds: seconds, preferredTimescale: 600)) else { return nil }
+        let cgImage = result.image
+        return NSImage(cgImage: cgImage, size: NSSize(width: cgImage.width, height: cgImage.height))
     }
 
     func removeAll() { cache.removeAllObjects() }
