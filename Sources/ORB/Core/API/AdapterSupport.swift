@@ -21,14 +21,14 @@ enum AdapterURLError: Error, Equatable, LocalizedError {
 /// Same security spirit as `MediaEndpointURL` — HTTPS, `openrouter.ai` host
 /// only, standard port, no user info, no dot-segment escapes — but the path
 /// prefix is a parameter. `MediaEndpointURL` hard-codes the `/api/v1/`
-/// prefix, which does not fit the beta batch base path `/api/beta/batches`;
-/// adapters must not route their paths through it.
+/// prefix and its media-specific rules; adapters keep their own exact
+/// prefixes (e.g. `/api/v1/batches`) and must not route paths through it.
 enum AdapterURL {
     static let allowedHost = "openrouter.ai"
 
     /// Validates an exact adapter endpoint before any credential may be
     /// attached. `allowCollectionRoot` permits the bare collection path
-    /// (e.g. POST to `/api/beta/batches` itself); sub-resource requests set
+    /// (e.g. POST to `/api/v1/batches` itself); sub-resource requests set
     /// it false so the path must extend past the prefix.
     static func validate(_ url: URL, pathPrefix: String, allowCollectionRoot: Bool = false) throws -> URL {
         func reject() -> AdapterURLError { .untrustedURL(url.absoluteString) }
@@ -339,5 +339,28 @@ extension JSONValue {
     func decode<T: Decodable>(as type: T.Type) -> T? {
         guard let data = try? JSONEncoder().encode(self) else { return nil }
         return try? JSONDecoder().decode(T.self, from: data)
+    }
+}
+
+// MARK: - Shared usage detail
+
+/// Upstream cost breakdown shared by the live `CostDetails` and Responses
+/// `Usage.cost_details` schemas. Every field is optional: providers omit
+/// the pieces they do not meter, and a missing figure is unknown, not zero.
+struct AdapterCostDetails: Decodable, Equatable, Sendable {
+    var upstreamInferenceCost: Double? = nil
+    var upstreamInferencePromptCost: Double? = nil
+    var upstreamInferenceCompletionsCost: Double? = nil
+    var upstreamInferenceInputCost: Double? = nil
+    var upstreamInferenceOutputCost: Double? = nil
+    var serverToolCost: Double? = nil
+
+    enum CodingKeys: String, CodingKey {
+        case upstreamInferenceCost = "upstream_inference_cost"
+        case upstreamInferencePromptCost = "upstream_inference_prompt_cost"
+        case upstreamInferenceCompletionsCost = "upstream_inference_completions_cost"
+        case upstreamInferenceInputCost = "upstream_inference_input_cost"
+        case upstreamInferenceOutputCost = "upstream_inference_output_cost"
+        case serverToolCost = "server_tool_cost"
     }
 }

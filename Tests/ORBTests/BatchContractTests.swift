@@ -2,15 +2,16 @@ import Foundation
 import Testing
 @testable import ORB
 
-// W10 contract tests for the beta Batch adapter.
+// W10 contract tests for the Batch adapter.
 //
-// Shapes verified against https://openrouter.ai/docs/batch-quickstart.md
-// (2026-09-16): base path /api/beta/batches (NOT /api/v1), order-sensitive
+// Shapes re-verified against the live openapi.json and
+// https://openrouter.ai/docs/batch-quickstart.md (2026-11-14): base path
+// /api/v1/batches (the beta path is gone), order-sensitive
 // top-level envelope (endpoint, model, requests), 202 = validating, inline
 // results on the completed record matched by custom_id, DELETE purges
 // terminal batches and 409s on in-flight ones, no cancel endpoint exists.
 
-@Suite("Beta batch adapter contract")
+@Suite("Batch adapter contract")
 struct BatchContractTests {
     private func makeAdapter(
         responses: [MockMediaTransport.MockResponse] = []
@@ -110,7 +111,7 @@ struct BatchContractTests {
 
     // MARK: Submit
 
-    @Test("submit posts the ordered envelope to the beta base path and returns the 202-shaped record")
+    @Test("submit posts the ordered envelope to the v1 batches path and returns the 202-shaped record")
     func submitCapture() async throws {
         let fixture = """
         {
@@ -147,9 +148,8 @@ struct BatchContractTests {
         let request = try #require(mock.sentRequests().first)
         let url = try #require(request.url)
         #expect(url.host == "openrouter.ai")
-        // The beta base path sits OUTSIDE the /api/v1 policy.
-        #expect(url.path == "/api/beta/batches")
-        #expect(url.absoluteString.hasPrefix("https://openrouter.ai/api/beta/"))
+        #expect(url.path == "/api/v1/batches")
+        #expect(url.absoluteString.hasPrefix("https://openrouter.ai/api/v1/"))
         #expect(request.httpMethod == "POST")
         #expect(request.value(forHTTPHeaderField: "Authorization") == "Bearer test-key")
         #expect(request.value(forHTTPHeaderField: "Content-Type") == "application/json")
@@ -235,7 +235,7 @@ struct BatchContractTests {
 
         let request = try #require(mock.sentRequests().first)
         #expect(request.httpMethod == "GET")
-        #expect(request.url?.absoluteString == "https://openrouter.ai/api/beta/batches/batch_123")
+        #expect(request.url?.absoluteString == "https://openrouter.ai/api/v1/batches/batch_123")
         #expect(request.value(forHTTPHeaderField: "Authorization") == "Bearer test-key")
     }
 
@@ -359,7 +359,7 @@ struct BatchContractTests {
 
         let request = try #require(mock.sentRequests().first)
         #expect(request.httpMethod == "DELETE")
-        #expect(request.url?.absoluteString == "https://openrouter.ai/api/beta/batches/batch_123")
+        #expect(request.url?.absoluteString == "https://openrouter.ai/api/v1/batches/batch_123")
         #expect(request.value(forHTTPHeaderField: "Authorization") == "Bearer test-key")
     }
 
@@ -381,13 +381,13 @@ struct BatchContractTests {
         let (adapter, mock) = makeAdapter(responses: [.json(fixture)])
         _ = try await adapter.batch(id: "batch 1&x")
         let url = try #require(mock.sentRequests().first?.url)
-        #expect(url.path == "/api/beta/batches/batch 1&x")
-        #expect(url.absoluteString == "https://openrouter.ai/api/beta/batches/batch%201%26x")
+        #expect(url.path == "/api/v1/batches/batch 1&x")
+        #expect(url.absoluteString == "https://openrouter.ai/api/v1/batches/batch%201%26x")
     }
 
     // MARK: Invariants
 
-    @Test("batch IDs and filters never carry credentials; URLs stay on the beta path")
+    @Test("batch IDs and filters never carry credentials; URLs stay on the v1 batches path")
     func credentialNeverLeaksIntoURL() async throws {
         let (adapter, mock) = makeAdapter(responses: [
             .json(#"{"id":"batch_1","status":"completed","results":null}"#),
@@ -398,7 +398,7 @@ struct BatchContractTests {
         for request in mock.sentRequests() {
             let url = try #require(request.url)
             #expect(url.host == "openrouter.ai")
-            #expect(url.path.hasPrefix("/api/beta/batches"))
+            #expect(url.path.hasPrefix("/api/v1/batches"))
             #expect(url.query?.contains("Bearer") != true)
             #expect(!url.absoluteString.contains("test-key"))
         }

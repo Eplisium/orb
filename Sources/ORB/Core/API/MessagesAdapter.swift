@@ -266,12 +266,20 @@ struct MessagesUsage: Decodable, Equatable, Sendable {
     let outputTokens: Int?
     let cacheCreationInputTokens: Int?
     let cacheReadInputTokens: Int?
+    /// OpenRouter's reported cost in USD (live `MessagesResult.usage.cost`).
+    /// Nil means unpriced, never free.
+    var cost: Double? = nil
+    var isByok: Bool? = nil
+    var costDetails: AdapterCostDetails? = nil
 
     enum CodingKeys: String, CodingKey {
         case inputTokens = "input_tokens"
         case outputTokens = "output_tokens"
         case cacheCreationInputTokens = "cache_creation_input_tokens"
         case cacheReadInputTokens = "cache_read_input_tokens"
+        case cost
+        case isByok = "is_byok"
+        case costDetails = "cost_details"
     }
 }
 

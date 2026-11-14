@@ -1,9 +1,11 @@
 import Foundation
 
-// W10 adapter for OpenRouter's beta Batch API.
+// W10 adapter for OpenRouter's Batch API.
 //
-// Contract (verified 2026-09-16 against https://openrouter.ai/docs/batch-quickstart.md):
-// - Base path is `/api/beta/batches`, NOT the normal `/api/v1` prefix.
+// Contract (re-verified 2026-11-14 against the live https://openrouter.ai/openapi.json
+// `/batches` operations and https://openrouter.ai/docs/batch-quickstart.md):
+// - Base path is `/api/v1/batches` (the standard production server). The
+//   earlier beta path `/api/beta/batches` is no longer documented.
 // - Submit is inline JSON: top-level `endpoint`, `model`, `requests`. The
 //   documented parser is order-sensitive and stream-parses the body, so
 //   `endpoint` and `model` MUST precede `requests` (a 400 otherwise). The
@@ -18,6 +20,9 @@ import Foundation
 // - Results arrive INLINE on the completed batch record's `results` array.
 //   There is no separate results-download endpoint, so none exists here.
 //   Results are matched by `custom_id`, never by array order.
+// - GET can answer 402 with the batch metadata and `results: null`: the
+//   results are withheld until the charge is covered (the batch is NOT
+//   re-run). That maps to `BatchAdapterError.paymentRequired`.
 // - DELETE purges a terminal batch and its artifacts. Deleting an in-flight
 //   batch returns 409. DELETION IS NOT CANCELLATION: the documented API has
 //   no cancel endpoint (despite the `cancelled` status), and this adapter
@@ -31,6 +36,7 @@ enum BatchEndpoint: String, Sendable, Equatable, CaseIterable {
     case responses = "/v1/responses"
     case messages = "/v1/messages"
     case embeddings = "/v1/embeddings"
+    case audioSpeech = "/v1/audio/speech"
 }
 
 struct BatchRequestItem: Sendable, Equatable {
@@ -194,6 +200,11 @@ enum BatchStatus: Equatable, Sendable {
     }
 }
 
+/// Output location of a batch submitted with `input` (results stay null).
+struct BatchOutputReference: Decodable, Equatable, Sendable {
+    let uri: String?
+}
+
 struct BatchRequestCounts: Decodable, Equatable, Sendable {
     let total: Int?
     let completed: Int?
@@ -261,16 +272,24 @@ struct BatchRecord: Decodable, Equatable, Sendable {
     let status: String?
     let createdAt: Int?
     let finalizedAt: Int?
+    /// Unix time after which the assigned provider stops completing
+    /// unfinished requests; nil when the provider documents no hard expiry.
+    let expiresAt: Int?
+    /// Provider OpenRouter assigned to run the batch.
+    let provider: String?
+    /// Output location for `input`-submitted batches (results are null).
+    let output: BatchOutputReference?
     let requestCounts: BatchRequestCounts?
     let usage: BatchUsage?
     let results: [BatchResultItem]?
     let error: JSONValue?
 
     enum CodingKeys: String, CodingKey {
-        case id, object, endpoint, model, status, usage, results, error
+        case id, object, endpoint, model, status, usage, results, error, provider, output
         case completionWindow = "completion_window"
         case createdAt = "created_at"
         case finalizedAt = "finalized_at"
+        case expiresAt = "expires_at"
         case requestCounts = "request_counts"
     }
 
@@ -340,6 +359,9 @@ enum BatchAdapterError: Error, Equatable, LocalizedError {
     /// Documented 409: the batch is in flight. Deletion is not
     /// cancellation — there is no cancel operation to fall back to.
     case inFlightBatchDeletion(batchID: String)
+    /// Documented 402 on GET: the batch finished but its results are withheld
+    /// until the charge is covered. Adding credits unlocks them; it is not re-run.
+    case paymentRequired(batchID: String, message: String)
     case transport(String)
     case decoding(String)
 
@@ -361,6 +383,8 @@ enum BatchAdapterError: Error, Equatable, LocalizedError {
             }
         case .inFlightBatchDeletion(let batchID):
             return "Batch \(batchID) is still in flight and cannot be deleted. Deletion is not cancellation; wait for a terminal status."
+        case .paymentRequired(let batchID, let message):
+            return "Results for batch \(batchID) are withheld until the batch charge is covered. Add credits to unlock them; the batch will not run again. \(message)"
         case .transport(let message):
             return "Network error while contacting OpenRouter: \(message)"
         case .decoding(let message):
@@ -371,16 +395,16 @@ enum BatchAdapterError: Error, Equatable, LocalizedError {
 
 // MARK: - Adapter
 
-/// Adapter for OpenRouter's beta Batch API.
+/// Adapter for OpenRouter's Batch API.
 ///
 /// Documented operations only: submit, list, get (results inline on the
 /// completed record), and delete (purges a terminal batch). There is no
 /// results-download endpoint and no cancel endpoint — neither is implemented
 /// and neither may be invented here.
 struct BatchAdapter: Sendable {
-    /// Documented beta base path — deliberately NOT under `/api/v1`.
-    static let base = URL(string: "https://openrouter.ai/api/beta/batches")!
-    static let pathPrefix = "/api/beta/batches"
+    /// Documented base path on the standard production server.
+    static let base = URL(string: "https://openrouter.ai/api/v1/batches")!
+    static let pathPrefix = "/api/v1/batches"
 
     private let transport: MediaTransport
 
@@ -401,7 +425,11 @@ struct BatchAdapter: Sendable {
     /// Retrieves one batch. On a completed batch the `results` array arrives
     /// inline on the returned record.
     func batch(id: String) async throws -> BatchRecord {
-        try await execute(try request(method: "GET", segment: id, body: nil))
+        do {
+            return try await execute(try request(method: "GET", segment: id, body: nil))
+        } catch BatchAdapterError.http(let status, let message) where status == 402 {
+            throw BatchAdapterError.paymentRequired(batchID: id, message: message)
+        }
     }
 
     /// Lists the workspace's batches, newest first. `statuses` repeats the

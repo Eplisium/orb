@@ -255,11 +255,19 @@ struct ResponsesUsage: Decodable, Equatable, Sendable {
     let inputTokens: Int?
     let outputTokens: Int?
     let totalTokens: Int?
+    /// OpenRouter's reported cost in USD (live `Usage.cost`). Nil means
+    /// unpriced, never free.
+    var cost: Double? = nil
+    var isByok: Bool? = nil
+    var costDetails: AdapterCostDetails? = nil
 
     enum CodingKeys: String, CodingKey {
         case inputTokens = "input_tokens"
         case outputTokens = "output_tokens"
         case totalTokens = "total_tokens"
+        case cost
+        case isByok = "is_byok"
+        case costDetails = "cost_details"
     }
 }
 
