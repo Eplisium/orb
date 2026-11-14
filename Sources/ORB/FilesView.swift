@@ -91,6 +91,9 @@ struct FilesView: View {
                 }
                 .buttonStyle(StudioChipButtonStyle())
                 .disabled(isUploading || !KeychainManager.hasAPIKey)
+                .help(KeychainManager.hasAPIKey
+                      ? "Upload files to reference in chat"
+                      : "Uploading needs an OpenRouter API key (Settings → Accounts & Keys). The Library works without one.")
             }
         }
         .padding(.horizontal, 18)

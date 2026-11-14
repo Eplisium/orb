@@ -197,6 +197,10 @@ final class ShellController: ObservableObject {
     /// The browser's selected model, mirrored for the Model menu.
     @Published var focusedModelID: String?
     @Published var focusedModelIsFavorite = false
+    /// The focused model is in the compare tray (menu reads "Remove from Compare").
+    @Published var focusedModelIsComparing = false
+    /// False for batch-only / non-text models: the Model menu disables Chat.
+    @Published var focusedModelCanChat = true
     /// The main window's visible section (set by ContentView), so menus
     /// can act on the current context. nil until the window reports it.
     @Published var currentSection: SidebarSection?

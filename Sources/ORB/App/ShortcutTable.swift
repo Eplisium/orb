@@ -151,8 +151,10 @@ struct ModelCommands: Commands {
             }
             .shortcut(.toggleFavorite)
             .disabled(id == nil)
-            Button("Add to Compare") { if let id { shell.send(.toggleCompare(id)) } }
-                .disabled(id == nil)
+            Button(shell.focusedModelIsComparing ? "Remove from Compare" : "Add to Compare") {
+                if let id { shell.send(.toggleCompare(id)) }
+            }
+            .disabled(id == nil)
             Button("Open Compare") { shell.send(.openCompare) }
                 .shortcut(.openCompare)
                 .disabled(lock.isLocked)
@@ -162,7 +164,8 @@ struct ModelCommands: Commands {
                 .disabled(id == nil)
             Button("Chat with Model") { if let id { shell.send(.chatWithModel(id)) } }
                 .shortcut(.chatWithModel)
-                .disabled(id == nil)
+                // Batch-only and non-text models cannot open in Chat.
+                .disabled(id == nil || !shell.focusedModelCanChat)
             Button("Open on OpenRouter") { if let id { shell.send(.openOnOpenRouter(id)) } }
                 .disabled(id.flatMap(ModelInfo.openRouterURL(for:)) == nil)
             Divider()

@@ -641,6 +641,7 @@ struct ContentView: View {
     @FocusState private var listFocused: Bool
     @AppStorage(PriceUnit.defaultsKey) private var priceUnit: PriceUnit = .perMillion
     @ObservedObject private var appLock = AppLock.shared
+    @ObservedObject private var approvalAttention = ApprovalAttention.shared
     @State private var startedPostUnlockWork = false
     @State private var showOnboarding = false
     @State private var showFilters = false
@@ -690,6 +691,8 @@ struct ContentView: View {
         }
         .onChange(of: selectedSection, initial: true) { _, section in
             StudioNotifier.shared.currentSection = section.rawValue
+            // Menus (⌘F's Find target) act on the visible section.
+            shell.currentSection = section
         }
         .onChange(of: appLock.isUnlocked, initial: true) { _, unlocked in
             guard unlocked, !showOnboarding else { return }
@@ -699,7 +702,12 @@ struct ContentView: View {
                 forced: OnboardingGate.isForced()
             )
         }
-        .sheet(isPresented: $showOnboarding) {
+        // Never over the lock screen: a lock that engages mid-onboarding
+        // hides the sheet, and it returns after unlock.
+        .sheet(isPresented: Binding(
+            get: { showOnboarding && appLock.isUnlocked },
+            set: { if !$0, appLock.isUnlocked { showOnboarding = false } }
+        )) {
             OnboardingView { showOnboarding = false }
         }
         .task {
@@ -760,9 +768,14 @@ struct ContentView: View {
         .onChange(of: vm.selectedModel?.id, initial: true) { _, id in
             shell.focusedModelID = selectedSection.isBrowser ? id : nil
             shell.focusedModelIsFavorite = id.map(vm.favoriteIds.contains) ?? false
+            shell.focusedModelIsComparing = id.map(vm.isComparing) ?? false
+            shell.focusedModelCanChat = id.map { vm.handoffBlockReason(.chat, id: $0) == nil } ?? true
         }
         .onChange(of: vm.favoriteIds) { _, ids in
             shell.focusedModelIsFavorite = shell.focusedModelID.map(ids.contains) ?? false
+        }
+        .onChange(of: vm.compareIDs) { _, ids in
+            shell.focusedModelIsComparing = shell.focusedModelID.map(ids.contains) ?? false
         }
         .onChange(of: selectedSection) { _, section in
             shell.focusedModelID = section.isBrowser ? vm.selectedModel?.id : nil
@@ -861,7 +874,8 @@ struct ContentView: View {
         case .chat: NeedsKeyGate(studio: .chat) { ChatView(viewModel: vm, chatService: chatService) }
         case .images: NeedsKeyGate(studio: .generate) { ImagesView() }
         case .video: NeedsKeyGate(studio: .generate) { VideoView() }
-        case .files: NeedsKeyGate(studio: .generate) { FilesView() }
+        // Library is local and needs no key; FilesView disables remote upload without one.
+        case .files: FilesView()
         case .speech: NeedsKeyGate(studio: .generate) { SpeechView() }
         case .embeddings: NeedsKeyGate(studio: .generate) { EmbeddingsView() }
         case .testSuite: TestSuiteView(viewModel: vm)
@@ -966,15 +980,30 @@ struct ContentView: View {
     /// Mirrors ChatView/AgentView's own default-model resolution so ⌘N and
     /// the in-view New button create sessions with the same model.
     private func preferredModelId(for mode: PlaygroundMode) -> String {
-        let key = (mode == .chat) ? PlaygroundModelDefaults.chatKey : PlaygroundModelDefaults.agentKey
-        // TODO(wave2): resolve through chat-core's CatalogModelPreference;
-        // the selected browser model may be one Chat can't run (batch/image).
-        let fallback = vm.selectedModel?.id ?? vm.api.models.first?.id ?? "openai/gpt-4o"
-        return PlaygroundModelDefaults.resolve(
-            storedModelId: UserDefaults.standard.string(forKey: key) ?? "",
-            availableModelIds: vm.api.models.map(\.id),
-            fallbackModelId: fallback
-        )
+        let stored = UserDefaults.standard.string(forKey: mode == .chat ? PlaygroundModelDefaults.chatKey : PlaygroundModelDefaults.agentKey) ?? ""
+        let recents = ModelRecentsStore().recentIds()
+        // The fallbacks use the browser selection only when it can run in
+        // the mode (it may be a batch, image or embedding model).
+        switch mode {
+        case .chat:
+            return PlaygroundModelDefaults.resolve(
+                storedModelId: stored,
+                availableModelIds: vm.api.models.map(\.id),
+                fallbackModelId: PlaygroundModelDefaults.chatFallback(
+                    models: vm.api.models, favoriteIds: vm.favoriteIds,
+                    selectedModelId: vm.selectedModel?.id, recentIds: recents
+                )
+            )
+        case .agent:
+            return PlaygroundModelDefaults.resolve(
+                storedModelId: stored,
+                availableModelIds: vm.api.models.filter(\.supportsTools).map(\.id),
+                fallbackModelId: PlaygroundModelDefaults.agentFallback(
+                    models: vm.api.models, favoriteIds: vm.favoriteIds,
+                    selectedModelId: vm.selectedModel?.id, recentIds: recents
+                )
+            )
+        }
     }
 
     private var paletteIndex: PaletteIndex {
@@ -1041,7 +1070,14 @@ struct ContentView: View {
     @ViewBuilder
     private func activityBadge(for section: SidebarSection) -> some View {
         if section == .agent {
-            ChatActivityBadge(service: agentService, tint: .secondary)
+            if approvalAttention.pendingCount(section: "Agent") > 0 {
+                Image(systemName: "exclamationmark.shield.fill")
+                    .foregroundStyle(ORBTheme.warning)
+                    .help("The agent is waiting for your approval")
+                    .accessibilityLabel("Waiting for your approval")
+            } else {
+                ChatActivityBadge(service: agentService, tint: .secondary)
+            }
         } else if section == .chat {
             ChatActivityBadge(service: chatService, tint: .secondary)
         } else {
