@@ -65,7 +65,9 @@ enum NativeAgentRunner {
     ) async throws -> NativeAgentRunResult {
         let effectivePolicy = policy ?? ToolPolicy.legacy(fullComputerAccess: fullComputerAccess)
         let custom = systemPromptOverride?.trimmingCharacters(in: .whitespacesAndNewlines)
-        var promptText = systemPrompt(workspace: workspace, fullComputerAccess: fullComputerAccess)
+        let advertisedNames = Set((NativeAgentTools.definitions(fullComputerAccess: true) + ORBControlTools.definitions())
+            .map(\.function.name).filter { effectivePolicy.allowsDefinition(name: $0) })
+        var promptText = systemPrompt(workspace: workspace, fullComputerAccess: fullComputerAccess, availableTools: advertisedNames)
         if effectivePolicy.capabilities.contains(.orbControl) {
             promptText += """
 
@@ -143,6 +145,8 @@ enum NativeAgentRunner {
         // no tool call). Bounds the recovery nudge so a model that never
         // converges still terminates with a clear error instead of looping.
         var reasoningOnlyStreak = 0
+        // Consecutive turns whose tool call was cut off by the output limit.
+        var truncatedStreak = 0
 
         for turn in 0..<maximumTurns {
             try Task.checkCancellation()
@@ -240,9 +244,21 @@ enum NativeAgentRunner {
             try Task.checkCancellation()
             await emit(.turnFinished(reason: finishReason), lastArrival)
 
-            if finishReason == "length",
-               fragments.values.contains(where: { !$0.isEmptyPhantom }) {
-                throw NativeAgentError.truncatedToolCall
+            // A call cut off by the output limit (typically a big write_file)
+            // is not run, but it must not end the run either: it is answered
+            // with a tool error telling the model to split the work, exactly
+            // like a malformed call. Bounded, so a model that keeps
+            // overflowing still stops with a clear error.
+            let truncatedTurn = finishReason == "length"
+                && fragments.values.contains(where: { !$0.isEmptyPhantom })
+            if truncatedTurn {
+                truncatedStreak += 1
+                guard truncatedStreak <= 2,
+                      !fragments.values.contains(where: { !$0.isEmptyPhantom && $0.id.isEmpty }) else {
+                    throw NativeAgentError.truncatedToolCall
+                }
+            } else {
+                truncatedStreak = 0
             }
 
             // A single unparseable call must not discard the other valid calls in
@@ -253,9 +269,23 @@ enum NativeAgentRunner {
             for index in fragments.keys.sorted() {
                 let builder = fragments[index]!
                 guard !builder.isEmptyPhantom else { continue }
+                if truncatedTurn {
+                    // Nothing from a cut-off turn runs: even arguments that
+                    // parse may be a prefix of what the model meant. The
+                    // arguments are replaced by an empty object so a huge
+                    // partial payload is not re-sent every turn.
+                    let stub = AssembledAgentToolCall(
+                        index: builder.index, id: builder.id,
+                        type: builder.type.isEmpty ? "function" : builder.type,
+                        name: builder.name, arguments: "{}"
+                    )
+                    rejected.append((stub, Self.truncatedCallReason(stub)))
+                    continue
+                }
                 switch builder.resolve() {
                 case .valid(let call): calls.append(call)
-                case .rejected(let call, let reason): rejected.append((call, reason))
+                case .rejected(let call, let reason):
+                    rejected.append((call, "Tool call rejected: \(reason). Re-issue this call with a single valid JSON object as arguments."))
                 case .unusable(let reason): throw NativeAgentError.invalidToolCall(reason)
                 }
             }
@@ -280,10 +310,7 @@ enum NativeAgentRunner {
             ))
 
             for (call, reason) in rejected {
-                let result = NativeAgentToolResult(
-                    content: "Tool call rejected: \(reason). Re-issue this call with a single valid JSON object as arguments.",
-                    isError: true
-                )
+                let result = NativeAgentToolResult(content: reason, isError: true)
                 displays.append(.init(
                     id: call.id, name: call.name,
                     argumentsSummary: String(call.arguments.prefix(200)),
@@ -344,19 +371,28 @@ enum NativeAgentRunner {
                     argumentsSummary: String(call.arguments.prefix(200)),
                     arguments: call.arguments
                 ))
-                await onEvent(.toolExecutionStarted(call))
                 // Fail closed immediately before execution: even a hallucinated
                 // or stale tool name cannot reach an executor.
                 let rawResult: NativeAgentToolResult
                 if effectivePolicy.allowsExecution(name: call.name) {
                     var approved = true
-                    if effectivePolicy.requiresApproval(name: call.name) {
+                    // One argument-aware decision: always-ask tools plus file
+                    // tools touching sensitive or outside-workspace paths.
+                    if let requirement = effectivePolicy.approvalRequirement(
+                        name: call.name, argumentsJSON: call.arguments, workspace: workspace
+                    ) {
                         if let approvals {
+                            await onEvent(.awaitingApproval(call))
                             approved = await approvals.requestApproval(
                                 toolName: call.name,
                                 server: MCPToolNaming.resolve(call.name)?.server,
                                 // Show the exact arguments, never a truncated prefix.
-                                summary: call.arguments
+                                summary: call.arguments,
+                                scopeKey: requirement.scopeKey,
+                                scopeLabel: requirement.scopeLabel,
+                                reason: requirement.reason,
+                                resolvedPath: requirement.resolvedPath,
+                                preview: Self.approvalPreview(for: call, resolvedPath: requirement.resolvedPath)
                             )
                         } else {
                             approved = missingApproval == .autoApprove
@@ -364,8 +400,24 @@ enum NativeAgentRunner {
                     }
                     if approved {
                         try Task.checkCancellation()
-                        rawResult = try await AgentHelperUsageCollector.$current.withValue(helperUsage) {
-                            try await executor(call)
+                        await onEvent(.toolExecutionStarted(call))
+                        // Live output is forwarded in order and fully drained
+                        // before the result event, so a card never shows a
+                        // stale tail after the final output.
+                        let (outputStream, outputSink) = AsyncStream<String>.makeStream(bufferingPolicy: .bufferingNewest(1))
+                        let forwarder = Task { for await tail in outputStream { await onEvent(.toolOutput(call, tail)) } }
+                        do {
+                            rawResult = try await ToolOutputRelay.$current.withValue({ outputSink.yield($0) }) {
+                                try await AgentHelperUsageCollector.$current.withValue(helperUsage) {
+                                    try await executor(call)
+                                }
+                            }
+                            outputSink.finish()
+                            await forwarder.value
+                        } catch {
+                            outputSink.finish()
+                            forwarder.cancel()
+                            throw error
                         }
                     } else {
                         rawResult = NativeAgentToolResult(
@@ -527,7 +579,51 @@ enum NativeAgentRunner {
         )
     }
 
-    static func systemPrompt(workspace: String, fullComputerAccess: Bool) -> String {
+    /// Why a cut-off call was not run, phrased so the model can recover.
+    static func truncatedCallReason(_ call: AssembledAgentToolCall) -> String {
+        let hint = call.name == "write_file"
+            ? "Write large files in several smaller write_file calls (for example one section per call, then append with run_command), or shorten the content."
+            : "Re-issue it with shorter arguments, splitting large content across several calls."
+        return "Your \(call.name) call was cut off by the model's output limit before its arguments were complete, so it was not run. \(hint)"
+    }
+
+    /// The line diff a `write_file` would make, for the approval sheet.
+    static func approvalPreview(for call: AssembledAgentToolCall, resolvedPath: String?) -> String? {
+        guard call.name == "write_file", let path = resolvedPath,
+              let content = JSONValue.parse(call.arguments)?.objectValue?["content"]?.stringValue,
+              let preview = UnifiedDiff.preview(writing: content, to: URL(fileURLWithPath: path)) else { return nil }
+        return preview.diff.isEmpty ? preview.summary : preview.summary + "\n" + preview.diff
+    }
+
+    /// The system prompt. `availableTools` (the names actually advertised
+    /// this run) limits the toolbox section, so a Web Only model is never told
+    /// it can write files; nil lists the full toolbox.
+    static func systemPrompt(workspace: String, fullComputerAccess: Bool, availableTools: Set<String>? = nil) -> String {
+        let has: (String) -> Bool = { availableTools?.contains($0) ?? true }
+        func line(_ label: String, _ names: [String], suffix: String = "") -> String? {
+            let present = names.filter(has)
+            guard !present.isEmpty else { return nil }
+            return "- \(label): \(present.joined(separator: ", "))." + suffix
+        }
+        let toolbox = [
+            line("Files & shell", ["read_file", "list_directory", "search_files", "write_file", "run_command"]),
+            line("Mac automation", ["run_applescript", "open_application", "open_url", "capture_screen", "computer_action"]),
+            has("view_image") ? "- Vision: after capture_screen, call view_image on the PNG to actually see the screen before clicking coordinates. Never guess coordinates blind." : nil,
+            has("recall") || has("remember") ? "- Memory: recall a topic before starting (past sessions may have learned it); remember durable facts worth keeping." : nil,
+            has("plan_tasks") ? "- Planning: for multi-step tasks, set up plan_tasks first and update it as you finish each step." : nil,
+            has("web_search") || has("fetch_url") ? "- Web: " + [has("web_search") ? "web_search for current information (docs, prices, news) instead of guessing" : nil,
+                                                             has("fetch_url") ? "fetch_url to read a specific page" : nil].compactMap { $0 }.joined(separator: "; ") + "." : nil,
+            has("generate_image") || has("speak_text") ? "- Media (spend credits, ask only for large work): generate_image saves AI pictures to disk; speak_text saves narration audio to disk." : nil,
+        ].compactMap { $0 }.joined(separator: "\n")
+        let unavailable = availableTools.map { names in
+            ["write_file", "run_command", "computer_action"].contains { !names.contains($0) }
+                ? "\nTools not listed here are unavailable in this session; never claim to run them. If the task needs local files or the terminal, say that Computer Access must be turned on."
+                : ""
+        } ?? ""
+        return systemPromptBody(workspace: workspace, fullComputerAccess: fullComputerAccess) + toolbox + unavailable
+    }
+
+    private static func systemPromptBody(workspace: String, fullComputerAccess: Bool) -> String {
         """
         You are the native ORB Agent running inside a macOS application. You are not Hermes and must never claim to be Hermes. You can call functions implemented by this application.
 
@@ -544,13 +640,7 @@ enum NativeAgentRunner {
         - Keep the final response clear and concise, summarizing real actions and outcomes.
 
         Your function toolbox:
-        - Files & shell: read_file, list_directory, search_files, write_file, run_command.
-        - Mac automation: run_applescript, open_application, open_url, capture_screen, computer_action.
-        - Vision: after capture_screen, call view_image on the PNG to actually see the screen before clicking coordinates. Never guess coordinates blind.
-        - Memory: recall a topic before starting (past sessions may have learned it); remember durable facts worth keeping.
-        - Planning: for multi-step tasks, set up plan_tasks first and update it as you finish each step.
-        - Web: web_search for current information (docs, prices, news) instead of guessing; fetch_url to read a specific page.
-        - Media (spend credits, ask only for large work): generate_image saves AI pictures to disk; speak_text saves narration audio to disk.
+
         """
     }
 

@@ -109,8 +109,10 @@ struct NativeAgentRunnerStreamingTests {
         })
     }
 
+    // Wave 1 (AGENT-7): a cut-off call is still never executed, but it now
+    // comes back to the model as a tool error instead of failing the run.
     @Test("length-truncated tool calls are never executed")
-    func rejectsLengthTruncatedToolCalls() async {
+    func rejectsLengthTruncatedToolCalls() async throws {
         let client = AgentFixtureClient([
             [
                 .toolCallFragment(
@@ -127,16 +129,13 @@ struct NativeAgentRunnerStreamingTests {
         ])
         let tools = ToolRecorder()
 
-        do {
-            _ = try await NativeAgentRunner.run(
+        let result = try await NativeAgentRunner.run(
                 prompt: "run it", modelId: "test/model", apiKey: "test-key", workspace: "/tmp",
                 fullComputerAccess: true, history: [], client: client,
                 toolExecutor: { try await tools.execute($0) }, missingApproval: .autoApprove, onEvent: { _ in }
             )
-            Issue.record("Expected a truncated tool-call error")
-        } catch {
-            #expect(error.localizedDescription.localizedCaseInsensitiveContains("truncated"))
-        }
+        #expect(result.response == "done")
+        #expect(result.toolMessages.first?.content.contains("cut off") == true)
 
         #expect(await tools.calls.isEmpty)
     }

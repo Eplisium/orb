@@ -149,6 +149,99 @@ struct ToolPolicy: Sendable, Equatable {
         }
     }
 
+    /// Argument-aware approval decision for one concrete call. Nil = runs
+    /// without asking. This is the single place that decides; the runner asks
+    /// it immediately before execution (after `allowsExecution`).
+    ///
+    /// Beyond the always-ask tools (`requiresApproval(name:)`):
+    /// - a file tool that WRITES outside the workspace, or into a location
+    ///   that runs code or holds credentials (shell rc files, LaunchAgents,
+    ///   `.git`, `~/Library`, system folders), asks with the full path;
+    /// - a file tool that READS a credential store (`~/.ssh`, `~/.aws`,
+    ///   Keychains, ORB's own data, browser profiles, `.env` files) asks
+    ///   with the full path, so a prompt-injected page cannot silently read a
+    ///   key and hand it to `fetch_url`.
+    func approvalRequirement(name: String, argumentsJSON: String, workspace: String) -> ToolApprovalRequirement? {
+        let arguments = JSONValue.parse(argumentsJSON)?.objectValue ?? [:]
+        func string(_ key: String) -> String? {
+            guard let value = arguments[key]?.stringValue?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !value.isEmpty else { return nil }
+            return value
+        }
+        let alwaysAsk = requiresApproval(name: name)
+
+        if MCPRegistry.isMCPTool(name) {
+            let server = MCPToolNaming.resolve(name)?.server ?? ""
+            return .init(reason: nil, resolvedPath: nil, scopeKey: "\(server)|\(name)",
+                         scopeLabel: "every call to \(name)")
+        }
+
+        switch name {
+        case "run_command":
+            let directory = string("working_directory").map {
+                SensitivePaths.resolve($0, workspace: workspace).path
+            } ?? SensitivePaths.resolve(workspace, workspace: workspace).path
+            return .init(reason: nil, resolvedPath: directory, scopeKey: "run_command|\(directory)",
+                         scopeLabel: "every command in \(SensitivePaths.abbreviated(directory))")
+        case "computer_action":
+            let action = string("action")?.lowercased() ?? "action"
+            return .init(reason: nil, resolvedPath: nil, scopeKey: "computer_action|\(action)",
+                         scopeLabel: "every computer_action \"\(action)\"")
+        default:
+            break
+        }
+
+        // File tools: decide from the resolved path.
+        if let access = Self.fileAccess(for: name) {
+            let raw: String? = string("path") ?? (name == "capture_screen" ? nil : "")
+            guard let raw else {
+                return alwaysAsk ? .init(reason: nil, resolvedPath: nil, scopeKey: "|\(name)",
+                                         scopeLabel: "every \(name) call") : nil
+            }
+            let resolved = SensitivePaths.resolve(raw.isEmpty ? "." : raw, workspace: workspace)
+            let path = resolved.path
+            let shortPath = SensitivePaths.abbreviated(path)
+            let inside = SensitivePaths.isInside(resolved, workspace: workspace)
+            // A workspace the user (or ORB itself, for Test Suite projects)
+            // deliberately placed in a sensitive area does not make every
+            // file inside it ask; anything else sensitive always does.
+            let deliberate = inside && SensitivePaths.isSensitiveWrite(SensitivePaths.resolve(workspace, workspace: workspace))
+            var reason: String?
+            switch access {
+            case .read:
+                if !deliberate, SensitivePaths.isSensitiveRead(resolved) {
+                    reason = "Reads a location that may hold credentials or private data: \(path)"
+                }
+            case .write:
+                if !deliberate, SensitivePaths.isSensitiveWrite(resolved) {
+                    reason = "Writes to a location that can run code or holds credentials: \(path)"
+                } else if !constrainsFilesystem, !inside {
+                    reason = "Writes outside the workspace: \(path)"
+                }
+            }
+            guard alwaysAsk || reason != nil else { return nil }
+            // Sensitive or outside-workspace access is remembered per path, so
+            // "Allow for this run" never widens to other files.
+            let scopeKey = reason == nil ? "|\(name)" : "\(name)|\(path)"
+            let scopeLabel = reason == nil ? "every \(name) call" : "\(name) on \(shortPath)"
+            return .init(reason: reason, resolvedPath: path, scopeKey: scopeKey, scopeLabel: scopeLabel)
+        }
+
+        guard alwaysAsk else { return nil }
+        return .init(reason: nil, resolvedPath: nil, scopeKey: "|\(name)", scopeLabel: "every \(name) call")
+    }
+
+    enum FileAccess { case read, write }
+
+    /// Native tools that take a model-chosen filesystem `path`.
+    static func fileAccess(for name: String) -> FileAccess? {
+        switch name {
+        case "read_file", "list_directory", "search_files", "view_image": return .read
+        case "write_file", "speak_text", "generate_image", "capture_screen": return .write
+        default: return nil
+        }
+    }
+
     static func requiredCapability(for name: String) -> ToolCapability? {
         switch name {
         case "fetch_url", "web_search": return .web
@@ -163,6 +256,115 @@ struct ToolPolicy: Sendable, Equatable {
         case _ where ORBControlTools.isORBTool(name): return .orbControl
         default: return nil
         }
+    }
+}
+
+/// Why one concrete call needs the user's approval, and how far an
+/// "Allow for this run" answer may reach.
+struct ToolApprovalRequirement: Sendable, Equatable {
+    /// Extra, plain-language reason (sensitive or outside-workspace path).
+    /// Nil for tools that always ask.
+    let reason: String?
+    /// The absolute path the call will touch (file tools) or run in
+    /// (`run_command`), after `~`, `..` and symlink resolution.
+    let resolvedPath: String?
+    /// Key under which a session approval is remembered.
+    let scopeKey: String
+    /// What a session approval covers, e.g. "every command in ~/Project".
+    let scopeLabel: String
+}
+
+/// Locations the agent must not touch silently, even with Computer Access.
+enum SensitivePaths {
+    /// Resolves a model path the way the file tools do (tilde, workspace-
+    /// relative, `..`), then follows symlinks through the deepest existing
+    /// ancestor so a link inside the workspace cannot hide its target.
+    static func resolve(_ rawPath: String, workspace: String) -> URL {
+        let expanded = NSString(string: rawPath).expandingTildeInPath
+        let url: URL
+        if expanded.hasPrefix("/") {
+            url = URL(fileURLWithPath: expanded).standardizedFileURL
+        } else {
+            let base = NSString(string: workspace).expandingTildeInPath
+            url = URL(fileURLWithPath: base, isDirectory: true).appendingPathComponent(expanded).standardizedFileURL
+        }
+        return WorkspacePathGuard.resolvingExistingAncestors(of: url)
+    }
+
+    static func isInside(_ url: URL, workspace: String) -> Bool {
+        let base = resolve(workspace, workspace: workspace).path.lowercased()
+        let path = url.path.lowercased()
+        return path == base || path.hasPrefix(base.hasSuffix("/") ? base : base + "/")
+    }
+
+    static func abbreviated(_ path: String) -> String {
+        let home = homePath
+        if path == home { return "~" }
+        if path.lowercased().hasPrefix(home.lowercased() + "/") { return "~" + path.dropFirst(home.count) }
+        return path
+    }
+
+    private static var homePath: String {
+        URL(fileURLWithPath: NSHomeDirectory()).resolvingSymlinksInPath().path
+    }
+
+    /// Paths relative to home, compared case-insensitively (APFS default).
+    static let homeReadPrefixes: [String] = [
+        ".ssh", ".aws", ".gnupg", ".netrc", ".git-credentials", ".docker", ".kube", ".azure",
+        ".config/gh", ".config/gcloud", ".npmrc", ".pypirc", ".gem/credentials", ".password-store",
+        "Library/Keychains", "Library/Application Support/ORB", "Library/Cookies", "Library/Safari",
+        "Library/Messages", "Library/Mail", "Library/Containers/com.apple.Safari",
+        "Library/Application Support/Google/Chrome", "Library/Application Support/BraveSoftware",
+        "Library/Application Support/Firefox", "Library/Application Support/Microsoft Edge",
+        "Library/Application Support/Arc", "Library/Application Support/com.apple.TCC",
+    ]
+
+    static let systemReadPrefixes = ["/Library/Keychains", "/private/var/db", "/private/etc/master.passwd"]
+
+    /// System folders. `/private/var` (temp folders) is deliberately absent:
+    /// writes there are judged by the workspace rule instead.
+    static let systemWritePrefixes = [
+        "/System", "/Library", "/Applications", "/usr", "/bin", "/sbin", "/etc", "/private/etc", "/opt",
+    ]
+
+    private static func relativeToHome(_ url: URL) -> String? {
+        let home = homePath.lowercased()
+        let path = url.path.lowercased()
+        guard path.hasPrefix(home + "/") else { return nil }
+        return String(url.path.dropFirst(homePath.count + 1))
+    }
+
+    private static func matches(_ path: String, prefix: String) -> Bool {
+        let path = path.lowercased(), prefix = prefix.lowercased()
+        return path == prefix || path.hasPrefix(prefix + "/")
+    }
+
+    /// Credential stores and private app data.
+    static func isSensitiveRead(_ url: URL) -> Bool {
+        let name = url.lastPathComponent.lowercased()
+        if name == ".env" || (name.hasPrefix(".env.")
+            && ![".env.example", ".env.sample", ".env.template"].contains(name)) { return true }
+        if ["id_rsa", "id_dsa", "id_ecdsa", "id_ed25519"].contains(where: { name.hasPrefix($0) }) { return true }
+        if [".p12", ".pfx", ".keychain", ".keychain-db"].contains(where: { name.hasSuffix($0) }) { return true }
+        if systemReadPrefixes.contains(where: { matches(url.path, prefix: $0) }) { return true }
+        guard let relative = relativeToHome(url) else { return false }
+        return homeReadPrefixes.contains { matches(relative, prefix: $0) }
+    }
+
+    /// Places where a written file can run code later (shell startup files,
+    /// LaunchAgents, git hooks/config) or alter credentials and app data.
+    static func isSensitiveWrite(_ url: URL) -> Bool {
+        if isSensitiveRead(url) { return true }
+        let components = url.pathComponents.map { $0.lowercased() }
+        if components.contains(".git") { return true }
+        if let relative = relativeToHome(url) {
+            // Any dotfile or dot-folder directly in home (~/.zshrc, ~/.config…).
+            if relative.hasPrefix(".") { return true }
+            if matches(relative, prefix: "Library") { return true }
+            return false
+        }
+        if url.path == homePath { return false }
+        return systemWritePrefixes.contains { matches(url.path, prefix: $0) }
     }
 }
 
@@ -206,7 +408,7 @@ enum WorkspacePathGuard {
         return url
     }
 
-    private static func resolvingExistingAncestors(of url: URL) -> URL {
+    static func resolvingExistingAncestors(of url: URL) -> URL {
         var check = url
         var missing: [String] = []
         while !FileManager.default.fileExists(atPath: check.path) {

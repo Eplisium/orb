@@ -219,7 +219,7 @@ struct NativeAgentToolsTests {
         let result = try await NativeAgentTools.execute(name: "write_file", argumentsJSON: args, workspace: directory.path, fullComputerAccess: true)
 
         #expect(!result.isError)
-        #expect(result.content.contains("Wrote"))
+        #expect(result.content.contains("Created"))
         let written = try String(contentsOfFile: nestedPath, encoding: .utf8)
         #expect(written == "hello nested")
     }

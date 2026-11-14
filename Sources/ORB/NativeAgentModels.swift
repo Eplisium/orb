@@ -396,7 +396,14 @@ enum NativeAgentEvent: Sendable, Equatable {
     /// keeps in its history (pitfall 28: both streaming paths stay in sync).
     case reasoningDetails([ReasoningDetail])
     case toolCallUpdated(AssembledAgentToolCall)
+    /// A risky call is waiting for the user's decision; nothing has run yet.
+    /// `.toolExecutionStarted` follows only if the call is approved.
+    case awaitingApproval(AssembledAgentToolCall)
     case toolExecutionStarted(AssembledAgentToolCall)
+    /// Rolling tail of a running tool's live output (run_command), throttled
+    /// to a few updates per second. The final result still arrives as
+    /// `.toolResult`, always after the last `.toolOutput` for that call.
+    case toolOutput(AssembledAgentToolCall, String)
     case toolResult(AssembledAgentToolCall, NativeAgentToolResult)
     case usage(turn: Int, cumulative: ChatUsage)
     case turnFinished(reason: String?)
@@ -485,4 +492,11 @@ enum NativeAgentError: LocalizedError {
             return "The model returned only reasoning and never produced a final answer."
         }
     }
+}
+
+
+/// Where a running tool sends live output. The runner binds it around each
+/// tool execution; tools read it with `ToolOutputRelay.current`.
+enum ToolOutputRelay {
+    @TaskLocal static var current: (@Sendable (String) -> Void)?
 }

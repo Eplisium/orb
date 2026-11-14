@@ -277,7 +277,7 @@ struct AgentView: View {
                            foreground: fullComputerAccess ? Color.orange : Color.secondary)
             }
             .buttonStyle(.plain)
-            .help(fullComputerAccess ? "The native agent may use local functions and control this Mac" : "Only the web fetch function is enabled")
+            .help(AgentAccessCopy.help(fullComputerAccess: fullComputerAccess))
             .disabled(chatService.isStreaming)
 
             if opMode {
@@ -398,7 +398,7 @@ struct AgentView: View {
                     .clipShape(RoundedRectangle(cornerRadius: 7))
                 }
                 .buttonStyle(.plain)
-                Text("The native agent runs functions and reads project context from this folder.")
+                Text(AgentAccessCopy.workspaceNote)
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -1229,4 +1229,18 @@ struct AgentView: View {
         lastScrollRequest = now
         proxy.scrollTo("agent-message-bottom", anchor: .bottom)
     }
+}
+
+
+/// What each access level really allows, so the copy matches `ToolPolicy`.
+enum AgentAccessCopy {
+    static func help(fullComputerAccess: Bool) -> String {
+        fullComputerAccess
+            ? "Computer Access: the agent can read and write files, run commands, and control this Mac. Commands, Mac control, MCP tools, writes outside the workspace and reads of private folders ask for your approval first."
+            : "Web Only: the agent can search the web (uses credits), read web pages, and keep memories and a task plan. It cannot touch your files, run commands, or use MCP servers."
+    }
+
+    /// Shown under the workspace picker. The workspace is one setting shared
+    /// by every Agent session, so changing it affects all of them.
+    static let workspaceNote = "Relative paths and commands start in this folder. It applies to every Agent session; with Computer Access the agent can still reach other folders, asking first before writing there."
 }

@@ -56,10 +56,11 @@ enum NativeAgentTools {
             ),
             definition(
                 name: "run_command",
-                description: "Run a zsh command on the Mac and return stdout, stderr, and exit status. Use for builds, scripts, and system operations.",
+                description: "Run a zsh command on the Mac and return stdout, stderr, and exit status. Use for builds, scripts, and system operations. Commands are stopped after timeout_seconds (default 120); never start servers or watchers that do not exit.",
                 properties: [
                     "command": .init(type: "string", description: "Shell command to run."),
                     "working_directory": .init(type: "string", description: "Optional working directory; defaults to the selected workspace."),
+                    "timeout_seconds": .init(type: "integer", description: "Optional time limit in seconds (default 120, maximum 1800). Raise it only for long builds or test runs."),
                 ],
                 required: ["command"]
             ),
@@ -316,12 +317,19 @@ enum NativeAgentTools {
             includingPropertiesForKeys: Array(keys),
             options: [.skipsHiddenFiles]
         ).sorted { $0.lastPathComponent.localizedCaseInsensitiveCompare($1.lastPathComponent) == .orderedAscending }
-        let output = try entries.prefix(500).map { entry -> String in
+        let shown = entries.prefix(listDirectoryLimit)
+        var output = try shown.map { entry -> String in
             let values = try entry.resourceValues(forKeys: keys)
             return values.isDirectory == true
                 ? "[dir]  \(entry.lastPathComponent)/"
                 : "[file] \(entry.lastPathComponent)  \(values.fileSize ?? 0) bytes"
         }.joined(separator: "\n")
+        if entries.isEmpty { output = "(empty folder; hidden files are not listed)" }
+        if entries.count > shown.count {
+            // Never let a cut-off listing read as complete.
+            output += "\n… and \(entries.count - shown.count) more entries (showing the first \(shown.count) of \(entries.count), sorted by name). "
+                + "Use search_files, or run_command with ls or find, to see the rest."
+        }
         return .init(content: "path: \(url.path)\n\(output)", isError: false)
     }
 
@@ -386,9 +394,12 @@ enum NativeAgentTools {
         let url = constrained
             ? try WorkspacePathGuard.containedURL(forRawPath: rawPath, workspace: workspace)
             : resolvedPath(rawPath, workspace: workspace)
+        // Compare with what is there before replacing it, so the card (and
+        // the model) can see created vs modified and the actual line changes.
+        let report = WriteFileReport.make(writing: content, to: url)
         try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
         try content.write(to: url, atomically: true, encoding: .utf8)
-        return .init(content: "Wrote \(content.utf8.count) bytes to \(url.path)", isError: false)
+        return .init(content: report, isError: false)
     }
 
     private static func runCommand(
@@ -404,18 +415,48 @@ enum NativeAgentTools {
         } else {
             workingDirectory = workspace
         }
+        let timeout = commandTimeout(arguments["timeout_seconds"])
         let result = try await runProcess(
             executable: "/bin/zsh",
             arguments: ["-lc", command],
-            workingDirectory: workingDirectory
+            workingDirectory: workingDirectory,
+            timeout: .seconds(timeout),
+            onOutput: ToolOutputRelay.current
         )
         // The pipe collectors already cap output once, at 60 KB per stream,
         // with a correct omitted-size notice. Capping again here used to chop
         // that notice off and report a 10 MB stream as "57 bytes omitted".
+        if result.timedOut {
+            return .init(
+                content: "Timed out: the command was still running after \(timeout) s, so ORB stopped it and every process it started. "
+                    + "Output so far is below. Re-run with a larger timeout_seconds (up to \(maximumCommandTimeout)) if it needs longer, "
+                    + "or run long-lived servers in the background yourself.\nstdout:\n\(result.stdout)\nstderr:\n\(result.stderr)",
+                isError: true
+            )
+        }
         return .init(
             content: "exit_code: \(result.exitCode)\nstdout:\n\(result.stdout)\nstderr:\n\(result.stderr)",
             isError: result.exitCode != 0
         )
+    }
+
+    /// Default time limit for `run_command`, in seconds.
+    static let defaultCommandTimeout = 120
+    /// The most a model may ask for, in seconds.
+    static let maximumCommandTimeout = 1800
+
+    /// The model's `timeout_seconds`, clamped to 1…max; default when absent
+    /// or unusable.
+    static func commandTimeout(_ raw: Any?) -> Int {
+        let requested: Int?
+        switch raw {
+        case let value as Int: requested = value
+        case let value as Double where value.isFinite: requested = Int(value.rounded(.up))
+        case let value as String: requested = Int(value.trimmingCharacters(in: .whitespaces))
+        default: requested = nil
+        }
+        guard let requested, requested > 0 else { return defaultCommandTimeout }
+        return min(requested, maximumCommandTimeout)
     }
 
     private static func runAppleScript(_ arguments: [String: Any]) async throws -> NativeAgentToolResult {
@@ -499,7 +540,12 @@ enum NativeAgentTools {
             .replacingOccurrences(of: "\n", with: "\\n")
     }
 
-    private static func fetchURL(_ arguments: [String: Any]) async throws -> NativeAgentToolResult {
+    /// Most entries `list_directory` returns.
+    static let listDirectoryLimit = 500
+    /// Most body bytes `fetch_url` keeps for the model.
+    static let fetchByteCap = 120_000
+
+    private static func fetchURL(_ arguments: [String: Any], session: URLSession = .shared) async throws -> NativeAgentToolResult {
         guard let value = arguments["url"] as? String,
               let url = URL(string: value),
               ["http", "https"].contains(url.scheme?.lowercased() ?? "") else {
@@ -508,29 +554,86 @@ enum NativeAgentTools {
         var request = URLRequest(url: url)
         request.timeoutInterval = NetworkTimeouts.fetch
         request.setValue("ORB/1.0", forHTTPHeaderField: "User-Agent")
-        let (data, response) = try await URLSession.shared.data(for: request)
-        let status = (response as? HTTPURLResponse)?.statusCode ?? 0
-        let capped = data.prefix(120_000)
-        // Text vs. binary is decided by strict decoding of the WHOLE body; the
-        // cap is decoded lossily so a multibyte character split by the cap
-        // cannot make a perfectly valid non-ASCII page look binary.
-        let text: String
-        if String(data: data, encoding: .utf8) != nil {
-            var body = String(decoding: capped, as: UTF8.self)
-            if data.count > capped.count {
-                body += "\n… [response truncated: \(data.count - capped.count) bytes omitted] …"
-            }
-            text = body
-        } else {
-            text = "<binary response: \(data.count) bytes>"
+        // Stream the body and stop at the cap: a multi-GB download must never
+        // be buffered in memory just to keep the first 120 KB.
+        let (bytes, response) = try await session.bytes(for: request)
+        defer { bytes.task.cancel() }
+        let http = response as? HTTPURLResponse
+        let status = http?.statusCode ?? 0
+        let expected = response.expectedContentLength
+        let mime = (http?.value(forHTTPHeaderField: "Content-Type") ?? response.mimeType ?? "").lowercased()
+        func sizeText(_ count: Int64) -> String { ByteCountFormatter.string(fromByteCount: count, countStyle: .file) }
+
+        if FetchBody.isBinaryMIME(mime) {
+            let size = expected > 0 ? sizeText(expected) : "unknown size"
+            return .init(content: "HTTP \(status)\n<binary response: \(mime), \(size); not downloaded>",
+                         isError: !(200..<400).contains(status))
         }
-        return .init(content: "HTTP \(status)\n\(text)", isError: !(200..<400).contains(status))
+
+        var data = Data()
+        data.reserveCapacity(min(fetchByteCap + 1, 256 * 1024))
+        var hasMore = false
+        for try await byte in bytes {
+            if data.count >= fetchByteCap { hasMore = true; break }
+            data.append(byte)
+        }
+        // Text vs. binary is decided from the bytes read; a multibyte
+        // character split by the cap does not make a valid page look binary.
+        guard FetchBody.looksLikeText(data, truncated: hasMore) else {
+            let size = expected > 0 ? sizeText(expected) : (hasMore ? "more than \(sizeText(Int64(data.count)))" : sizeText(Int64(data.count)))
+            return .init(content: "HTTP \(status)\n<binary response: \(size)>", isError: !(200..<400).contains(status))
+        }
+        var body = String(decoding: data, as: UTF8.self)
+        if hasMore {
+            let omitted = expected > Int64(data.count)
+                ? "\(expected - Int64(data.count)) bytes omitted"
+                : "the rest was not downloaded"
+            body += "\n… [response truncated after \(data.count) bytes: \(omitted)] …"
+        }
+        return .init(content: "HTTP \(status)\n\(body)", isError: !(200..<400).contains(status))
+    }
+
+    /// Test seam: `fetch_url` against an injected session.
+    static func fetchURLForTesting(_ url: String, session: URLSession) async throws -> NativeAgentToolResult {
+        try await fetchURL(["url": url], session: session)
     }
 
     private struct ProcessResult: Sendable {
         let stdout: String
         let stderr: String
         let exitCode: Int32
+        var timedOut = false
+    }
+
+    /// Every child process group ORB's agent tools started and has not yet
+    /// reaped, so quitting ORB can stop them instead of orphaning a build or
+    /// a server it launched.
+    private final class LiveProcessRegistry: @unchecked Sendable {
+        private let lock = NSLock()
+        private var groups: Set<pid_t> = []
+
+        func insert(_ pid: pid_t) { lock.lock(); groups.insert(pid); lock.unlock() }
+        func remove(_ pid: pid_t) { lock.lock(); groups.remove(pid); lock.unlock() }
+        var snapshot: Set<pid_t> { lock.lock(); defer { lock.unlock() }; return groups }
+    }
+
+    private static let liveProcesses = LiveProcessRegistry()
+
+    /// Process groups started by agent tools that are still running.
+    static var runningProcessGroupCount: Int { liveProcesses.snapshot.count }
+
+    /// Stops every process group the agent tools started: SIGTERM, a short
+    /// grace period, then SIGKILL for anything left. Synchronous, so the app
+    /// delegate can call it from `applicationWillTerminate`.
+    static func terminateAllRunningProcesses(
+        grace: TimeInterval = 0.3,
+        sendSignal: ProcessSignalSender = { Darwin.kill($0, $1) }
+    ) {
+        let groups = liveProcesses.snapshot
+        guard !groups.isEmpty else { return }
+        for pid in groups where pid > 0 { _ = sendSignal(-pid, SIGTERM) }
+        if grace > 0 { Thread.sleep(forTimeInterval: grace) }
+        for pid in liveProcesses.snapshot.intersection(groups) where pid > 0 { _ = sendSignal(-pid, SIGKILL) }
     }
 
     private final class ProcessBox: @unchecked Sendable {
@@ -538,10 +641,27 @@ enum NativeAgentTools {
         private let sendSignal: ProcessSignalSender
         private var pid: pid_t?
         private var cancelled = false
+        private var didTimeOut = false
         private var forceKillDeadline: ContinuousClock.Instant?
 
         init(sendSignal: @escaping ProcessSignalSender = { Darwin.kill($0, $1) }) {
             self.sendSignal = sendSignal
+        }
+
+        /// The time limit passed: stop the group like a cancellation, but
+        /// report partial output instead of throwing.
+        func timeOut() {
+            lock.lock()
+            let running = pid != nil && !cancelled
+            if running { didTimeOut = true }
+            lock.unlock()
+            if running { terminate() }
+        }
+
+        var timedOut: Bool {
+            lock.lock()
+            defer { lock.unlock() }
+            return didTimeOut
         }
 
         func store(_ pid: pid_t) {
@@ -767,6 +887,8 @@ enum NativeAgentTools {
         arguments: [String],
         workingDirectory: String? = nil,
         launchDelay: Duration = .zero,
+        timeout: Duration? = nil,
+        onOutput: (@Sendable (String) -> Void)? = nil,
         sendSignal: @escaping ProcessSignalSender = { Darwin.kill($0, $1) }
     ) async throws -> ProcessResult {
         let box = ProcessBox(sendSignal: sendSignal)
@@ -782,8 +904,17 @@ enum NativeAgentTools {
                         let errorPipe = Pipe()
                         let output = BoundedPipeCollector()
                         let errors = BoundedPipeCollector()
-                        outputPipe.fileHandleForReading.readabilityHandler = { output.append($0.availableData) }
-                        errorPipe.fileHandleForReading.readabilityHandler = { errors.append($0.availableData) }
+                        let progress = onOutput.map { OutputProgress(sink: $0) }
+                        outputPipe.fileHandleForReading.readabilityHandler = {
+                            let chunk = $0.availableData
+                            output.append(chunk)
+                            progress?.append(chunk)
+                        }
+                        errorPipe.fileHandleForReading.readabilityHandler = {
+                            let chunk = $0.availableData
+                            errors.append(chunk)
+                            progress?.append(chunk)
+                        }
                         defer {
                             outputPipe.fileHandleForReading.readabilityHandler = nil
                             errorPipe.fileHandleForReading.readabilityHandler = nil
@@ -799,16 +930,34 @@ enum NativeAgentTools {
                         )
                         try? outputPipe.fileHandleForWriting.close()
                         try? errorPipe.fileHandleForWriting.close()
+                        liveProcesses.insert(pid)
+                        defer { liveProcesses.remove(pid) }
                         box.store(pid)
                         if box.isCancelled { box.terminate() }
+                        if let timeout {
+                            let parts = timeout.components
+                            let seconds = Double(parts.seconds) + Double(parts.attoseconds) / 1e18
+                            DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + seconds) { box.timeOut() }
+                        }
                         let exitCode = try box.waitForExit(pid) {
                             output.reachedEOF && errors.reachedEOF
+                        }
+                        if box.timedOut {
+                            // Keep what was collected. Reading to EOF could
+                            // block on a descendant that escaped the group.
+                            outputPipe.fileHandleForReading.readabilityHandler = nil
+                            errorPipe.fileHandleForReading.readabilityHandler = nil
+                            continuation.resume(returning: ProcessResult(
+                                stdout: output.output, stderr: errors.output, exitCode: exitCode, timedOut: true
+                            ))
+                            return
                         }
                         if box.isCancelled { throw CancellationError() }
                         outputPipe.fileHandleForReading.readabilityHandler = nil
                         errorPipe.fileHandleForReading.readabilityHandler = nil
                         output.append((try? outputPipe.fileHandleForReading.readToEnd()) ?? Data())
                         errors.append((try? errorPipe.fileHandleForReading.readToEnd()) ?? Data())
+                        progress?.flush()
                         continuation.resume(returning: ProcessResult(
                             stdout: output.output,
                             stderr: errors.output,
@@ -835,6 +984,53 @@ enum NativeAgentTools {
             launchDelay: launchDelay,
             sendSignal: sendSignal
         ).exitCode
+    }
+
+    /// Test seam for the time limit and live output.
+    static func runCommandForTesting(
+        command: String,
+        timeout: Duration,
+        onOutput: (@Sendable (String) -> Void)? = nil
+    ) async throws -> (stdout: String, exitCode: Int32, timedOut: Bool) {
+        let result = try await runProcess(
+            executable: "/bin/zsh", arguments: ["-lc", command], timeout: timeout, onOutput: onOutput
+        )
+        return (result.stdout, result.exitCode, result.timedOut)
+    }
+
+    /// Throttles live command output to a rolling tail, at most a few
+    /// updates per second, so a chatty build cannot flood the UI.
+    private final class OutputProgress: @unchecked Sendable {
+        private let lock = NSLock()
+        private let sink: @Sendable (String) -> Void
+        private var tail = Data()
+        private var lastSent = ContinuousClock.now.advanced(by: .seconds(-1))
+        private var dirty = false
+        static let tailBytes = 4_000
+        static let interval: Duration = .milliseconds(250)
+
+        init(sink: @escaping @Sendable (String) -> Void) { self.sink = sink }
+
+        func append(_ chunk: Data) {
+            guard !chunk.isEmpty else { return }
+            lock.lock()
+            tail.append(chunk)
+            if tail.count > Self.tailBytes { tail = Data(tail.suffix(Self.tailBytes)) }
+            dirty = true
+            let due = ContinuousClock.now - lastSent >= Self.interval
+            let text = due ? String(decoding: tail, as: UTF8.self) : nil
+            if due { lastSent = .now; dirty = false }
+            lock.unlock()
+            if let text { sink(text) }
+        }
+
+        func flush() {
+            lock.lock()
+            let text = dirty ? String(decoding: tail, as: UTF8.self) : nil
+            dirty = false
+            lock.unlock()
+            if let text { sink(text) }
+        }
     }
 
     // MARK: - Hermes-parity tools (Phase D)

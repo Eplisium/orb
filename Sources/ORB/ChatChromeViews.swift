@@ -505,53 +505,52 @@ extension View {
     }
 }
 
-/// Modal prompt for one risky tool call. Deny is the default action; Escape denies.
+/// Modal prompt for one risky tool call. Escape denies; plain Return does
+/// nothing (no button is the default action), so a Return meant for the
+/// composer can never approve. Approval needs a click or the deliberate ⌘Return
+/// (see `ApprovalSheetKeys`), and both approve buttons arm only after a short
+/// delay so a keystroke already in flight cannot land on them.
 struct ApprovalSheet: View {
     let request: ApprovalCoordinator.Request
     let waiting: Int
     let decide: (ApprovalCoordinator.Decision) -> Void
+    @State private var armed = false
 
     var body: some View {
         let p = ApprovalPresentation.make(toolName: request.toolName, server: request.server, summary: request.summary)
+        let details = ApprovalDetails.make(request)
+        let tint: Color = details.isHighRisk ? .red : ORBTheme.warning
         VStack(alignment: .leading, spacing: 14) {
             HStack(spacing: 10) {
-                Image(systemName: p.symbol).orbFont(size: 26).foregroundStyle(p.risk == .high ? .red : ORBTheme.warning)
+                Image(systemName: details.symbol).orbFont(size: 26).foregroundStyle(tint)
                     .accessibilityHidden(true)
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(p.title).font(ORBFont.headline)
-                    Label(p.riskWord, systemImage: p.risk == .high ? "exclamationmark.triangle.fill" : "exclamationmark.circle")
+                    Text(details.title).font(ORBFont.headline)
+                    Label(details.isHighRisk ? "High risk" : p.riskWord,
+                          systemImage: details.isHighRisk ? "exclamationmark.triangle.fill" : "exclamationmark.circle")
                         .font(ORBFont.caption.weight(.semibold))
-                        .foregroundStyle(p.risk == .high ? .red : ORBTheme.warning)
+                        .foregroundStyle(tint)
                 }
             }
             Text("The agent wants to use \(request.toolName).")
                 .font(ORBFont.footnote).foregroundStyle(.secondary)
-            if let primary = p.primary, let label = p.primaryLabel {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(label).font(ORBFont.caption.weight(.semibold)).foregroundStyle(.secondary)
-                    ScrollView {
-                        Text(primary)
+            ScrollView {
+                VStack(alignment: .leading, spacing: 10) {
+                    ForEach(Array(details.fields.enumerated()), id: \.offset) { _, field in
+                        ApprovalFieldView(field: field)
+                    }
+                    DisclosureGroup(details.fields.isEmpty ? "Arguments" : "All arguments") {
+                        Text(p.displaySummary)
                             .orbFont(size: 12, design: .monospaced)
                             .textSelection(.enabled)
                             .frame(maxWidth: .infinity, alignment: .leading)
                             .padding(8)
+                            .background(.orbSurface(0.06), in: RoundedRectangle(cornerRadius: 8))
                     }
-                    .frame(maxHeight: 160)
-                    .background(.orbSurface(0.06), in: RoundedRectangle(cornerRadius: 8))
+                    .font(ORBFont.caption)
                 }
             }
-            DisclosureGroup(p.primary == nil ? "Arguments" : "All arguments") {
-                ScrollView {
-                    Text(p.displaySummary)
-                        .orbFont(size: 12, design: .monospaced)
-                        .textSelection(.enabled)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(8)
-                }
-                .frame(maxHeight: 220)
-                .background(.orbSurface(0.06), in: RoundedRectangle(cornerRadius: 8))
-            }
-            .font(ORBFont.caption)
+            .frame(maxHeight: 360)
             if p.hiddenCharacters > 0 {
                 Label("\(p.hiddenCharacters) characters hidden — too long to display in full", systemImage: "eye.slash")
                     .font(ORBFont.caption.weight(.semibold))
@@ -561,19 +560,56 @@ struct ApprovalSheet: View {
                 Text("\(waiting) more waiting").font(ORBFont.caption).foregroundStyle(.secondary)
             }
             HStack {
+                Text("⌘↩ approves once · esc denies")
+                    .font(ORBFont.caption).foregroundStyle(.tertiary)
                 Spacer()
                 Button("Deny") { decide(.denied) }
-                    .keyboardShortcut(.cancelAction)
-                Button("Approve for this run") { decide(.approvedForSession) }
-                    .help("Allow this tool again without asking until the run ends")
+                    .keyboardShortcut(ApprovalSheetKeys.shortcut(for: .denied))
+                Button(details.sessionButtonTitle) { decide(.approvedForSession) }
+                    .help(details.sessionButtonHelp)
+                    .disabled(!armed)
                 Button("Approve once") { decide(.approved) }
-                    .keyboardShortcut(.defaultAction)
+                    .keyboardShortcut(ApprovalSheetKeys.shortcut(for: .approved))
+                    .help("Approve only this call (⌘↩)")
+                    .disabled(!armed)
             }
         }
         .padding(20)
-        .frame(width: 520)
+        .frame(width: 560)
         .interactiveDismissDisabled()
         .accessibilityElement(children: .contain)
+        .task(id: request.id) {
+            armed = false
+            try? await Task.sleep(for: ApprovalSheetKeys.armingDelay)
+            armed = true
+        }
+    }
+}
+
+/// One labelled argument in the approval sheet.
+private struct ApprovalFieldView: View {
+    let field: ApprovalDetails.Field
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(field.label).font(ORBFont.caption.weight(.semibold)).foregroundStyle(.secondary)
+            if field.isBlock {
+                ScrollView {
+                    Text(field.value)
+                        .orbFont(size: 12, design: .monospaced)
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(8)
+                }
+                .frame(maxHeight: 180)
+                .background(.orbSurface(0.06), in: RoundedRectangle(cornerRadius: 8))
+            } else {
+                Text(field.value)
+                    .orbFont(size: 12, design: .monospaced)
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+        }
     }
 }
 
